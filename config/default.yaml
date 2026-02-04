@@ -1,0 +1,19 @@
+# Minibot Default Configuration
+
+# Skills directory (relative to workdir). Also auto-detects ~/.claude/skills if present.
+skills_dir: skills
+
+# LLM configuration
+llm:
+  # Use environment variables: OPENAI_BASE_URL, OPENAI_API_KEY, MODEL_ID
+  base_url: ${OPENAI_BASE_URL}
+  api_key: ${OPENAI_API_KEY}
+  model: ${MODEL_ID:gpt-4.1-mini}
+  max_tokens: 8000
+
+# Tools configuration
+tools:
+  enabled:
+    - "*"  # Enable all tools
+  disabled: []
+  timeout: 60

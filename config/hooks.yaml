@@ -1,0 +1,33 @@
+# Hooks Configuration
+
+enabled: true
+hooks_dir: hooks
+
+# Hook definitions
+# Each hook has:
+#   - event: The event that triggers the hook
+#   - handler: Script path or module:function reference
+#   - timeout: Maximum execution time in seconds (default: 30)
+#   - enabled: Whether the hook is active (default: true)
+
+hooks:
+  # Example hooks (uncomment to enable):
+
+  # - event: pre_tool_call
+  #   handler: hooks/examples/security_check.py
+  #   timeout: 5
+  #   enabled: true
+
+  - event: pre_tool_call
+    handler: hooks/restrict_file_access.py
+    timeout: 5
+    enabled: true
+
+  # - event: post_tool_call
+  #   handler: hooks/examples/log_tool_calls.py
+  #   timeout: 5
+  #   enabled: true
+
+  # - event: session_start
+  #   handler: minibot.hooks.builtin:on_session_start
+  #   enabled: true

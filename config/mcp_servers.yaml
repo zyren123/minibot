@@ -1,0 +1,31 @@
+# MCP Servers Configuration
+
+enabled: true
+
+servers:
+  # Example: Context7 documentation server
+  - name: context7
+    transport: stdio
+    command: npx
+    args:
+      - -y
+      - "@upstash/context7-mcp"
+    env:
+      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}
+    enabled: true
+
+  # Example: Local file server
+  # - name: filesystem
+  #   transport: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@anthropic/mcp-server-filesystem"
+  #     - /path/to/allowed/directory
+  #   enabled: true
+
+  # Example: Remote SSE server
+  # - name: remote-api
+  #   transport: sse
+  #   url: https://api.example.com/mcp
+  #   enabled: false
