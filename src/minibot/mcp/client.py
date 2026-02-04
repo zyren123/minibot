@@ -80,7 +80,7 @@ class MCPClient:
         )
 
         # Send initialized notification
-        await self._transport.send({
+        await self._transport.notify({
             "method": "notifications/initialized",
         })
 

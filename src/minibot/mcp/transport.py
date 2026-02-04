@@ -27,6 +27,11 @@ class MCPTransport(ABC):
         """Send a message and wait for response."""
         pass
 
+    @abstractmethod
+    async def notify(self, message: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification (no response expected)."""
+        pass
+
     @property
     @abstractmethod
     def is_connected(self) -> bool:
@@ -124,6 +129,19 @@ class StdioTransport(MCPTransport):
             self._pending.pop(request_id, None)
             raise
 
+    async def notify(self, message: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification (no response expected)."""
+        if not self.is_connected:
+            raise RuntimeError("Transport not connected")
+
+        notification = {
+            "jsonrpc": "2.0",
+            **message,
+        }
+        data = json.dumps(notification) + "\n"
+        self._process.stdin.write(data.encode())
+        await self._process.stdin.drain()
+
     async def _read_loop(self) -> None:
         """Read responses from the server."""
         while self.is_connected:
@@ -199,3 +217,17 @@ class SSETransport(MCPTransport):
             raise RuntimeError(data["error"].get("message", "Unknown error"))
 
         return data.get("result", {})
+
+    async def notify(self, message: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification via HTTP POST."""
+        if not self.is_connected:
+            raise RuntimeError("Transport not connected")
+
+        response = await self._client.post(
+            "/",
+            json={
+                "jsonrpc": "2.0",
+                **message,
+            },
+        )
+        response.raise_for_status()

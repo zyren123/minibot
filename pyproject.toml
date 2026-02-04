@@ -1,7 +1,7 @@
 [project]
 name = "minibot"
 version = "0.1.0"
-description = "A modular Claude Code clone with MCP client and Hooks system"
+description = "A assistant for education purpose"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
     "pyyaml>=6.0",
     "httpx>=0.25.0",
     "rich>=13.7.0",
+    "prompt-toolkit>=3.0.0",
 ]
 
 [project.scripts]
