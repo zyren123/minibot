@@ -139,6 +139,10 @@ You have access to three layers of capabilities. Choose the most specific tool f
 2. **Specialized Subagents** (Delegation):
    {self.agent_registry.get_descriptions()}
    *Rule: Use the `Task` tool to delegate broad, ambiguous, or multi-step sub-problems to these agents.*
+   *Agent Selection Guidelines:*
+   - Use `explore` agent when user requests involve: exploring, analyzing, searching, reading, understanding, or discovering code/files
+   - Use `plan` agent when user requests involve: planning, designing, strategizing, or outlining implementation steps
+   - Use `code` agent when user requests involve: implementing, coding, fixing, modifying, or creating code/files
 
 3. **Standard & MCP Tools** (Atomic Actions):
    Standard file/shell tools plus: {mcp_section}
