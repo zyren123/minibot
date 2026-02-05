@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 MiniBot
+# MiniBot
 
 ### A Minimalist, Framework-Free AI Agent Implementation in Pure Python
 
@@ -18,6 +18,14 @@
 
 </div>
 </div>
+---
+<div style="display: flex; justify-content: center; align-items: flex-start; gap: 10px;">
+  <img style="height: 400px; width: auto;" alt="Claude Code Minibot" src="https://github.com/user-attachments/assets/c4c1cc8e-9c9a-44e0-ab15-2981fa921cea" />
+  <img style="height: 400px; width: auto;" alt="Paraglider Minibot" src="https://github.com/user-attachments/assets/7e221968-293b-4324-9a52-9e6ce26c4be9" />
+</div>
+<p align="center" style="margin-top: 15px; font-size: 1.2em; font-weight: bold; color: #555;">
+  最起码......我们都是机器人助手，不是吗？
+</p>
 
 ---
 
