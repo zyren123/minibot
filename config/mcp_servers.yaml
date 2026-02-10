@@ -12,6 +12,14 @@ servers:
       - "@upstash/context7-mcp"
     enabled: true
 
+  # DuckDuckGo search server (duckduckgo-mcp-server)
+  - name: duckduckgo
+    transport: stdio
+    command: uvx
+    args:
+      - duckduckgo-mcp-server
+    enabled: true
+
   # Example: Local file server
   # - name: filesystem
   #   transport: stdio
