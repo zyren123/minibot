@@ -176,7 +176,8 @@ servers:
 
 ## 🗺️ Roadmap
 
-- [ ] **长期记忆支持**: 原生支持图像理解 (Vision)
+- [x] **长期记忆支持**: 基于本地文件系统的持久化上下文记忆
+- [ ] **Vision**: 原生支持多模态图像理解
 - [ ] **Sandboxing**: 基于 Docker 的工具执行沙箱
 - [ ] **Web Interface**: 基于 FastAPI 的轻量级 API
 
