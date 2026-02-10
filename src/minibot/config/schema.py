@@ -52,6 +52,15 @@ class MCPServerConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Memory system configuration."""
+    enabled: bool = True
+    memory_dir: str = ".minibot/memory"
+    long_term_max_lines: int = 200
+    daily_lookback_days: int = 1
+
+
+@dataclass
 class MCPConfig:
     """MCP client configuration."""
     enabled: bool = True
@@ -67,6 +76,7 @@ class Config:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     hooks: HooksConfig = field(default_factory=HooksConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def __post_init__(self):
         if isinstance(self.workdir, str):

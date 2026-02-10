@@ -15,7 +15,10 @@ from .tools.builtin import (
     EditFileTool,
     TodoWriteTool,
     TodoManager,
+    MemoryReadTool,
+    MemoryWriteTool,
 )
+from .memory.manager import MemoryManager
 from .tools.meta import TaskTool, SkillTool
 from .skills.loader import SkillLoader
 from .subagents.registry import AgentRegistry
@@ -69,6 +72,12 @@ class Agent:
 
         self.mcp_manager = MCPManager(self.config.mcp, self.workdir)
 
+        self.memory_manager = (
+            MemoryManager(self.config.memory, self.workdir)
+            if self.config.memory.enabled
+            else None
+        )
+
         self.subagent_executor = SubagentExecutor(
             client=self.client,
             tool_registry=self.tool_registry,
@@ -96,6 +105,10 @@ class Agent:
             TaskTool(self.agent_registry, self.subagent_executor)
         )
 
+        if self.memory_manager is not None:
+            self.tool_registry.register(MemoryReadTool(self.memory_manager))
+            self.tool_registry.register(MemoryWriteTool(self.memory_manager))
+
     async def connect_mcp_servers(self) -> dict[str, Exception | None]:
         """Connect to all configured MCP servers."""
         errors = await self.mcp_manager.connect_all()
@@ -112,7 +125,7 @@ class Agent:
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt following Professional ReAct standards."""
-        
+
         mcp_section = ""
         if self.mcp_manager.server_count > 0:
             server_list = ', '.join(self.mcp_manager.list_servers())
@@ -121,7 +134,21 @@ class Agent:
 Connected Servers: {server_list}
 Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them to interact with external services or context."""
 
-        return f"""You are an advanced autonomous Coding Agent operating in `{self.workdir}`.
+        memory_section = ""
+        if self.memory_manager is not None:
+            memory_content = self.memory_manager.get_context_for_prompt()
+            if memory_content:
+                memory_section = f"""
+
+## Memory (Auto-loaded)
+{memory_content}
+
+Use `memory_write` tool to update memories as you work:
+- **long_term**: Save stable patterns, user preferences, key decisions, project conventions
+- **daily**: Save today's progress, current context, continuations for next session
+Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines). Daily memory is for ephemeral context."""
+
+        return f"""You are an advanced autonomous Coding Agent operating in `{self.workdir}`. your name is Minibot.
 Your goal is to solve complex software engineering tasks by following a strict ReAct (Reason -> Act -> Observe) loop.
 
 ## Environment Context
@@ -162,7 +189,7 @@ You must not act without reasoning. For every step, follow this process:
 - **Progress Tracking**: Update your `TodoWrite` list as you complete steps.
 - **Communication**: When the task is complete, provide a concise summary of changes made.
 - **Fail Gracefully**: If a path is blocked, stop and ask the user or try an alternative strategy. Do not loop endlessly.
-
+{memory_section}
 You are now live. Await instructions and begin the ReAct loop."""
 
     async def _execute_tool_with_hooks(

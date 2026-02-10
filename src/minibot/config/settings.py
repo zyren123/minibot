@@ -14,6 +14,7 @@ from .schema import (
     MCPConfig,
     MCPServerConfig,
     HookDefinition,
+    MemoryConfig,
 )
 
 _config: Config | None = None
@@ -99,6 +100,18 @@ def _parse_mcp_config(data: dict | None) -> MCPConfig:
     )
 
 
+def _parse_memory_config(data: dict | None) -> MemoryConfig:
+    """Parse memory configuration."""
+    if data is None:
+        data = {}
+    return MemoryConfig(
+        enabled=data.get("enabled", True),
+        memory_dir=data.get("memory_dir", ".minibot/memory"),
+        long_term_max_lines=data.get("long_term_max_lines", 200),
+        daily_lookback_days=data.get("daily_lookback_days", 1),
+    )
+
+
 def load_config(
     config_dir: Path | None = None,
     workdir: Path | None = None,
@@ -131,6 +144,7 @@ def load_config(
         ),
         hooks=_parse_hooks_config(hooks_config, workdir),
         mcp=_parse_mcp_config(mcp_config),
+        memory=_parse_memory_config(default_config.get("memory")),
     )
 
     return _config

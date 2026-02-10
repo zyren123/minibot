@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
-import textwrap
+import unicodedata
 from dataclasses import dataclass
 
 
@@ -29,6 +30,8 @@ FG = {
     "bright_cyan": "96",
     "bright_white": "97",
 }
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def is_tty() -> bool:
@@ -72,9 +75,75 @@ def clear_screen() -> None:
 
 def term_width(default: int = 100) -> int:
     try:
-        return shutil.get_terminal_size((default, 24)).columns
+        columns = shutil.get_terminal_size((default, 24)).columns
     except Exception:
-        return default
+        columns = default
+    # Avoid printing into the last column to prevent terminal auto-wrap artifacts.
+    return max(1, columns - 1)
+
+
+def _char_width(ch: str) -> int:
+    if ch == "\0":
+        return 0
+    code = ord(ch)
+    if code < 32 or code == 127:
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch) in {"Cf"}:
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+
+
+def _cell_len(text: str) -> int:
+    plain = _ANSI_RE.sub("", text)
+    return sum(_char_width(ch) for ch in plain)
+
+
+def _iter_ansi(text: str) -> list[tuple[str, bool]]:
+    parts: list[tuple[str, bool]] = []
+    last = 0
+    for match in _ANSI_RE.finditer(text):
+        if match.start() > last:
+            parts.append((text[last : match.start()], False))
+        parts.append((match.group(0), True))
+        last = match.end()
+    if last < len(text):
+        parts.append((text[last:], False))
+    return parts
+
+
+def _wrap_line(text: str, width: int) -> list[str]:
+    if text == "":
+        return [""]
+    if width <= 0:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    current_w = 0
+    for seg, is_ansi in _iter_ansi(text):
+        if is_ansi:
+            current += seg
+            continue
+        for ch in seg:
+            if ch == "\t":
+                tab = 4 - (current_w % 4)
+                if current_w + tab > width and current_w > 0:
+                    lines.append(current)
+                    current = ""
+                    current_w = 0
+                current += " " * tab
+                current_w += tab
+                continue
+            ch_w = _char_width(ch)
+            if current_w + ch_w > width and current_w > 0:
+                lines.append(current)
+                current = ""
+                current_w = 0
+            current += ch
+            current_w += ch_w
+    lines.append(current)
+    return lines
 
 
 @dataclass(frozen=True)
@@ -91,7 +160,10 @@ def panel(title: str, body: str, *, width: int | None = None, pstyle: PanelStyle
     - Keeps existing line breaks.
     - Wraps long lines to fit the box.
     """
-    w = max(40, min(width or term_width(), 140))
+    term = term_width()
+    w = min(width or term, 140, term)
+    min_w = 10 if term >= 10 else term
+    w = max(min_w, w)
     inner_w = w - 4  # padding + borders
     title_txt = f" {title.strip()} " if title.strip() else ""
 
@@ -109,16 +181,13 @@ def panel(title: str, body: str, *, width: int | None = None, pstyle: PanelStyle
 
     lines: list[str] = []
     for raw_line in (body or "").splitlines() or [""]:
-        wrapped = textwrap.wrap(raw_line, width=inner_w, replace_whitespace=False, drop_whitespace=False)
-        if not wrapped:
-            wrapped = [""]
+        wrapped = _wrap_line(raw_line, inner_w)
         for seg in wrapped:
             lines.append(seg)
 
     out_lines = [style(top, fg=pstyle.border_fg)]
     for line in lines:
-        padded = line + (" " * max(0, inner_w - len(line)))
+        padded = line + (" " * max(0, inner_w - _cell_len(line)))
         out_lines.append(style("│", fg=pstyle.border_fg) + f" {padded} " + style("│", fg=pstyle.border_fg))
     out_lines.append(style(bottom, fg=pstyle.border_fg))
     return "\n".join(out_lines)
-

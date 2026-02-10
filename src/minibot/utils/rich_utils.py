@@ -31,10 +31,14 @@ _CONSOLE: "Console | None" = None
 
 def get_console() -> "Console":
     global _CONSOLE
-    if _CONSOLE is not None:
+    from .terminal import term_width
+
+    desired_width = term_width()
+    if _CONSOLE is not None and _CONSOLE.width == desired_width:
         return _CONSOLE
     from rich.console import Console
 
-    _CONSOLE = Console(highlight=False, soft_wrap=True, emoji=False)
+    # Avoid soft_wrap=True here; it disables wrapping/cropping and can cause
+    # Rich panels/markdown to drop content on long lines.
+    _CONSOLE = Console(highlight=False, soft_wrap=False, emoji=False, width=desired_width)
     return _CONSOLE
-
