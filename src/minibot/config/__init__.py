@@ -1,6 +1,6 @@
 """Configuration management for Minibot."""
 
-from .schema import Config, LLMConfig, ToolsConfig, HooksConfig, MCPConfig
+from .schema import Config, LLMConfig, ToolsConfig, HooksConfig, MCPConfig, TeamsConfig
 from .settings import load_config, get_config
 
 __all__ = [
@@ -9,6 +9,7 @@ __all__ = [
     "ToolsConfig",
     "HooksConfig",
     "MCPConfig",
+    "TeamsConfig",
     "load_config",
     "get_config",
 ]

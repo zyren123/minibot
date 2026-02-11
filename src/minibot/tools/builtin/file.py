@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..base import BaseTool
+from ...teams.context import get_team_execution_context
 
 
 def safe_path(workdir: Path, path: str) -> Path:
@@ -86,6 +87,22 @@ class WriteFileTool(BaseTool):
         try:
             fp = safe_path(self.workdir, path)
             fp.parent.mkdir(parents=True, exist_ok=True)
+            team_ctx = get_team_execution_context()
+            if (
+                team_ctx is not None
+                and team_ctx.role == "teammate"
+                and team_ctx.runtime is not None
+                and team_ctx.member_id
+            ):
+                ok, owner = await team_ctx.runtime.acquire_file_lock(
+                    member_id=team_ctx.member_id,
+                    path=str(fp),
+                )
+                if not ok:
+                    return (
+                        f"Error: File lock conflict for '{path}'. "
+                        f"Current owner: {owner}"
+                    )
 
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: fp.write_text(content))
@@ -128,6 +145,22 @@ class EditFileTool(BaseTool):
         """Replace text in a file."""
         try:
             fp = safe_path(self.workdir, path)
+            team_ctx = get_team_execution_context()
+            if (
+                team_ctx is not None
+                and team_ctx.role == "teammate"
+                and team_ctx.runtime is not None
+                and team_ctx.member_id
+            ):
+                ok, owner = await team_ctx.runtime.acquire_file_lock(
+                    member_id=team_ctx.member_id,
+                    path=str(fp),
+                )
+                if not ok:
+                    return (
+                        f"Error: File lock conflict for '{path}'. "
+                        f"Current owner: {owner}"
+                    )
 
             loop = asyncio.get_event_loop()
             content = await loop.run_in_executor(None, fp.read_text)

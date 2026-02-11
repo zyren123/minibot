@@ -68,6 +68,18 @@ class MCPConfig:
 
 
 @dataclass
+class TeamsConfig:
+    """Agent teams configuration."""
+
+    enabled: bool = True
+    max_members: int = 6
+    default_members: int = 3
+    log_dir: str = ".minibot/teams"
+    wait_timeout_sec: int = 30
+    quiet_teammates: bool = True
+
+
+@dataclass
 class Config:
     """Main configuration."""
     workdir: Path = field(default_factory=Path.cwd)
@@ -77,6 +89,7 @@ class Config:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    teams: TeamsConfig = field(default_factory=TeamsConfig)
 
     def __post_init__(self):
         if isinstance(self.workdir, str):

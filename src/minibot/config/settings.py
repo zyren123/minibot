@@ -15,6 +15,7 @@ from .schema import (
     MCPServerConfig,
     HookDefinition,
     MemoryConfig,
+    TeamsConfig,
 )
 
 _config: Config | None = None
@@ -112,6 +113,20 @@ def _parse_memory_config(data: dict | None) -> MemoryConfig:
     )
 
 
+def _parse_teams_config(data: dict | None) -> TeamsConfig:
+    """Parse teams configuration."""
+    if data is None:
+        data = {}
+    return TeamsConfig(
+        enabled=data.get("enabled", True),
+        max_members=data.get("max_members", 6),
+        default_members=data.get("default_members", 3),
+        log_dir=data.get("log_dir", ".minibot/teams"),
+        wait_timeout_sec=data.get("wait_timeout_sec", 30),
+        quiet_teammates=data.get("quiet_teammates", True),
+    )
+
+
 def load_config(
     config_dir: Path | None = None,
     workdir: Path | None = None,
@@ -145,6 +160,7 @@ def load_config(
         hooks=_parse_hooks_config(hooks_config, workdir),
         mcp=_parse_mcp_config(mcp_config),
         memory=_parse_memory_config(default_config.get("memory")),
+        teams=_parse_teams_config(default_config.get("teams")),
     )
 
     return _config

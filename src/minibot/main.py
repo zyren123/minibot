@@ -68,11 +68,18 @@ def _print_banner(agent: Agent) -> None:
     lines = [
         f"workdir: {info['workdir']}",
         f"model: {info['model']}  session: {info['session_id']}",
+        f"role: {info.get('role', 'solo')}",
         f"skills: {', '.join(info['skills']) or 'none'}",
         f"agent types: {', '.join(info['agent_types'])}",
     ]
     if info.get("mcp_servers"):
         lines.append(f"mcp: {', '.join(info['mcp_servers'])}  tools: {info['mcp_tools']}")
+    team = info.get("team", {})
+    if isinstance(team, dict) and team.get("active"):
+        lines.append(
+            f"team: {team.get('name')} ({team.get('team_id')}) "
+            f"members={team.get('member_count')} running={team.get('running_members')}"
+        )
     lines.append("")
     lines.append("Tips: /help  /paste  /reset  /clear  exit")
     print_panel("MiniBot", "\n".join(lines))

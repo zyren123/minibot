@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..base import BaseTool
+from ...teams.context import get_team_execution_context
 
 
 class BashTool(BaseTool):
@@ -41,6 +42,22 @@ class BashTool(BaseTool):
                 return f"Error: Dangerous command pattern detected: {pattern}"
 
         try:
+            team_ctx = get_team_execution_context()
+            if (
+                team_ctx is not None
+                and team_ctx.role == "teammate"
+                and team_ctx.runtime is not None
+                and team_ctx.member_id
+            ):
+                ok, owner = await team_ctx.runtime.acquire_workspace_lock(
+                    member_id=team_ctx.member_id
+                )
+                if not ok:
+                    return (
+                        "Error: Workspace lock conflict for bash execution. "
+                        f"Current owner: {owner}"
+                    )
+
             # Run in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(

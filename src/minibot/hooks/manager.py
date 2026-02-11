@@ -123,3 +123,37 @@ class HookManager:
         )
 
         return await self.trigger(HookEvent.SESSION_END, context)
+
+    async def trigger_teammate_idle(
+        self,
+        *,
+        member_id: str,
+        detail: str = "",
+    ) -> list[HookResult]:
+        """Trigger teammate idle hooks."""
+        from .events import TeamEventContext
+
+        context = TeamEventContext(
+            event=HookEvent.TEAMMATE_IDLE,
+            workdir=str(self.workdir),
+            team_member_id=member_id,
+            detail=detail,
+        )
+        return await self.trigger(HookEvent.TEAMMATE_IDLE, context)
+
+    async def trigger_task_completed(
+        self,
+        *,
+        task_id: str,
+        detail: str = "",
+    ) -> list[HookResult]:
+        """Trigger task completed hooks."""
+        from .events import TeamEventContext
+
+        context = TeamEventContext(
+            event=HookEvent.TASK_COMPLETED,
+            workdir=str(self.workdir),
+            task_id=task_id,
+            detail=detail,
+        )
+        return await self.trigger(HookEvent.TASK_COMPLETED, context)

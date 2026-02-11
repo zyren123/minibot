@@ -1,12 +1,12 @@
 """Subagent executor."""
 
-import json
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from ..core.client import LLMClient
+from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
 from ..hooks.manager import HookManager
 from .registry import AgentRegistry
@@ -41,7 +41,7 @@ class SubagentExecutor:
             return [
                 t.to_dict()
                 for t in self.tool_registry.get_all()
-                if t.name not in ("Task", "Skill")
+                if t.name not in ("Task", "Skill", "TeamCreate", "TeamMembers", "TeamTask", "TeamMessage", "TeamBroadcast", "TeamWait", "TeamShutdown")
             ]
 
         return [
@@ -118,7 +118,7 @@ Complete the task and return a clear, concise summary."""
                     status.tool_count = tool_count
                     status.tick()
 
-                response = self.client.create_message(
+                response = await self.client.create_message_async(
                     messages=sub_messages,
                     system=sub_system,
                     tools=sub_tools,
@@ -142,12 +142,22 @@ Complete the task and return a clear, concise summary."""
                 for tc in tool_calls:
                     tool_count += 1
                     tc_name = tc.function.name
-                    tc_input = json.loads(tc.function.arguments or "{}")
+                    tc_input, parse_note = parse_tool_arguments(tc.function.arguments)
                     if status is not None:
                         status.phase = "tool"
                         status.current_tool = tc_name
                         status.tool_count = tool_count
                         status.tick()
+                    if tc_input is None:
+                        output = (
+                            f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
+                            f"raw={tc.function.arguments!r}"
+                        )[:50000]
+                        results.append({"tool_call_id": tc.id, "output": output})
+                        if status is None:
+                            _fallback_status_line()
+                        continue
+
                     blocked, reason = await self.hook_manager.trigger_pre_tool_call(
                         tc_name, tc_input
                     )
@@ -158,6 +168,8 @@ Complete the task and return a clear, concise summary."""
                         await self.hook_manager.trigger_post_tool_call(
                             tc_name, tc_input, output
                         )
+                    if parse_note:
+                        output = f"Warning: {parse_note}\n{output}"
                     results.append({"tool_call_id": tc.id, "output": output})
 
                     if status is None:

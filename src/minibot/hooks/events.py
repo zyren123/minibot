@@ -23,6 +23,10 @@ class HookEvent(Enum):
     # Skill loading
     SKILL_LOAD = "skill_load"
 
+    # Team lifecycle
+    TEAMMATE_IDLE = "teammate_idle"
+    TASK_COMPLETED = "task_completed"
+
 
 @dataclass
 class HookContext:
@@ -58,6 +62,15 @@ class SkillLoadContext(HookContext):
 
     skill_name: str = ""
     skill_content: str | None = None
+
+
+@dataclass
+class TeamEventContext(HookContext):
+    """Context for team-related hooks."""
+
+    team_member_id: str | None = None
+    task_id: str | None = None
+    detail: str | None = None
 
 
 @dataclass

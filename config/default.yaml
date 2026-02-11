@@ -17,3 +17,12 @@ tools:
     - "*"  # Enable all tools
   disabled: []
   timeout: 60
+
+# Agent teams configuration
+teams:
+  enabled: true
+  max_members: 6
+  default_members: 3
+  log_dir: .minibot/teams
+  wait_timeout_sec: 30
+  quiet_teammates: true

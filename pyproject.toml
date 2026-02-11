@@ -5,7 +5,7 @@ description = "A assistant for education purpose"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "openai>=1.0.0",
+    "openai>=2.16.0,<3",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     "httpx>=0.25.0",

@@ -174,9 +174,49 @@ servers:
 
 ---
 
+## 👥 Agent Teams (MVP)
+
+MiniBot 现已支持 **in-process Agent Teams**（会话内团队编排）：
+
+- Lead 可通过工具自主决定是否创建团队、创建多少成员（默认 3，最大 6）
+- Teammate 拥有完整工作能力（读写文件、bash、MCP、memory 等），但**不能再创建成员**（禁用 `Task`/`TeamCreate`/`TeamShutdown`）
+- 任意成员可点对点通信（`TeamMessage`）或全队广播（`TeamBroadcast`）
+- 提供轻量共享任务板（`TeamTask`：create/list/assign/claim/complete）
+- 提供 `TeamWait` 用于 Lead 等待并汇总队友事件
+
+### 可用 Team 工具
+
+- `TeamCreate`
+- `TeamMembers`
+- `TeamTask`
+- `TeamMessage`
+- `TeamBroadcast`
+- `TeamWait` (lead only)
+- `TeamShutdown` (lead only)
+
+### 当前限制
+
+- 仅支持 **单会话内** 团队，不支持跨重启恢复
+- 不支持 tmux/iTerm2 分屏模式（MVP 仅 in-process）
+- 不支持嵌套团队（teammate 不可再派生代理）
+
+### 相关配置
+
+`config/default.yaml`:
+
+```yaml
+teams:
+  quiet_teammates: true
+```
+
+开启后 teammate 不会向终端输出 Thinking/Running 状态行与常规内容，避免并发输出污染主终端。
+
+---
+
 ## 🗺️ Roadmap
 
 - [x] **长期记忆支持**: 基于本地文件系统的持久化上下文记忆
+- [x] **Agent Teams (MVP)**: 会话内并发团队、消息总线、任务板、锁冲突保护
 - [ ] **Vision**: 原生支持多模态图像理解
 - [ ] **Sandboxing**: 基于 Docker 的工具执行沙箱
 - [ ] **Web Interface**: 基于 FastAPI 的轻量级 API

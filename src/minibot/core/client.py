@@ -3,8 +3,8 @@
 import os
 from typing import Any
 
-from openai import OpenAI
 from dotenv import load_dotenv
+from openai import AsyncOpenAI, OpenAI
 
 load_dotenv(override=True)
 
@@ -22,10 +22,39 @@ class LLMClient:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model or os.getenv("MODEL_ID", "gpt-4.1-mini")
 
-        self._client = OpenAI(
+        self._sync_client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
         )
+        self._async_client = AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+        )
+        self._closed = False
+
+    @staticmethod
+    def _build_kwargs(
+        *,
+        model: str,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        """Build request kwargs for chat completions."""
+        chat_messages = []
+        if system:
+            chat_messages.append({"role": "system", "content": system})
+        chat_messages.extend(messages)
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": chat_messages,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        return kwargs
 
     def create_message(
         self,
@@ -34,19 +63,38 @@ class LLMClient:
         tools: list[dict] | None = None,
         max_tokens: int = 8000,
     ) -> Any:
-        """Create a message with the LLM."""
-        # 构建消息格式 (OpenAI chat API 需要)
-        chat_messages = []
-        if system:
-            chat_messages.append({"role": "system", "content": system})
-        chat_messages.extend(messages)
+        """Create a message with the LLM (deprecated sync compatibility path)."""
+        kwargs = self._build_kwargs(
+            model=self.model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        return self._sync_client.chat.completions.create(**kwargs)
 
-        kwargs = {
-            "model": self.model,
-            "messages": chat_messages,
-            "max_tokens": max_tokens,
-        }
-        if tools:
-            kwargs["tools"] = tools
+    async def create_message_async(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None = None,
+        max_tokens: int = 8000,
+    ) -> Any:
+        """Create a message with the async OpenAI client."""
+        kwargs = self._build_kwargs(
+            model=self.model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        return await self._async_client.chat.completions.create(**kwargs)
 
-        return self._client.chat.completions.create(**kwargs)
+    async def close(self) -> None:
+        """Close underlying async client resources."""
+        if self._closed:
+            return
+        if hasattr(self._sync_client, "close"):
+            self._sync_client.close()
+        await self._async_client.close()
+        self._closed = True
