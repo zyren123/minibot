@@ -58,6 +58,34 @@ class MemoryManager:
         self.long_term_file.write_text(content, encoding="utf-8")
         return f"Long-term memory updated ({len(content)} chars)."
 
+    def append_long_term(self, content: str) -> str:
+        """Append content to long-term memory."""
+        existing = (
+            self.long_term_file.read_text(encoding="utf-8")
+            if self.long_term_file.exists()
+            else ""
+        )
+        separator = "\n" if existing and not existing.endswith("\n") else ""
+        self.long_term_file.write_text(existing + separator + content, encoding="utf-8")
+        return f"Appended to long-term memory ({len(content)} chars)."
+
+    def _replace_text(self, existing: str, old: str, new: str) -> tuple[str, int]:
+        total = existing.count(old)
+        if total == 0:
+            return existing, 0
+        return existing.replace(old, new), total
+
+    def replace_long_term(self, old: str, new: str) -> str:
+        """Replace text in long-term memory."""
+        if not self.long_term_file.exists():
+            return "Long-term memory is empty; no replacements."
+        existing = self.long_term_file.read_text(encoding="utf-8")
+        updated, replaced = self._replace_text(existing, old, new)
+        if replaced == 0:
+            return "No matches in long-term memory."
+        self.long_term_file.write_text(updated, encoding="utf-8")
+        return f"Replaced {replaced} occurrence(s) in long-term memory."
+
     # --- Daily memory ---
 
     def read_daily(self, date: str | None = None) -> str:
@@ -82,6 +110,25 @@ class MemoryManager:
         path.write_text(existing + separator + content, encoding="utf-8")
         date_label = date or self._today_str()
         return f"Appended to daily memory for {date_label}."
+
+    def replace_daily(
+        self,
+        old: str,
+        new: str,
+        date: str | None = None,
+    ) -> str:
+        """Replace text in daily memory."""
+        path = self._daily_path(date)
+        if not path.exists():
+            date_label = date or self._today_str()
+            return f"Daily memory for {date_label} is empty; no replacements."
+        existing = path.read_text(encoding="utf-8")
+        updated, replaced = self._replace_text(existing, old, new)
+        if replaced == 0:
+            return "No matches in daily memory."
+        path.write_text(updated, encoding="utf-8")
+        date_label = date or self._today_str()
+        return f"Replaced {replaced} occurrence(s) in daily memory for {date_label}."
 
     # --- Context for system prompt ---
 
