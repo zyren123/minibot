@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
+from contextlib import suppress
 from datetime import datetime
 import uuid
 from typing import Any, Literal
@@ -49,6 +51,10 @@ from .utils.output import (
 )
 
 AgentRole = Literal["solo", "lead", "teammate"]
+
+
+class UserInterruptedError(Exception):
+    """Raised when the user interrupts the active model generation."""
 
 
 def _format_tool_args(args: dict[str, Any], max_len: int = 80) -> str:
@@ -336,7 +342,68 @@ You are now live. Await instructions and begin the ReAct loop."""
         await self.hook_manager.trigger_post_tool_call(name, args, result)
         return result
 
-    async def run_loop(self, messages: list[dict]) -> list[dict]:
+    @staticmethod
+    def _drain_interrupt_queue(interrupt_queue: "asyncio.Queue[None] | None") -> None:
+        if interrupt_queue is None:
+            return
+        while True:
+            try:
+                interrupt_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+    async def _create_message_with_interrupt(
+        self,
+        *,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None,
+        max_tokens: int,
+        interrupt_queue: "asyncio.Queue[None] | None" = None,
+    ) -> Any:
+        if interrupt_queue is None:
+            return await self.client.create_message_async(
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+
+        self._drain_interrupt_queue(interrupt_queue)
+        llm_task = asyncio.create_task(
+            self.client.create_message_async(
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+        )
+        interrupt_task = asyncio.create_task(interrupt_queue.get())
+
+        done, _pending = await asyncio.wait(
+            {llm_task, interrupt_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if llm_task in done:
+            interrupt_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await interrupt_task
+            return await llm_task
+
+        llm_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await llm_task
+        with suppress(Exception):
+            interrupt_task.result()
+        raise UserInterruptedError("Interrupted by ESC")
+
+    async def run_loop(
+        self,
+        messages: list[dict],
+        *,
+        interrupt_queue: "asyncio.Queue[None] | None" = None,
+    ) -> list[dict]:
         """Run the main agent loop."""
         while True:
             status_ctx = (
@@ -345,11 +412,12 @@ You are now live. Await instructions and begin the ReAct loop."""
                 else nullcontext()
             )
             with status_ctx:
-                response = await self.client.create_message_async(
+                response = await self._create_message_with_interrupt(
                     messages=messages,
                     system=self.system_prompt,
                     tools=self.tool_registry.get_definitions(),
                     max_tokens=self.config.llm.max_tokens,
+                    interrupt_queue=interrupt_queue,
                 )
 
             choice = response.choices[0]

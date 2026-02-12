@@ -5,7 +5,8 @@ import atexit
 from pathlib import Path
 
 from .config import load_config
-from .agent import Agent
+from .agent import Agent, UserInterruptedError
+from .utils.esc_interrupt import EscInterruptMonitor
 from .utils.output import clear_screen, print_panel, print_system, prompt_input, prompt_input_markup
 from .utils.rich_utils import rich_enabled, get_console
 from .utils.prompt_toolkit import SlashCommand, PromptToolkitInput, prompt_toolkit_enabled
@@ -82,7 +83,7 @@ def _print_banner(agent: Agent) -> None:
             f"members={team.get('member_count')} running={team.get('running_members')}"
         )
     lines.append("")
-    lines.append("Tips: /help  /paste  /reset  /clear  exit")
+    lines.append("Tips: /help  /paste  /reset  /clear  exit  (ESC: interrupt generation)")
     print_panel("MiniBot", "\n".join(lines))
 
 
@@ -166,6 +167,7 @@ async def repl(agent: Agent) -> None:
                     else:
                         msg = "\n".join(f"{k:<7} {v}" for k, v in SLASH_COMMANDS.items() if k != "/quit")
                         print_panel("Commands", msg)
+                    print_system("Tip: press ESC while model is generating to interrupt.")
                     continue
                 if cmd == "/info":
                     _print_banner(agent)
@@ -190,7 +192,11 @@ async def repl(agent: Agent) -> None:
             history.append({"role": "user", "content": user_input})
 
             try:
-                await agent.run_loop(history)
+                async with EscInterruptMonitor() as esc_monitor:
+                    await agent.run_loop(history, interrupt_queue=esc_monitor.queue)
+            except UserInterruptedError:
+                print_system("Interrupted (ESC).")
+                history.append({"role": "assistant", "content": "[Generation interrupted by user via ESC]"})
             except Exception as e:
                 print_system(f"Error: {e}")
 
