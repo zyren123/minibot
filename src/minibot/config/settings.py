@@ -117,6 +117,25 @@ def _resolve_path_value(value: str | Path, base_dir: Path) -> Path:
     return (base_dir / path).resolve()
 
 
+def _resolve_config_path(
+    *,
+    key: str,
+    value: Any,
+    base_dir: Path,
+) -> Path:
+    """Resolve a configured path, rejecting unset placeholders."""
+    if value is None:
+        raise ValueError(
+            f"Configuration value '{key}' resolved to None. "
+            "Set the referenced environment variable or provide a concrete path."
+        )
+    if not isinstance(value, (str, Path)):
+        raise TypeError(
+            f"Configuration value '{key}' must be a string or path, got {type(value).__name__}."
+        )
+    return _resolve_path_value(value, base_dir)
+
+
 def _load_env_files(app_home: Path, project_root: Path) -> dict[str, str]:
     """Load .env defaults in order: global -> project."""
     merged: dict[str, str] = {}
@@ -136,7 +155,11 @@ def _bootstrap_global_config(
 ) -> None:
     """Create global config files when missing, using project files as seed."""
     global_config_dir = (app_home / "config").resolve()
-    global_config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        global_config_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Read-only app home should not block loading project-local config.
+        return
 
     files: list[tuple[str, str]] = [
         ("default.yaml", _DEFAULT_CONFIG_TEMPLATE),
@@ -149,10 +172,14 @@ def _bootstrap_global_config(
         if global_file.exists():
             continue
         project_file = project_config_dir / filename
-        if project_file.exists():
-            shutil.copy2(project_file, global_file)
+        try:
+            if project_file.exists():
+                shutil.copy2(project_file, global_file)
+                continue
+            global_file.write_text(template.rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            # Best-effort bootstrap: continue loading with whatever config is readable.
             continue
-        global_file.write_text(template.rstrip() + "\n", encoding="utf-8")
 
 
 def _pick_path_value(
@@ -164,7 +191,7 @@ def _pick_path_value(
     project_base_dir: Path,
     default_base_dir: Path,
     default: str,
-) -> tuple[str, Path]:
+) -> tuple[Any, Path]:
     """Pick path config value with source-aware base dir."""
     if key in project_data:
         return project_data[key], project_base_dir
@@ -242,8 +269,12 @@ def _parse_memory_config(data: dict | None, app_home: Path) -> MemoryConfig:
     """Parse memory configuration."""
     if data is None:
         data = {}
-    raw_memory_dir = str(data.get("memory_dir", "memory"))
-    resolved_memory_dir = _resolve_path_value(raw_memory_dir, app_home)
+    raw_memory_dir = data.get("memory_dir", "memory")
+    resolved_memory_dir = _resolve_config_path(
+        key="memory.memory_dir",
+        value=raw_memory_dir,
+        base_dir=app_home,
+    )
     return MemoryConfig(
         enabled=data.get("enabled", True),
         memory_dir=str(resolved_memory_dir),
@@ -305,7 +336,11 @@ def load_config(
         default_base_dir=project_root,
         default="skills",
     )
-    skills_dir = _resolve_path_value(str(raw_skills_dir), skills_base_dir)
+    skills_dir = _resolve_config_path(
+        key="skills_dir",
+        value=raw_skills_dir,
+        base_dir=skills_base_dir,
+    )
 
     raw_hooks_dir, hooks_base_dir = _pick_path_value(
         key="hooks_dir",
@@ -316,7 +351,11 @@ def load_config(
         default_base_dir=project_root,
         default="hooks",
     )
-    hooks_dir = _resolve_path_value(str(raw_hooks_dir), hooks_base_dir)
+    hooks_dir = _resolve_config_path(
+        key="hooks_dir",
+        value=raw_hooks_dir,
+        base_dir=hooks_base_dir,
+    )
 
     _config = Config(
         workdir=workdir,

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.minibot.config.settings import load_config
 
 
@@ -169,3 +171,69 @@ def test_bootstrap_global_config_writes_templates_when_project_config_absent(tmp
     assert (app_home / "config" / "mcp_servers.yaml").exists()
     assert config.tools.timeout == 60
     assert config.memory.memory_dir == str((app_home / "memory").resolve())
+
+
+def test_load_config_continues_when_global_bootstrap_is_not_writable(tmp_path, monkeypatch):
+    app_home = tmp_path / "app-home"
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True)
+    _write(
+        project_root / "config" / "default.yaml",
+        """
+llm:
+  model: project-only-model
+""".strip(),
+    )
+    _write(project_root / "config" / "hooks.yaml", "enabled: false\nhooks: []\n")
+    _write(project_root / "config" / "mcp_servers.yaml", "enabled: false\nservers: []\n")
+
+    global_config_dir = (app_home / "config").resolve()
+    original_mkdir = Path.mkdir
+
+    def _readonly_mkdir(self, *args, **kwargs):
+        if self.resolve() == global_config_dir:
+            raise PermissionError("read-only app home")
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", _readonly_mkdir)
+
+    config = load_config(
+        workdir=project_root,
+        app_home=app_home,
+        project_root=project_root,
+    )
+
+    assert config.llm.model == "project-only-model"
+    assert config.hooks.enabled is False
+    assert config.mcp.enabled is False
+
+
+@pytest.mark.parametrize(
+    ("target_file", "content", "missing_env", "expected_key"),
+    [
+        ("default.yaml", "skills_dir: ${SKILLS_DIR}\n", "SKILLS_DIR", "skills_dir"),
+        ("hooks.yaml", "hooks_dir: ${HOOKS_DIR}\nenabled: true\nhooks: []\n", "HOOKS_DIR", "hooks_dir"),
+        ("default.yaml", "memory:\n  memory_dir: ${MEMORY_DIR}\n", "MEMORY_DIR", "memory.memory_dir"),
+    ],
+)
+def test_load_config_rejects_unset_env_path_placeholders(
+    tmp_path,
+    monkeypatch,
+    target_file,
+    content,
+    missing_env,
+    expected_key,
+):
+    app_home = tmp_path / "app-home"
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True)
+    _write(project_root / "config" / target_file, content)
+
+    monkeypatch.delenv(missing_env, raising=False)
+
+    with pytest.raises(ValueError, match=expected_key):
+        load_config(
+            workdir=project_root,
+            app_home=app_home,
+            project_root=project_root,
+        )
