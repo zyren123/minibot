@@ -1,5 +1,6 @@
 """Memory manager for persistent project-level memory."""
 
+import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,17 +11,119 @@ from ..config.schema import MemoryConfig
 class MemoryManager:
     """Manages long-term and daily memory files."""
 
-    def __init__(self, config: MemoryConfig, workdir: Path):
+    def __init__(self, config: MemoryConfig, app_home: Path, project_root: Path):
         self.config = config
-        self.memory_dir = workdir / config.memory_dir
+        self.app_home = app_home.resolve()
+        self.project_root = project_root.resolve()
+        self.memory_dir = self._resolve_memory_dir(config.memory_dir)
         self.long_term_file = self.memory_dir / "LONG_TERM.md"
         self.daily_dir = self.memory_dir / "daily"
+        self.state_dir = self.app_home / "state"
+        self._migration_notice: str | None = None
         self._ensure_dirs()
+        self._migrate_legacy_project_memory_once()
+
+    def _resolve_memory_dir(self, configured_path: str) -> Path:
+        path = Path(configured_path).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        return (self.app_home / path).resolve()
 
     def _ensure_dirs(self) -> None:
         """Ensure memory directories exist."""
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _migration_state_path(self) -> Path:
+        return self.state_dir / "migration_v1.json"
+
+    def _read_migration_state(self) -> dict:
+        path = self._migration_state_path()
+        if not path.exists():
+            return {"migrated_projects": []}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {"migrated_projects": []}
+            migrated = data.get("migrated_projects")
+            if not isinstance(migrated, list):
+                return {"migrated_projects": []}
+            return {"migrated_projects": [str(item) for item in migrated]}
+        except Exception:
+            return {"migrated_projects": []}
+
+    def _write_migration_state(self, state: dict) -> None:
+        self._migration_state_path().write_text(
+            json.dumps(state, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _legacy_memory_dir(self) -> Path:
+        return self.project_root / ".minibot" / "memory"
+
+    def _project_migration_key(self) -> str:
+        return str(self.project_root)
+
+    def _split_blocks(self, text: str) -> list[str]:
+        text = text.strip()
+        if not text:
+            return []
+        return [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+
+    def _merge_block_text(self, existing: str, incoming: str) -> str:
+        blocks: list[str] = []
+        seen: set[str] = set()
+        for text in (existing, incoming):
+            for block in self._split_blocks(text):
+                if block in seen:
+                    continue
+                seen.add(block)
+                blocks.append(block)
+        if not blocks:
+            return ""
+        return "\n\n".join(blocks) + "\n"
+
+    def _merge_file(self, source: Path, target: Path) -> None:
+        incoming = source.read_text(encoding="utf-8")
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        merged = self._merge_block_text(existing, incoming)
+        if merged:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(merged, encoding="utf-8")
+
+    def _migrate_legacy_project_memory_once(self) -> None:
+        legacy_dir = self._legacy_memory_dir()
+        if not legacy_dir.exists():
+            return
+        if legacy_dir.resolve() == self.memory_dir:
+            return
+
+        state = self._read_migration_state()
+        key = self._project_migration_key()
+        migrated_projects = set(state.get("migrated_projects", []))
+        if key in migrated_projects:
+            return
+
+        try:
+            legacy_long_term = legacy_dir / "LONG_TERM.md"
+            if legacy_long_term.exists():
+                self._merge_file(legacy_long_term, self.long_term_file)
+
+            legacy_daily_dir = legacy_dir / "daily"
+            if legacy_daily_dir.exists():
+                for daily_file in sorted(legacy_daily_dir.glob("*.md")):
+                    self._merge_file(daily_file, self.daily_dir / daily_file.name)
+
+            migrated_projects.add(key)
+            self._write_migration_state({"migrated_projects": sorted(migrated_projects)})
+        except Exception as exc:
+            self._migration_notice = (
+                f"legacy memory migration failed for {legacy_dir}: {exc}"
+            )
+
+    def migration_notice(self) -> str | None:
+        return self._migration_notice
 
     def _today_str(self) -> str:
         return datetime.now().strftime("%Y-%m-%d")

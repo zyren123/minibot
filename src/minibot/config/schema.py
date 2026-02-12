@@ -55,7 +55,7 @@ class MCPServerConfig:
 class MemoryConfig:
     """Memory system configuration."""
     enabled: bool = True
-    memory_dir: str = ".minibot/memory"
+    memory_dir: str = "memory"
     long_term_max_lines: int = 200
     daily_lookback_days: int = 1
 
@@ -83,6 +83,8 @@ class TeamsConfig:
 class Config:
     """Main configuration."""
     workdir: Path = field(default_factory=Path.cwd)
+    app_home: Path | None = None
+    project_root: Path | None = None
     skills_dir: Path = field(default_factory=lambda: Path("skills"))
     llm: LLMConfig = field(default_factory=LLMConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
@@ -94,5 +96,13 @@ class Config:
     def __post_init__(self):
         if isinstance(self.workdir, str):
             self.workdir = Path(self.workdir)
+        if isinstance(self.app_home, str):
+            self.app_home = Path(self.app_home)
+        if isinstance(self.project_root, str):
+            self.project_root = Path(self.project_root)
         if isinstance(self.skills_dir, str):
             self.skills_dir = Path(self.skills_dir)
+        if self.project_root is None:
+            self.project_root = self.workdir
+        if self.app_home is None:
+            self.app_home = self.workdir / ".minibot"

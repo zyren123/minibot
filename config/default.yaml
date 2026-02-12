@@ -1,6 +1,6 @@
 # Minibot Default Configuration
 
-# Skills directory (relative to workdir). Also auto-detects ~/.claude/skills if present.
+# Skills directory (relative to this config file directory when not absolute).
 skills_dir: skills
 
 # LLM configuration

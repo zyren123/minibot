@@ -3,10 +3,7 @@
 import os
 from typing import Any
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
-
-load_dotenv(override=True)
 
 
 class LLMClient:

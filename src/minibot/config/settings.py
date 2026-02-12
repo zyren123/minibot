@@ -1,10 +1,12 @@
 """Configuration loading and management."""
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values
 
 from .schema import (
     Config,
@@ -17,45 +19,184 @@ from .schema import (
     MemoryConfig,
     TeamsConfig,
 )
+from ..utils.path import resolve_app_home, resolve_project_root
 
 _config: Config | None = None
 
 
-def _resolve_env_vars(value: Any) -> Any:
+_DEFAULT_CONFIG_TEMPLATE = """# Minibot Default Configuration
+
+skills_dir: skills
+
+llm:
+  base_url: ${OPENAI_BASE_URL}
+  api_key: ${OPENAI_API_KEY}
+  model: ${MODEL_ID:gpt-4.1-mini}
+  max_tokens: 8000
+
+tools:
+  enabled:
+    - "*"
+  disabled: []
+  timeout: 60
+
+memory:
+  enabled: true
+  memory_dir: memory
+  long_term_max_lines: 200
+  daily_lookback_days: 1
+
+teams:
+  enabled: true
+  max_members: 6
+  default_members: 3
+  log_dir: .minibot/teams
+  wait_timeout_sec: 30
+  quiet_teammates: true
+"""
+
+
+_HOOKS_CONFIG_TEMPLATE = """# Minibot Hooks Configuration
+
+enabled: true
+hooks_dir: hooks
+hooks: []
+"""
+
+
+_MCP_CONFIG_TEMPLATE = """# Minibot MCP Servers Configuration
+
+enabled: true
+servers: []
+"""
+
+
+def _resolve_env_vars(value: Any, env_defaults: dict[str, str] | None = None) -> Any:
     """Resolve environment variable references in config values."""
     if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
         env_var = value[2:-1]
         default = None
         if ":" in env_var:
             env_var, default = env_var.split(":", 1)
-        return os.getenv(env_var, default)
+        resolved = os.getenv(env_var)
+        if resolved is None and env_defaults is not None:
+            resolved = env_defaults.get(env_var)
+        return resolved if resolved is not None else default
     elif isinstance(value, dict):
-        return {k: _resolve_env_vars(v) for k, v in value.items()}
+        return {k: _resolve_env_vars(v, env_defaults) for k, v in value.items()}
     elif isinstance(value, list):
-        return [_resolve_env_vars(v) for v in value]
+        return [_resolve_env_vars(v, env_defaults) for v in value]
     return value
 
 
-def _load_yaml(path: Path) -> dict:
+def _load_yaml(path: Path, env_defaults: dict[str, str] | None = None) -> dict:
     """Load a YAML file and resolve environment variables."""
     if not path.exists():
         return {}
     with open(path) as f:
         data = yaml.safe_load(f) or {}
-    return _resolve_env_vars(data)
+    return _resolve_env_vars(data, env_defaults)
 
 
-def _parse_llm_config(data: dict) -> LLMConfig:
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep-merge two dictionaries with override precedence."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolve_path_value(value: str | Path, base_dir: Path) -> Path:
+    """Resolve a path value against a base directory."""
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base_dir / path).resolve()
+
+
+def _load_env_files(app_home: Path, project_root: Path) -> dict[str, str]:
+    """Load .env defaults in order: global -> project."""
+    merged: dict[str, str] = {}
+    for path in (app_home / ".env", project_root / ".env"):
+        if not path.exists():
+            continue
+        for key, value in dotenv_values(path).items():
+            if value is not None:
+                merged[key] = value
+    return merged
+
+
+def _bootstrap_global_config(
+    *,
+    app_home: Path,
+    project_config_dir: Path,
+) -> None:
+    """Create global config files when missing, using project files as seed."""
+    global_config_dir = (app_home / "config").resolve()
+    global_config_dir.mkdir(parents=True, exist_ok=True)
+
+    files: list[tuple[str, str]] = [
+        ("default.yaml", _DEFAULT_CONFIG_TEMPLATE),
+        ("hooks.yaml", _HOOKS_CONFIG_TEMPLATE),
+        ("mcp_servers.yaml", _MCP_CONFIG_TEMPLATE),
+    ]
+
+    for filename, template in files:
+        global_file = global_config_dir / filename
+        if global_file.exists():
+            continue
+        project_file = project_config_dir / filename
+        if project_file.exists():
+            shutil.copy2(project_file, global_file)
+            continue
+        global_file.write_text(template.rstrip() + "\n", encoding="utf-8")
+
+
+def _pick_path_value(
+    *,
+    key: str,
+    global_data: dict,
+    project_data: dict,
+    global_base_dir: Path,
+    project_base_dir: Path,
+    default_base_dir: Path,
+    default: str,
+) -> tuple[str, Path]:
+    """Pick path config value with source-aware base dir."""
+    if key in project_data:
+        return project_data[key], project_base_dir
+    if key in global_data:
+        return global_data[key], global_base_dir
+    return default, default_base_dir
+
+
+def _parse_llm_config(data: dict, env_defaults: dict[str, str]) -> LLMConfig:
     """Parse LLM configuration."""
     return LLMConfig(
-        base_url=data.get("base_url") or os.getenv("OPENAI_BASE_URL"),
-        api_key=data.get("api_key") or os.getenv("OPENAI_API_KEY"),
-        model=data.get("model") or os.getenv("MODEL_ID", "gpt-4.1-mini"),
+        base_url=(
+            data.get("base_url")
+            or os.getenv("OPENAI_BASE_URL")
+            or env_defaults.get("OPENAI_BASE_URL")
+        ),
+        api_key=(
+            data.get("api_key")
+            or os.getenv("OPENAI_API_KEY")
+            or env_defaults.get("OPENAI_API_KEY")
+        ),
+        model=(
+            data.get("model")
+            or os.getenv("MODEL_ID")
+            or env_defaults.get("MODEL_ID")
+            or "gpt-4.1-mini"
+        ),
         max_tokens=data.get("max_tokens", 8000),
     )
 
 
-def _parse_hooks_config(data: dict | None, workdir: Path) -> HooksConfig:
+def _parse_hooks_config(data: dict | None, hooks_dir: Path) -> HooksConfig:
     """Parse hooks configuration."""
     if data is None:
         data = {}
@@ -68,13 +209,9 @@ def _parse_hooks_config(data: dict | None, workdir: Path) -> HooksConfig:
             enabled=hook_data.get("enabled", True),
         ))
 
-    hooks_dir = data.get("hooks_dir", "hooks")
-    if not Path(hooks_dir).is_absolute():
-        hooks_dir = workdir / hooks_dir
-
     return HooksConfig(
         enabled=data.get("enabled", True),
-        hooks_dir=Path(hooks_dir),
+        hooks_dir=hooks_dir,
         hooks=hooks,
     )
 
@@ -101,13 +238,15 @@ def _parse_mcp_config(data: dict | None) -> MCPConfig:
     )
 
 
-def _parse_memory_config(data: dict | None) -> MemoryConfig:
+def _parse_memory_config(data: dict | None, app_home: Path) -> MemoryConfig:
     """Parse memory configuration."""
     if data is None:
         data = {}
+    raw_memory_dir = str(data.get("memory_dir", "memory"))
+    resolved_memory_dir = _resolve_path_value(raw_memory_dir, app_home)
     return MemoryConfig(
         enabled=data.get("enabled", True),
-        memory_dir=data.get("memory_dir", ".minibot/memory"),
+        memory_dir=str(resolved_memory_dir),
         long_term_max_lines=data.get("long_term_max_lines", 200),
         daily_lookback_days=data.get("daily_lookback_days", 1),
     )
@@ -130,36 +269,69 @@ def _parse_teams_config(data: dict | None) -> TeamsConfig:
 def load_config(
     config_dir: Path | None = None,
     workdir: Path | None = None,
+    app_home: Path | None = None,
+    project_root: Path | None = None,
 ) -> Config:
     """Load configuration from files and environment variables."""
     global _config
 
-    workdir = workdir or Path.cwd()
-    config_dir = config_dir or workdir / "config"
+    workdir = (workdir or Path.cwd()).resolve()
+    app_home = (app_home or resolve_app_home()).resolve()
+    project_root = (project_root or resolve_project_root(workdir)).resolve()
+    global_config_dir = (app_home / "config").resolve()
+    project_config_dir = (config_dir or project_root / "config").resolve()
 
-    # Load config files
-    default_config = _load_yaml(config_dir / "default.yaml")
-    hooks_config = _load_yaml(config_dir / "hooks.yaml")
-    mcp_config = _load_yaml(config_dir / "mcp_servers.yaml")
+    _bootstrap_global_config(app_home=app_home, project_config_dir=project_config_dir)
 
-    # Merge configurations
-    skills_dir = default_config.get("skills_dir", "skills")
-    skills_dir = Path(skills_dir).expanduser()
-    if not skills_dir.is_absolute():
-        skills_dir = workdir / skills_dir
+    env_defaults = _load_env_files(app_home=app_home, project_root=project_root)
+
+    global_default = _load_yaml(global_config_dir / "default.yaml", env_defaults)
+    project_default = _load_yaml(project_config_dir / "default.yaml", env_defaults)
+    global_hooks = _load_yaml(global_config_dir / "hooks.yaml", env_defaults)
+    project_hooks = _load_yaml(project_config_dir / "hooks.yaml", env_defaults)
+    global_mcp = _load_yaml(global_config_dir / "mcp_servers.yaml", env_defaults)
+    project_mcp = _load_yaml(project_config_dir / "mcp_servers.yaml", env_defaults)
+
+    default_config = _deep_merge(global_default, project_default)
+    hooks_config = _deep_merge(global_hooks, project_hooks)
+    mcp_config = _deep_merge(global_mcp, project_mcp)
+
+    raw_skills_dir, skills_base_dir = _pick_path_value(
+        key="skills_dir",
+        global_data=global_default,
+        project_data=project_default,
+        global_base_dir=global_config_dir,
+        project_base_dir=project_config_dir,
+        default_base_dir=project_root,
+        default="skills",
+    )
+    skills_dir = _resolve_path_value(str(raw_skills_dir), skills_base_dir)
+
+    raw_hooks_dir, hooks_base_dir = _pick_path_value(
+        key="hooks_dir",
+        global_data=global_hooks,
+        project_data=project_hooks,
+        global_base_dir=global_config_dir,
+        project_base_dir=project_config_dir,
+        default_base_dir=project_root,
+        default="hooks",
+    )
+    hooks_dir = _resolve_path_value(str(raw_hooks_dir), hooks_base_dir)
 
     _config = Config(
         workdir=workdir,
-        skills_dir=Path(skills_dir),
-        llm=_parse_llm_config(default_config.get("llm", {})),
+        app_home=app_home,
+        project_root=project_root,
+        skills_dir=skills_dir,
+        llm=_parse_llm_config(default_config.get("llm", {}), env_defaults),
         tools=ToolsConfig(
             enabled=default_config.get("tools", {}).get("enabled", ["*"]),
             disabled=default_config.get("tools", {}).get("disabled", []),
             timeout=default_config.get("tools", {}).get("timeout", 60),
         ),
-        hooks=_parse_hooks_config(hooks_config, workdir),
+        hooks=_parse_hooks_config(hooks_config, hooks_dir),
         mcp=_parse_mcp_config(mcp_config),
-        memory=_parse_memory_config(default_config.get("memory")),
+        memory=_parse_memory_config(default_config.get("memory"), app_home),
         teams=_parse_teams_config(default_config.get("teams")),
     )
 

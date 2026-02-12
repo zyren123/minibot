@@ -9,6 +9,7 @@ from .agent import Agent
 from .utils.output import clear_screen, print_panel, print_system, prompt_input, prompt_input_markup
 from .utils.rich_utils import rich_enabled, get_console
 from .utils.prompt_toolkit import SlashCommand, PromptToolkitInput, prompt_toolkit_enabled
+from .utils.path import resolve_app_home, resolve_project_root
 
 
 SLASH_COMMANDS: dict[str, str] = {
@@ -101,9 +102,9 @@ async def repl(agent: Agent) -> None:
     history: list[dict] = []
     pt_input: PromptToolkitInput | None = None
     if prompt_toolkit_enabled():
-        workdir = Path.cwd()
+        app_home = resolve_app_home()
         pt_input = PromptToolkitInput(
-            history_path=workdir / ".minibot" / "prompt_history",
+            history_path=app_home / "history" / "prompt_history",
             commands=[SlashCommand(name=k, description=v) for k, v in SLASH_COMMANDS.items()],
         )
 
@@ -202,9 +203,11 @@ async def repl(agent: Agent) -> None:
 
 def main() -> None:
     """Main entry point."""
-    workdir = Path.cwd()
-    _setup_readline(workdir / ".minibot" / "history")
-    config = load_config(workdir=workdir)
+    workdir = Path.cwd().resolve()
+    app_home = resolve_app_home()
+    project_root = resolve_project_root(workdir)
+    _setup_readline(app_home / "history" / "history")
+    config = load_config(workdir=workdir, app_home=app_home, project_root=project_root)
     agent = Agent(config)
 
     asyncio.run(repl(agent))

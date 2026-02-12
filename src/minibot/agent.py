@@ -44,6 +44,7 @@ from .utils.output import (
     print_assistant,
     print_tool_call,
     print_tool_output,
+    print_system,
     status,
 )
 
@@ -112,10 +113,18 @@ class Agent:
         self.mcp_manager = MCPManager(self.config.mcp, self.workdir)
 
         self.memory_manager = (
-            MemoryManager(self.config.memory, self.workdir)
+            MemoryManager(
+                self.config.memory,
+                self.config.app_home,
+                self.config.project_root,
+            )
             if self.config.memory.enabled
             else None
         )
+        if self.memory_manager is not None:
+            notice = self.memory_manager.migration_notice()
+            if notice:
+                print_system(f"Warning: {notice}")
 
         self.team_runtime: TeamRuntime | None = team_runtime
         self._owns_team_runtime = False
