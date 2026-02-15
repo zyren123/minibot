@@ -7,8 +7,8 @@
 <div align="left">
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![No Frameworks](https://img.shields.io/badge/Framework-None-crimson?style=flat-square)](https://github.com/yourusername/minibot)
-[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/yourusername/minibot)
+[![No Frameworks](https://img.shields.io/badge/Framework-None-crimson?style=flat-square)](https://github.com/zyren123/minibot)
+[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/zyren123/minibot)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Code Style](https://img.shields.io/badge/Code%20Style-Black-000000?style=flat-square)](https://github.com/psf/black)
 
@@ -81,7 +81,7 @@ MiniBot 采用极其精简的模块化设计，没有任何复杂的类继承链
 ### 安装
 
 ```bash
-git clone https://github.com/yourusername/minibot.git
+git clone https://github.com/zyren123/minibot.git
 cd minibot
 
 # 极速安装依赖
@@ -105,6 +105,12 @@ MINIBOT_RICH=1
 ```bash
 uv run minibot
 ```
+
+常用命令：
+
+- `/help`
+- `/info`
+- `/stream [on|off|status]`
 
 ---
 
@@ -205,11 +211,16 @@ MiniBot 现已支持 **in-process Agent Teams**（会话内团队编排）：
 `config/default.yaml`:
 
 ```yaml
+llm:
+  stream_enabled: true
+
 teams:
   quiet_teammates: true
+  debug_teammate_output: false
 ```
 
 开启后 teammate 不会向终端输出 Thinking/Running 状态行与常规内容，避免并发输出污染主终端。
+主 Agent（solo/lead）默认开启流式正文输出；若网关不支持流式，会自动回退为非流式输出。
 
 ---
 

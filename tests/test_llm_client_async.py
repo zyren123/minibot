@@ -18,6 +18,8 @@ def _install_fake_openai_clients(monkeypatch):
     class FakeAsyncCompletions:
         async def create(self, **kwargs):
             records["async_create_kwargs"] = kwargs
+            if kwargs.get("stream"):
+                return {"kind": "stream"}
             return {"kind": "async"}
 
     class FakeOpenAI:
@@ -65,6 +67,31 @@ async def test_create_message_async_uses_async_client(monkeypatch):
         ],
         "max_tokens": 1234,
         "tools": tools,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_message_stream_async_sets_stream_flag(monkeypatch):
+    records = _install_fake_openai_clients(monkeypatch)
+    client = LLMClient(base_url="http://localhost:8000/v1", api_key="test", model="test-model")
+
+    messages = [{"role": "user", "content": "hello"}]
+    result = await client.create_message_stream_async(
+        messages=messages,
+        system="system prompt",
+        tools=None,
+        max_tokens=321,
+    )
+
+    assert result == {"kind": "stream"}
+    assert records["async_create_kwargs"] == {
+        "model": "test-model",
+        "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "hello"},
+        ],
+        "max_tokens": 321,
+        "stream": True,
     }
 
 

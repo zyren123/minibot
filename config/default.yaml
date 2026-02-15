@@ -10,6 +10,7 @@ llm:
   api_key: ${OPENAI_API_KEY}
   model: ${MODEL_ID:gpt-4.1-mini}
   max_tokens: 8000
+  stream_enabled: true
 
 # Tools configuration
 tools:
@@ -26,3 +27,4 @@ teams:
   log_dir: .minibot/teams
   wait_timeout_sec: 30
   quiet_teammates: true
+  debug_teammate_output: false

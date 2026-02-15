@@ -16,6 +16,7 @@ from .utils.path import resolve_app_home, resolve_project_root
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show this help",
     "/info": "Show session info",
+    "/stream": "Streaming control: /stream [on|off|status]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
     "/clear": "Clear the screen",
@@ -74,6 +75,11 @@ def _print_banner(agent: Agent) -> None:
         f"skills: {', '.join(info['skills']) or 'none'}",
         f"agent types: {', '.join(info['agent_types'])}",
     ]
+    stream = info.get("stream", {})
+    if isinstance(stream, dict):
+        lines.append(
+            f"stream: mode={stream.get('mode', 'off')} active={stream.get('active', False)}"
+        )
     if info.get("mcp_servers"):
         lines.append(f"mcp: {', '.join(info['mcp_servers'])}  tools: {info['mcp_tools']}")
     team = info.get("team", {})
@@ -83,7 +89,7 @@ def _print_banner(agent: Agent) -> None:
             f"members={team.get('member_count')} running={team.get('running_members')}"
         )
     lines.append("")
-    lines.append("Tips: /help  /paste  /reset  /clear  exit  (ESC: interrupt generation)")
+    lines.append("Tips: /help  /stream  /paste  /reset  /clear  exit  (ESC: interrupt generation)")
     print_panel("MiniBot", "\n".join(lines))
 
 
@@ -171,6 +177,27 @@ async def repl(agent: Agent) -> None:
                     continue
                 if cmd == "/info":
                     _print_banner(agent)
+                    continue
+                if cmd == "/stream":
+                    args = user_input.strip().split()
+                    action = args[1].lower() if len(args) > 1 else "status"
+                    if action == "status":
+                        stream = agent.get_stream_state()
+                        print_system(
+                            "Streaming: "
+                            f"mode={stream['mode']} enabled={stream['enabled']} "
+                            f"degraded={stream['degraded']} active={stream['active']}"
+                        )
+                    elif action == "on":
+                        agent.set_stream_enabled(True)
+                        stream = agent.get_stream_state()
+                        print_system(f"Streaming enabled (mode={stream['mode']}).")
+                    elif action == "off":
+                        agent.set_stream_enabled(False)
+                        stream = agent.get_stream_state()
+                        print_system(f"Streaming disabled (mode={stream['mode']}).")
+                    else:
+                        print_system("Usage: /stream [on|off|status]")
                     continue
                 if cmd == "/clear":
                     clear_screen()

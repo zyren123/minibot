@@ -170,6 +170,8 @@ def test_bootstrap_global_config_writes_templates_when_project_config_absent(tmp
     assert (app_home / "config" / "hooks.yaml").exists()
     assert (app_home / "config" / "mcp_servers.yaml").exists()
     assert config.tools.timeout == 60
+    assert config.llm.stream_enabled is True
+    assert config.teams.debug_teammate_output is False
     assert config.memory.memory_dir == str((app_home / "memory").resolve())
 
 
@@ -237,3 +239,27 @@ def test_load_config_rejects_unset_env_path_placeholders(
             app_home=app_home,
             project_root=project_root,
         )
+
+
+def test_load_config_parses_stream_and_teammate_debug_flags(tmp_path):
+    app_home = tmp_path / "app-home"
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True)
+    _write(
+        project_root / "config" / "default.yaml",
+        """
+llm:
+  stream_enabled: false
+teams:
+  debug_teammate_output: true
+""".strip(),
+    )
+
+    config = load_config(
+        workdir=project_root,
+        app_home=app_home,
+        project_root=project_root,
+    )
+
+    assert config.llm.stream_enabled is False
+    assert config.teams.debug_teammate_output is True

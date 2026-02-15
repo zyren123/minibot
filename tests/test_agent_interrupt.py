@@ -10,7 +10,12 @@ from src.minibot.config.schema import Config, LLMConfig, TeamsConfig
 def _make_agent(tmp_path):
     cfg = Config(
         workdir=tmp_path,
-        llm=LLMConfig(base_url="http://localhost:8000/v1", api_key="test", model="test-model"),
+        llm=LLMConfig(
+            base_url="http://localhost:8000/v1",
+            api_key="test",
+            model="test-model",
+            stream_enabled=False,
+        ),
         teams=TeamsConfig(enabled=False),
     )
     agent = Agent(config=cfg)

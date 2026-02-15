@@ -48,6 +48,9 @@ from .utils.output import (
     print_tool_output,
     print_system,
     status,
+    stream_assistant_start,
+    stream_assistant_write,
+    stream_assistant_end,
 )
 
 AgentRole = Literal["solo", "lead", "teammate"]
@@ -101,8 +104,12 @@ class Agent:
         self.team_id = team_id
         self.member_id = member_id
         self.quiet_teammates = self.config.teams.quiet_teammates
-        self.silent = role == "teammate" and self.quiet_teammates
-        self.status_enabled = not (role == "teammate" and self.quiet_teammates)
+        self.debug_teammate_output = self.config.teams.debug_teammate_output
+        teammate_quiet = role == "teammate" and self.quiet_teammates and not self.debug_teammate_output
+        self.silent = teammate_quiet
+        self.status_enabled = not teammate_quiet
+        self.stream_enabled = bool(self.config.llm.stream_enabled)
+        self.stream_degraded = False
 
         self.client = LLMClient(
             base_url=self.config.llm.base_url,
@@ -154,6 +161,51 @@ class Agent:
 
         self._register_tools()
         self.system_prompt = self._build_system_prompt()
+
+    def set_stream_enabled(self, enabled: bool) -> None:
+        """Toggle streaming output for the current session."""
+        self.stream_enabled = bool(enabled)
+        if self.stream_enabled:
+            # Re-enable stream attempts after an earlier degraded fallback.
+            self.stream_degraded = False
+
+    def _streaming_active(self) -> bool:
+        """Whether this agent should attempt streaming responses now."""
+        if self.role == "teammate":
+            return False
+        if not self.stream_enabled:
+            return False
+        return not self.stream_degraded
+
+    def get_stream_state(self) -> dict[str, Any]:
+        """Streaming status for banners, /info, and /stream command."""
+        if not self.stream_enabled:
+            mode = "off"
+        elif self.stream_degraded:
+            mode = "degraded"
+        else:
+            mode = "on"
+        return {
+            "mode": mode,
+            "enabled": self.stream_enabled,
+            "degraded": self.stream_degraded,
+            "active": self._streaming_active(),
+        }
+
+    def _assistant_title(self) -> str:
+        if self.role == "teammate" and self.member_id and self.debug_teammate_output:
+            return f"Assistant {self.member_id}"
+        return "Assistant"
+
+    def _tool_log_prefix(self) -> str:
+        if self.role == "teammate" and self.member_id and self.debug_teammate_output:
+            return f"[{self.member_id}] "
+        return ""
+
+    def _tool_output_name(self, name: str) -> str:
+        if self.role == "teammate" and self.member_id and self.debug_teammate_output:
+            return f"{name} ({self.member_id})"
+        return name
 
     def _create_teammate_agent(self, team_id: str, member_id: str) -> "Agent":
         """Factory used by TeamRuntime to create teammate workers."""
@@ -304,7 +356,7 @@ You have access to layered capabilities. Choose the most specific tool for the j
 ## The ReAct Protocol
 You must not act without reasoning. For every step, follow this process:
 
-1. **Analyze**: Understand the current state. Read files or list directories if you lack context.
+1. **Analyze**: Understand the current state. Read files or list directories if you lack context. read files first before editing them.
 2. **Plan**: Formulate a step-by-step plan. Use `TodoWrite` to persist the state of complex tasks.
 3. **Reason**: Explain *why* you are choosing a specific tool or action next.
 4. **Act**: Invoke the tool.
@@ -351,6 +403,266 @@ You are now live. Await instructions and begin the ReAct loop."""
                 interrupt_queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
+
+    @staticmethod
+    def _field(value: Any, name: str, default: Any = None) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @classmethod
+    def _extract_stream_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                text = cls._field(item, "text")
+                if text:
+                    parts.append(str(text))
+            return "".join(parts)
+        return str(value)
+
+    @classmethod
+    def _merge_stream_tool_call_delta(
+        cls,
+        tool_call_map: dict[int, dict[str, Any]],
+        delta: Any,
+    ) -> None:
+        index_raw = cls._field(delta, "index", 0)
+        try:
+            index = int(index_raw)
+        except (TypeError, ValueError):
+            index = 0
+
+        entry = tool_call_map.setdefault(
+            index,
+            {
+                "id": None,
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        tc_id = cls._field(delta, "id")
+        if tc_id:
+            entry["id"] = str(tc_id)
+
+        tc_type = cls._field(delta, "type")
+        if tc_type:
+            entry["type"] = str(tc_type)
+
+        function = cls._field(delta, "function")
+        if function is None:
+            return
+
+        tc_name = cls._field(function, "name")
+        if tc_name:
+            if entry["function"]["name"]:
+                entry["function"]["name"] += str(tc_name)
+            else:
+                entry["function"]["name"] = str(tc_name)
+
+        tc_args = cls._field(function, "arguments")
+        if tc_args:
+            entry["function"]["arguments"] += str(tc_args)
+
+    @classmethod
+    def _tool_call_id(cls, tool_call: Any) -> str:
+        tc_id = cls._field(tool_call, "id")
+        if tc_id:
+            return str(tc_id)
+        return ""
+
+    @classmethod
+    def _tool_call_name(cls, tool_call: Any) -> str:
+        function = cls._field(tool_call, "function", {})
+        tc_name = cls._field(function, "name", "")
+        return str(tc_name or "")
+
+    @classmethod
+    def _tool_call_arguments(cls, tool_call: Any) -> str:
+        function = cls._field(tool_call, "function", {})
+        tc_args = cls._field(function, "arguments", "")
+        return str(tc_args or "")
+
+    @staticmethod
+    async def _close_stream(stream: Any) -> None:
+        close_fn = getattr(stream, "close", None)
+        if callable(close_fn):
+            result = close_fn()
+            if hasattr(result, "__await__"):
+                await result
+            return
+
+        aclose_fn = getattr(stream, "aclose", None)
+        if callable(aclose_fn):
+            result = aclose_fn()
+            if hasattr(result, "__await__"):
+                await result
+
+    async def _create_message_stream_with_interrupt(
+        self,
+        *,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None,
+        max_tokens: int,
+        interrupt_queue: "asyncio.Queue[None] | None" = None,
+    ) -> dict[str, Any]:
+        text_parts: list[str] = []
+        finish_reason: str | None = None
+        tool_call_map: dict[int, dict[str, Any]] = {}
+        stream_line_open = False
+        rendered_any = False
+        pending_display_parts: list[str] = []
+        thinking_ctx = (
+            status("[bright_black]Thinking…[/]")
+            if self.status_enabled and not self.silent
+            else nullcontext()
+        )
+        thinking_open = False
+        stream: Any | None = None
+
+        try:
+            thinking_ctx.__enter__()
+            thinking_open = True
+
+            if interrupt_queue is None:
+                stream = await self.client.create_message_stream_async(
+                    messages=messages,
+                    system=system,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                )
+            else:
+                self._drain_interrupt_queue(interrupt_queue)
+                llm_task = asyncio.create_task(
+                    self.client.create_message_stream_async(
+                        messages=messages,
+                        system=system,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                    )
+                )
+                interrupt_task = asyncio.create_task(interrupt_queue.get())
+                done, _pending = await asyncio.wait(
+                    {llm_task, interrupt_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if llm_task in done:
+                    interrupt_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await interrupt_task
+                    stream = await llm_task
+                else:
+                    llm_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await llm_task
+                    with suppress(Exception):
+                        interrupt_task.result()
+                    raise UserInterruptedError("Interrupted by ESC")
+
+            iterator = stream.__aiter__()
+            while True:
+                if interrupt_queue is not None:
+                    try:
+                        interrupt_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    else:
+                        raise UserInterruptedError("Interrupted by ESC")
+
+                try:
+                    if interrupt_queue is None:
+                        chunk = await iterator.__anext__()
+                    else:
+                        next_chunk_task = asyncio.create_task(iterator.__anext__())
+                        while True:
+                            done, _pending = await asyncio.wait(
+                                {next_chunk_task},
+                                timeout=0.1,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if next_chunk_task in done:
+                                break
+                            try:
+                                interrupt_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            else:
+                                next_chunk_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await next_chunk_task
+                                raise UserInterruptedError("Interrupted by ESC")
+                        chunk = await next_chunk_task
+                except StopAsyncIteration:
+                    break
+
+                choices = self._field(chunk, "choices", []) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = self._field(choice, "delta")
+
+                if delta is not None:
+                    chunk_text = self._extract_stream_text(self._field(delta, "content"))
+                    if chunk_text:
+                        text_parts.append(chunk_text)
+                        if not self.silent:
+                            if not rendered_any:
+                                pending_display_parts.append(chunk_text)
+                                candidate = "".join(pending_display_parts)
+                                if candidate.strip():
+                                    if thinking_open:
+                                        thinking_ctx.__exit__(None, None, None)
+                                        thinking_open = False
+                                    stream_assistant_start(title=self._assistant_title())
+                                    stream_line_open = True
+                                    stream_assistant_write(candidate)
+                                    rendered_any = True
+                                    pending_display_parts = []
+                            else:
+                                stream_assistant_write(chunk_text)
+
+                    tool_call_deltas = self._field(delta, "tool_calls", []) or []
+                    for tool_call_delta in tool_call_deltas:
+                        self._merge_stream_tool_call_delta(tool_call_map, tool_call_delta)
+
+                chunk_finish = self._field(choice, "finish_reason")
+                if chunk_finish:
+                    finish_reason = str(chunk_finish)
+        finally:
+            if thinking_open:
+                with suppress(Exception):
+                    thinking_ctx.__exit__(None, None, None)
+            if stream_line_open:
+                stream_assistant_end()
+            if stream is not None:
+                with suppress(Exception):
+                    await self._close_stream(stream)
+
+        tool_calls: list[dict[str, Any]] = []
+        for index, entry in sorted(tool_call_map.items(), key=lambda item: item[0]):
+            tc_id = entry.get("id")
+            if not tc_id:
+                entry["id"] = f"stream-call-{index}"
+            if not entry["function"]["name"]:
+                entry["function"]["name"] = "unknown_tool"
+            tool_calls.append(entry)
+
+        return {
+            "content": "".join(text_parts),
+            "finish_reason": finish_reason or "stop",
+            "tool_calls": tool_calls,
+            "stream_rendered": rendered_any and not self.silent,
+        }
 
     async def _create_message_with_interrupt(
         self,
@@ -406,62 +718,95 @@ You are now live. Await instructions and begin the ReAct loop."""
     ) -> list[dict]:
         """Run the main agent loop."""
         while True:
-            status_ctx = (
-                status("[bright_black]Thinking…[/]")
-                if self.status_enabled
-                else nullcontext()
-            )
-            with status_ctx:
-                response = await self._create_message_with_interrupt(
-                    messages=messages,
-                    system=self.system_prompt,
-                    tools=self.tool_registry.get_definitions(),
-                    max_tokens=self.config.llm.max_tokens,
-                    interrupt_queue=interrupt_queue,
+            tools = self.tool_registry.get_definitions()
+            content = ""
+            finish_reason = "stop"
+            tool_calls: list[Any] = []
+            stream_rendered = False
+            stream_success = False
+
+            if self._streaming_active():
+                try:
+                    stream_result = await self._create_message_stream_with_interrupt(
+                        messages=messages,
+                        system=self.system_prompt,
+                        tools=tools,
+                        max_tokens=self.config.llm.max_tokens,
+                        interrupt_queue=interrupt_queue,
+                    )
+                    content = stream_result["content"]
+                    finish_reason = stream_result["finish_reason"]
+                    tool_calls = stream_result["tool_calls"]
+                    stream_rendered = bool(stream_result["stream_rendered"])
+                    stream_success = True
+                except UserInterruptedError:
+                    raise
+                except Exception as exc:
+                    self.stream_degraded = True
+                    if not self.silent:
+                        print_system(f"Streaming unavailable, fell back to non-streaming: {exc}")
+
+            if not stream_success:
+                status_ctx = (
+                    status("[bright_black]Thinking…[/]")
+                    if self.status_enabled
+                    else nullcontext()
                 )
+                with status_ctx:
+                    response = await self._create_message_with_interrupt(
+                        messages=messages,
+                        system=self.system_prompt,
+                        tools=tools,
+                        max_tokens=self.config.llm.max_tokens,
+                        interrupt_queue=interrupt_queue,
+                    )
 
-            choice = response.choices[0]
-            assistant_message = choice.message
-            finish_reason = choice.finish_reason
-            content = assistant_message.content or ""
+                choice = response.choices[0]
+                assistant_message = choice.message
+                finish_reason = choice.finish_reason
+                content = assistant_message.content or ""
+                tool_calls = assistant_message.tool_calls or []
 
-            if content and not self.silent:
-                print_assistant(content)
-
-            tool_calls = assistant_message.tool_calls or []
+            if content and not self.silent and not stream_rendered:
+                print_assistant(content, title=self._assistant_title())
 
             if finish_reason != "tool_calls":
                 messages.append({"role": "assistant", "content": content})
                 return messages
 
             tool_results: list[dict[str, str]] = []
-            for tc in tool_calls:
-                tc_id = tc.id
-                tc_name = tc.function.name
-                tc_input, parse_note = parse_tool_arguments(tc.function.arguments)
+            for i, tc in enumerate(tool_calls, start=1):
+                tc_id = self._tool_call_id(tc) or f"tool-call-{i}"
+                tc_name = self._tool_call_name(tc)
+                tc_args_raw = self._tool_call_arguments(tc)
+                tc_input, parse_note = parse_tool_arguments(tc_args_raw)
                 if tc_input is None:
                     output = (
                         f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
-                        f"raw={tc.function.arguments!r}"
+                        f"raw={tc_args_raw!r}"
                     )[:50000]
                     if not self.silent:
                         print()
-                        print_tool_call(f"> {tc_name}(invalid_args)")
-                        print_tool_output(tc_name, output)
+                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}(invalid_args)")
+                        print_tool_output(self._tool_output_name(tc_name), output)
                     tool_results.append({"tool_call_id": tc_id, "output": output})
                     continue
 
                 if not self.silent:
                     if tc_name == "Task":
                         print()
-                        print_tool_call(f"> Task: {tc_input.get('description', 'subtask')}")
+                        print_tool_call(
+                            f"{self._tool_log_prefix()}> Task: {tc_input.get('description', 'subtask')}"
+                        )
                     elif tc_name == "Skill":
                         print()
-                        print_tool_call(f"> Loading skill: {tc_input.get('skill', '?')}")
+                        print_tool_call(
+                            f"{self._tool_log_prefix()}> Loading skill: {tc_input.get('skill', '?')}"
+                        )
                     else:
                         args_preview = _format_tool_args(tc_input)
                         print()
-                        print_tool_call(f"> {tc_name}({args_preview})")
+                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({args_preview})")
 
                 if tc_name == "Task":
                     output = await self._execute_tool_with_hooks(tc_name, tc_input)
@@ -477,21 +822,21 @@ You are now live. Await instructions and begin the ReAct loop."""
                 if parse_note:
                     output = f"Warning: {parse_note}\n{output}"
                 if not self.silent:
-                    print_tool_output(tc_name, output)
+                    print_tool_output(self._tool_output_name(tc_name), output)
                 tool_results.append({"tool_call_id": tc_id, "output": output})
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
             if tool_calls:
                 assistant_msg["tool_calls"] = [
                     {
-                        "id": tc.id,
+                        "id": self._tool_call_id(tc) or f"tool-call-{i}",
                         "type": "function",
                         "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "name": self._tool_call_name(tc),
+                            "arguments": self._tool_call_arguments(tc),
                         },
                     }
-                    for tc in tool_calls
+                    for i, tc in enumerate(tool_calls, start=1)
                 ]
             messages.append(assistant_msg)
 
@@ -548,4 +893,5 @@ You are now live. Await instructions and begin the ReAct loop."""
             "mcp_tools": self.mcp_manager.tool_count,
             "hooks_enabled": self.hook_manager.enabled,
             "team": team_info,
+            "stream": self.get_stream_state(),
         }

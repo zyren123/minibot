@@ -37,6 +37,7 @@ class LLMClient:
         system: str,
         tools: list[dict] | None,
         max_tokens: int,
+        stream: bool = False,
     ) -> dict[str, Any]:
         """Build request kwargs for chat completions."""
         chat_messages = []
@@ -51,6 +52,8 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+        if stream:
+            kwargs["stream"] = True
         return kwargs
 
     def create_message(
@@ -84,6 +87,24 @@ class LLMClient:
             system=system,
             tools=tools,
             max_tokens=max_tokens,
+        )
+        return await self._async_client.chat.completions.create(**kwargs)
+
+    async def create_message_stream_async(
+        self,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None = None,
+        max_tokens: int = 8000,
+    ) -> Any:
+        """Create a streaming message with the async OpenAI client."""
+        kwargs = self._build_kwargs(
+            model=self.model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            stream=True,
         )
         return await self._async_client.chat.completions.create(**kwargs)
 

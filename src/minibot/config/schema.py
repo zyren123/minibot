@@ -12,6 +12,7 @@ class LLMConfig:
     api_key: str | None = None
     model: str = "gpt-4.1-mini"
     max_tokens: int = 8000
+    stream_enabled: bool = True
 
 
 @dataclass
@@ -77,6 +78,7 @@ class TeamsConfig:
     log_dir: str = ".minibot/teams"
     wait_timeout_sec: int = 30
     quiet_teammates: bool = True
+    debug_teammate_output: bool = False
 
 
 @dataclass

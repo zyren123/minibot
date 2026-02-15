@@ -13,7 +13,7 @@ from .rich_utils import get_console, rich_enabled
 from .terminal import PanelStyle, clear_screen as clear_screen_fallback, panel, style, term_width
 
 
-def print_assistant(content: str) -> None:
+def print_assistant(content: str, *, title: str = "Assistant") -> None:
     """Print assistant content in a readable block."""
     content = content.rstrip()
     if not content:
@@ -26,13 +26,13 @@ def print_assistant(content: str) -> None:
         console.print(
             Panel(
                 Markdown(content),
-                title="Assistant",
+                title=title,
                 border_style="bright_black",
                 title_align="left",
             )
         )
         return
-    print(panel("Assistant", content, width=term_width(), pstyle=PanelStyle()))
+    print(panel(title, content, width=term_width(), pstyle=PanelStyle()))
 
 
 def print_system(message: str) -> None:
@@ -51,6 +51,97 @@ def print_tool_call(line: str) -> None:
         console.print(f"[bold bright_cyan]{line}[/]")
         return
     print(style(line, fg="bright_cyan", bold=True))
+
+
+_STREAM_LINE_OPEN = False
+_STREAM_MODE = "idle"  # idle | plain | rich
+_STREAM_TITLE = "Assistant"
+_STREAM_BUFFER: list[str] = []
+_STREAM_LIVE = None
+
+
+def _stream_panel(title: str, content: str):
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+
+    # Keep one stable panel and only refresh its body while streaming.
+    try:
+        renderable = Markdown(content or " ")
+    except Exception:
+        renderable = Text(content)
+    return Panel(
+        renderable,
+        title=title,
+        border_style="bright_black",
+        title_align="left",
+    )
+
+
+def stream_assistant_start(*, title: str = "Assistant") -> None:
+    """Start streaming assistant output."""
+    global _STREAM_LINE_OPEN, _STREAM_MODE, _STREAM_TITLE, _STREAM_BUFFER, _STREAM_LIVE
+    if _STREAM_LINE_OPEN:
+        return
+
+    if rich_enabled():
+        try:
+            from rich.live import Live
+
+            _STREAM_TITLE = title
+            _STREAM_BUFFER = []
+            _STREAM_LIVE = Live(
+                _stream_panel(title, ""),
+                console=get_console(),
+                refresh_per_second=20,
+                transient=False,
+            )
+            _STREAM_LIVE.__enter__()
+            _STREAM_MODE = "rich"
+        except Exception:
+            _STREAM_MODE = "plain"
+            print(style(f"{title}: ", fg="bright_black"), end="", flush=True)
+    else:
+        _STREAM_MODE = "plain"
+        print(style(f"{title}: ", fg="bright_black"), end="", flush=True)
+
+    _STREAM_LINE_OPEN = True
+
+
+def stream_assistant_write(chunk: str) -> None:
+    """Write one streaming chunk to stdout."""
+    if not chunk:
+        return
+    global _STREAM_BUFFER
+
+    if _STREAM_MODE == "rich" and _STREAM_LIVE is not None:
+        _STREAM_BUFFER.append(chunk)
+        _STREAM_LIVE.update(_stream_panel(_STREAM_TITLE, "".join(_STREAM_BUFFER)))
+        return
+
+    if _STREAM_MODE == "plain":
+        print(chunk, end="", flush=True)
+
+
+def stream_assistant_end() -> None:
+    """End streaming assistant output."""
+    global _STREAM_LINE_OPEN, _STREAM_MODE, _STREAM_BUFFER, _STREAM_LIVE
+    if not _STREAM_LINE_OPEN:
+        return
+
+    if _STREAM_MODE == "rich":
+        if _STREAM_LIVE is not None:
+            try:
+                _STREAM_LIVE.__exit__(None, None, None)
+            except Exception:
+                pass
+    else:
+        print()
+
+    _STREAM_MODE = "idle"
+    _STREAM_BUFFER = []
+    _STREAM_LIVE = None
+    _STREAM_LINE_OPEN = False
 
 
 def clear_screen() -> None:
@@ -156,6 +247,8 @@ def _truncate(text: str, max_chars: int) -> tuple[str, bool]:
 def print_tool_output(name: str, output: str, max_preview: int = 800) -> None:
     """Print formatted tool output."""
     if name in {"Task"}:
+        return
+    if not (output or "").strip():
         return
 
     if name == "Skill":

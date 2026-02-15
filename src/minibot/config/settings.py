@@ -33,6 +33,7 @@ llm:
   api_key: ${OPENAI_API_KEY}
   model: ${MODEL_ID:gpt-4.1-mini}
   max_tokens: 8000
+  stream_enabled: true
 
 tools:
   enabled:
@@ -53,6 +54,7 @@ teams:
   log_dir: .minibot/teams
   wait_timeout_sec: 30
   quiet_teammates: true
+  debug_teammate_output: false
 """
 
 
@@ -220,6 +222,7 @@ def _parse_llm_config(data: dict, env_defaults: dict[str, str]) -> LLMConfig:
             or "gpt-4.1-mini"
         ),
         max_tokens=data.get("max_tokens", 8000),
+        stream_enabled=data.get("stream_enabled", True),
     )
 
 
@@ -294,6 +297,7 @@ def _parse_teams_config(data: dict | None) -> TeamsConfig:
         log_dir=data.get("log_dir", ".minibot/teams"),
         wait_timeout_sec=data.get("wait_timeout_sec", 30),
         quiet_teammates=data.get("quiet_teammates", True),
+        debug_teammate_output=data.get("debug_teammate_output", False),
     )
 
 
