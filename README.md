@@ -16,6 +16,8 @@
 
 **[ 核心理念 ]** &nbsp; `纯原生实现` • `透明可控` • `MCP 协议` • `插件化架构`
 
+[中文](README.md) | [English](docs/README.en.md)
+
 </div>
 </div>
 
