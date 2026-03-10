@@ -120,6 +120,7 @@ class Agent:
         self.skill_loader = SkillLoader(self.config.skills_dir)
         self.todo_manager = TodoManager()
         self.agent_registry = AgentRegistry()
+        self.agent_registry.apply_config(self.config.subagents)
         self.tool_registry = ToolRegistry()
 
         self.hook_manager = HookManager(self.config.hooks, self.workdir)
@@ -157,6 +158,7 @@ class Agent:
             agent_registry=self.agent_registry,
             hook_manager=self.hook_manager,
             workdir=self.workdir,
+            skill_loader=self.skill_loader,
         )
 
         self._register_tools()

@@ -12,6 +12,11 @@ from ..hooks.manager import HookManager
 from .registry import AgentRegistry
 from ..utils.rich_utils import get_console, rich_enabled
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..skills.loader import SkillLoader
+
 
 class SubagentExecutor:
     """Executes subagent tasks."""
@@ -23,12 +28,14 @@ class SubagentExecutor:
         agent_registry: AgentRegistry,
         hook_manager: HookManager,
         workdir: Path,
+        skill_loader: "SkillLoader | None" = None,
     ):
         self.client = client
         self.tool_registry = tool_registry
         self.agent_registry = agent_registry
         self.hook_manager = hook_manager
         self.workdir = workdir
+        self.skill_loader = skill_loader
 
     def _get_tools_for_agent(self, agent_type: str) -> list[dict]:
         """Get tool definitions for an agent type."""
@@ -36,17 +43,25 @@ class SubagentExecutor:
         if agent is None:
             return []
 
+        excluded = {"Task", "TeamCreate", "TeamMembers", "TeamTask", "TeamMessage", "TeamBroadcast", "TeamWait", "TeamShutdown"}
+        if not agent.skills_enabled:
+            excluded.add("Skill")
+
         if agent.tools == "*":
-            # Return all base tools (excluding meta tools like Task, Skill)
             return [
                 t.to_dict()
                 for t in self.tool_registry.get_all()
-                if t.name not in ("Task", "Skill", "TeamCreate", "TeamMembers", "TeamTask", "TeamMessage", "TeamBroadcast", "TeamWait", "TeamShutdown")
+                if t.name not in excluded
             ]
+
+        allowed_names = set(agent.tools)
+        if agent.skills_enabled:
+            allowed_names.add("Skill")
 
         return [
             t.to_dict()
-            for t in self.tool_registry.filter_by_names(agent.tools)
+            for t in self.tool_registry.get_all()
+            if t.name in allowed_names
         ]
 
     async def execute(
@@ -60,9 +75,14 @@ class SubagentExecutor:
         if agent is None:
             return f"Error: Unknown agent type '{agent_type}'"
 
+        skills_section = ""
+        if agent.skills_enabled and self.skill_loader:
+            skills_desc = self.skill_loader.get_descriptions()
+            skills_section = f"\n\nAvailable Skills:\n{skills_desc}\nUse the Skill tool to load specialized knowledge when needed."
+
         sub_system = f"""You are a {agent_type} subagent at {self.workdir}.
 
-{agent.prompt}
+{agent.prompt}{skills_section}
 
 Complete the task and return a clear, concise summary."""
 

@@ -18,6 +18,8 @@ from .schema import (
     HookDefinition,
     MemoryConfig,
     TeamsConfig,
+    SubagentConfig,
+    SubagentsConfig,
 )
 from ..utils.path import resolve_app_home, resolve_project_root
 
@@ -55,6 +57,14 @@ teams:
   wait_timeout_sec: 30
   quiet_teammates: true
   debug_teammate_output: false
+
+subagents:
+  explore:
+    skills_enabled: false
+  code:
+    skills_enabled: false
+  plan:
+    skills_enabled: false
 """
 
 
@@ -301,6 +311,23 @@ def _parse_teams_config(data: dict | None) -> TeamsConfig:
     )
 
 
+def _parse_subagents_config(data: dict | None) -> SubagentsConfig:
+    """Parse subagents configuration."""
+    if data is None:
+        return SubagentsConfig()
+    agents: dict[str, SubagentConfig] = {}
+    for name, agent_data in data.items():
+        if not isinstance(agent_data, dict):
+            continue
+        agents[name] = SubagentConfig(
+            description=agent_data.get("description"),
+            tools=agent_data.get("tools"),
+            prompt=agent_data.get("prompt"),
+            skills_enabled=agent_data.get("skills_enabled", False),
+        )
+    return SubagentsConfig(agents=agents)
+
+
 def load_config(
     config_dir: Path | None = None,
     workdir: Path | None = None,
@@ -376,6 +403,7 @@ def load_config(
         mcp=_parse_mcp_config(mcp_config),
         memory=_parse_memory_config(default_config.get("memory"), app_home),
         teams=_parse_teams_config(default_config.get("teams")),
+        subagents=_parse_subagents_config(default_config.get("subagents")),
     )
 
     return _config

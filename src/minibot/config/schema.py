@@ -82,6 +82,21 @@ class TeamsConfig:
 
 
 @dataclass
+class SubagentConfig:
+    """Single subagent type override."""
+    description: str | None = None
+    tools: list[str] | None = None
+    prompt: str | None = None
+    skills_enabled: bool = False
+
+
+@dataclass
+class SubagentsConfig:
+    """Subagents configuration."""
+    agents: dict[str, SubagentConfig] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     """Main configuration."""
     workdir: Path = field(default_factory=Path.cwd)
@@ -94,6 +109,7 @@ class Config:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     teams: TeamsConfig = field(default_factory=TeamsConfig)
+    subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
 
     def __post_init__(self):
         if isinstance(self.workdir, str):
