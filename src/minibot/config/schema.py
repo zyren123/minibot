@@ -88,6 +88,7 @@ class SubagentConfig:
     tools: list[str] | None = None
     prompt: str | None = None
     skills_enabled: bool = False
+    enabled: bool = True
 
 
 @dataclass

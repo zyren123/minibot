@@ -164,7 +164,7 @@ def test_load_config_parses_subagents_skills(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
     _write(
-        project_root / "config" / "default.yaml",
+        app_home / "config" / "default.yaml",
         """\
 subagents:
   explore:

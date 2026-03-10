@@ -10,7 +10,7 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def test_load_config_merges_global_and_project_with_source_aware_paths(tmp_path, monkeypatch):
+def test_load_config_from_global_only(tmp_path, monkeypatch):
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     workdir = project_root / "src"
@@ -19,40 +19,23 @@ def test_load_config_merges_global_and_project_with_source_aware_paths(tmp_path,
     _write(
         app_home / "config" / "default.yaml",
         """
-skills_dir: global-skills
+skills_dir: custom-skills
 llm:
-  model: global-model
+  model: custom-model
 tools:
   timeout: 30
-""".strip(),
-    )
-    _write(
-        project_root / "config" / "default.yaml",
-        """
-skills_dir: project-skills
-llm:
-  model: project-model
-tools:
   disabled: ["Task"]
 """.strip(),
     )
     _write(
         app_home / "config" / "hooks.yaml",
         """
-hooks_dir: global-hooks
-enabled: true
-hooks: []
-""".strip(),
-    )
-    _write(
-        project_root / "config" / "hooks.yaml",
-        """
+hooks_dir: custom-hooks
 enabled: false
 hooks: []
 """.strip(),
     )
-    _write(app_home / "config" / "mcp_servers.yaml", "enabled: true\nservers: []\n")
-    _write(project_root / "config" / "mcp_servers.yaml", "enabled: false\nservers: []\n")
+    _write(app_home / "config" / "mcp_servers.yaml", "enabled: false\nservers: []\n")
 
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -63,24 +46,23 @@ hooks: []
     assert config.workdir == workdir.resolve()
     assert config.project_root == project_root.resolve()
     assert config.app_home == app_home.resolve()
-    assert config.llm.model == "project-model"
+    assert config.llm.model == "custom-model"
     assert config.tools.timeout == 30
     assert config.tools.disabled == ["Task"]
-    assert config.skills_dir == (project_root / "config" / "project-skills").resolve()
+    assert config.skills_dir == (app_home / "config" / "custom-skills").resolve()
     assert config.hooks.enabled is False
-    assert config.hooks.hooks_dir == (app_home / "config" / "global-hooks").resolve()
+    assert config.hooks.hooks_dir == (app_home / "config" / "custom-hooks").resolve()
     assert config.mcp.enabled is False
     assert config.memory.memory_dir == str((app_home / "memory").resolve())
 
 
-def test_load_config_env_precedence_process_over_project_over_global(tmp_path, monkeypatch):
+def test_load_config_env_precedence_process_over_global(tmp_path, monkeypatch):
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
-    _write(app_home / ".env", "OPENAI_API_KEY=global-key\nMODEL_ID=global-model\n")
     _write(
-        project_root / ".env",
-        "OPENAI_API_KEY=project-key\nMODEL_ID=project-model\nOPENAI_BASE_URL=https://example.test/v1\n",
+        app_home / ".env",
+        "OPENAI_API_KEY=global-key\nMODEL_ID=global-model\nOPENAI_BASE_URL=https://global.test/v1\n",
     )
 
     monkeypatch.setenv("OPENAI_API_KEY", "process-key")
@@ -94,17 +76,17 @@ def test_load_config_env_precedence_process_over_project_over_global(tmp_path, m
     )
 
     assert config.llm.api_key == "process-key"
-    assert config.llm.model == "project-model"
-    assert config.llm.base_url == "https://example.test/v1"
+    assert config.llm.model == "global-model"
+    assert config.llm.base_url == "https://global.test/v1"
 
 
 def test_yaml_env_placeholder_reads_from_dotenv_defaults(tmp_path, monkeypatch):
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
-    _write(project_root / ".env", "MODEL_ID=from-project-dotenv\n")
+    _write(app_home / ".env", "MODEL_ID=from-global-dotenv\n")
     _write(
-        project_root / "config" / "default.yaml",
+        app_home / "config" / "default.yaml",
         """
 llm:
   model: ${MODEL_ID:gpt-4.1-mini}
@@ -118,44 +100,10 @@ llm:
         project_root=project_root,
     )
 
-    assert config.llm.model == "from-project-dotenv"
+    assert config.llm.model == "from-global-dotenv"
 
 
-def test_bootstrap_global_config_copies_from_project_when_missing(tmp_path):
-    app_home = tmp_path / "app-home"
-    project_root = tmp_path / "project"
-    project_root.mkdir(parents=True)
-    _write(
-        project_root / "config" / "default.yaml",
-        """
-llm:
-  model: project-seed-model
-""".strip(),
-    )
-    _write(
-        project_root / "config" / "hooks.yaml",
-        """
-enabled: false
-hooks: []
-""".strip(),
-    )
-    _write(project_root / "config" / "mcp_servers.yaml", "enabled: false\nservers: []\n")
-
-    config = load_config(
-        workdir=project_root,
-        app_home=app_home,
-        project_root=project_root,
-    )
-
-    assert (app_home / "config" / "default.yaml").exists()
-    assert (app_home / "config" / "hooks.yaml").exists()
-    assert (app_home / "config" / "mcp_servers.yaml").exists()
-    assert config.llm.model == "project-seed-model"
-    assert config.hooks.enabled is False
-    assert config.mcp.enabled is False
-
-
-def test_bootstrap_global_config_writes_templates_when_project_config_absent(tmp_path):
+def test_bootstrap_global_config_writes_templates(tmp_path):
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
@@ -179,15 +127,6 @@ def test_load_config_continues_when_global_bootstrap_is_not_writable(tmp_path, m
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
-    _write(
-        project_root / "config" / "default.yaml",
-        """
-llm:
-  model: project-only-model
-""".strip(),
-    )
-    _write(project_root / "config" / "hooks.yaml", "enabled: false\nhooks: []\n")
-    _write(project_root / "config" / "mcp_servers.yaml", "enabled: false\nservers: []\n")
 
     global_config_dir = (app_home / "config").resolve()
     original_mkdir = Path.mkdir
@@ -199,15 +138,16 @@ llm:
 
     monkeypatch.setattr(Path, "mkdir", _readonly_mkdir)
 
+    # Note: Because app_home/config is read-only and missing, _load_yaml will return {}
     config = load_config(
         workdir=project_root,
         app_home=app_home,
         project_root=project_root,
     )
 
-    assert config.llm.model == "project-only-model"
-    assert config.hooks.enabled is False
-    assert config.mcp.enabled is False
+    assert config.llm.model == "gpt-4.1-mini"
+    assert config.hooks.enabled is True
+    assert config.mcp.enabled is True
 
 
 @pytest.mark.parametrize(
@@ -229,7 +169,7 @@ def test_load_config_rejects_unset_env_path_placeholders(
     app_home = tmp_path / "app-home"
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
-    _write(project_root / "config" / target_file, content)
+    _write(app_home / "config" / target_file, content)
 
     monkeypatch.delenv(missing_env, raising=False)
 
@@ -246,7 +186,7 @@ def test_load_config_parses_stream_and_teammate_debug_flags(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True)
     _write(
-        project_root / "config" / "default.yaml",
+        app_home / "config" / "default.yaml",
         """
 llm:
   stream_enabled: false

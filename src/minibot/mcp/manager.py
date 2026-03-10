@@ -3,7 +3,7 @@
 import asyncio
 from pathlib import Path
 
-from ..config.schema import MCPConfig
+from ..config.schema import MCPConfig, MCPServerConfig
 from ..tools.registry import ToolRegistry
 from .client import MCPClient
 from .protocol import MCPTool, MCPResource
@@ -87,6 +87,35 @@ class MCPManager:
     def list_servers(self) -> list[str]:
         """List all connected server names."""
         return list(self._clients.keys())
+
+    def get_all_server_configs(self) -> list[MCPServerConfig]:
+        """Return every configured server (connected or not)."""
+        return list(self.config.servers)
+
+    def is_connected(self, name: str) -> bool:
+        """Whether a server is currently connected."""
+        return name in self._clients
+
+    async def connect_server(self, name: str) -> Exception | None:
+        """Connect a single server by config name. Returns error or None."""
+        cfg = next((s for s in self.config.servers if s.name == name), None)
+        if cfg is None:
+            return ValueError(f"Unknown server: {name}")
+        if name in self._clients:
+            return None  # already connected
+        client = MCPClient(cfg, self.workdir)
+        try:
+            await client.connect()
+        except Exception as exc:
+            return exc
+        self._clients[name] = client
+        return None
+
+    async def disconnect_server(self, name: str) -> None:
+        """Disconnect a single server by name."""
+        client = self._clients.pop(name, None)
+        if client is not None:
+            await client.disconnect()
 
     @property
     def server_count(self) -> int:

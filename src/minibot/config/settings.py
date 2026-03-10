@@ -110,15 +110,7 @@ def _load_yaml(path: Path, env_defaults: dict[str, str] | None = None) -> dict:
     return _resolve_env_vars(data, env_defaults)
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Deep-merge two dictionaries with override precedence."""
-    merged = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+
 
 
 def _resolve_path_value(value: str | Path, base_dir: Path) -> Path:
@@ -148,29 +140,41 @@ def _resolve_config_path(
     return _resolve_path_value(value, base_dir)
 
 
-def _load_env_files(app_home: Path, project_root: Path) -> dict[str, str]:
-    """Load .env defaults in order: global -> project."""
+def _load_env_files(app_home: Path, project_root: Path | None = None) -> dict[str, str]:
+    """Load .env defaults from global app home, creating from .env.example if missing."""
     merged: dict[str, str] = {}
-    for path in (app_home / ".env", project_root / ".env"):
-        if not path.exists():
-            continue
+    path = app_home / ".env"
+
+    if not path.exists() and project_root:
+        example_path = project_root / ".env.example"
+        if example_path.exists():
+            try:
+                shutil.copy2(example_path, path)
+                from ..utils.rich_utils import get_console, rich_enabled
+                if rich_enabled():
+                    console = get_console()
+                    console.print(f"\n[bold yellow]⚠️  Created global .env file at {path}[/bold yellow]")
+                    console.print("[bold yellow]⚠️  Please configure your MODEL_ID, OPENAI_API_KEY, and OPENAI_BASE_URL before continuing.[/bold yellow]\n")
+                else:
+                    print(f"\n⚠️  Created global .env file at {path}")
+                    print("⚠️  Please configure your MODEL_ID, OPENAI_API_KEY, and OPENAI_BASE_URL before continuing.\n")
+            except OSError:
+                pass
+
+    if path.exists():
         for key, value in dotenv_values(path).items():
             if value is not None:
                 merged[key] = value
     return merged
 
 
-def _bootstrap_global_config(
-    *,
-    app_home: Path,
-    project_config_dir: Path,
-) -> None:
-    """Create global config files when missing, using project files as seed."""
+def _bootstrap_global_config(app_home: Path, project_root: Path | None = None) -> None:
+    """Create global config files when missing."""
     global_config_dir = (app_home / "config").resolve()
     try:
         global_config_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Read-only app home should not block loading project-local config.
+        # Read-only app home
         return
 
     files: list[tuple[str, str]] = [
@@ -183,33 +187,20 @@ def _bootstrap_global_config(
         global_file = global_config_dir / filename
         if global_file.exists():
             continue
-        project_file = project_config_dir / filename
+            
+        legacy_file = project_root / "config" / filename if project_root else None
+        
         try:
-            if project_file.exists():
-                shutil.copy2(project_file, global_file)
-                continue
-            global_file.write_text(template.rstrip() + "\n", encoding="utf-8")
+            if legacy_file and legacy_file.exists():
+                shutil.copy2(legacy_file, global_file)
+            else:
+                global_file.write_text(template.rstrip() + "\n", encoding="utf-8")
         except OSError:
             # Best-effort bootstrap: continue loading with whatever config is readable.
             continue
 
 
-def _pick_path_value(
-    *,
-    key: str,
-    global_data: dict,
-    project_data: dict,
-    global_base_dir: Path,
-    project_base_dir: Path,
-    default_base_dir: Path,
-    default: str,
-) -> tuple[Any, Path]:
-    """Pick path config value with source-aware base dir."""
-    if key in project_data:
-        return project_data[key], project_base_dir
-    if key in global_data:
-        return global_data[key], global_base_dir
-    return default, default_base_dir
+
 
 
 def _parse_llm_config(data: dict, env_defaults: dict[str, str]) -> LLMConfig:
@@ -324,12 +315,12 @@ def _parse_subagents_config(data: dict | None) -> SubagentsConfig:
             tools=agent_data.get("tools"),
             prompt=agent_data.get("prompt"),
             skills_enabled=agent_data.get("skills_enabled", False),
+            enabled=agent_data.get("enabled", True),
         )
     return SubagentsConfig(agents=agents)
 
 
 def load_config(
-    config_dir: Path | None = None,
     workdir: Path | None = None,
     app_home: Path | None = None,
     project_root: Path | None = None,
@@ -341,51 +332,27 @@ def load_config(
     app_home = (app_home or resolve_app_home()).resolve()
     project_root = (project_root or resolve_project_root(workdir)).resolve()
     global_config_dir = (app_home / "config").resolve()
-    project_config_dir = (config_dir or project_root / "config").resolve()
 
-    _bootstrap_global_config(app_home=app_home, project_config_dir=project_config_dir)
+    _bootstrap_global_config(app_home, project_root)
 
-    env_defaults = _load_env_files(app_home=app_home, project_root=project_root)
+    env_defaults = _load_env_files(app_home, project_root)
 
-    global_default = _load_yaml(global_config_dir / "default.yaml", env_defaults)
-    project_default = _load_yaml(project_config_dir / "default.yaml", env_defaults)
-    global_hooks = _load_yaml(global_config_dir / "hooks.yaml", env_defaults)
-    project_hooks = _load_yaml(project_config_dir / "hooks.yaml", env_defaults)
-    global_mcp = _load_yaml(global_config_dir / "mcp_servers.yaml", env_defaults)
-    project_mcp = _load_yaml(project_config_dir / "mcp_servers.yaml", env_defaults)
+    default_config = _load_yaml(global_config_dir / "default.yaml", env_defaults)
+    hooks_config = _load_yaml(global_config_dir / "hooks.yaml", env_defaults)
+    mcp_config = _load_yaml(global_config_dir / "mcp_servers.yaml", env_defaults)
 
-    default_config = _deep_merge(global_default, project_default)
-    hooks_config = _deep_merge(global_hooks, project_hooks)
-    mcp_config = _deep_merge(global_mcp, project_mcp)
-
-    raw_skills_dir, skills_base_dir = _pick_path_value(
-        key="skills_dir",
-        global_data=global_default,
-        project_data=project_default,
-        global_base_dir=global_config_dir,
-        project_base_dir=project_config_dir,
-        default_base_dir=project_root,
-        default="skills",
-    )
+    raw_skills_dir = default_config.get("skills_dir", "skills")
     skills_dir = _resolve_config_path(
         key="skills_dir",
         value=raw_skills_dir,
-        base_dir=skills_base_dir,
+        base_dir=global_config_dir,
     )
 
-    raw_hooks_dir, hooks_base_dir = _pick_path_value(
-        key="hooks_dir",
-        global_data=global_hooks,
-        project_data=project_hooks,
-        global_base_dir=global_config_dir,
-        project_base_dir=project_config_dir,
-        default_base_dir=project_root,
-        default="hooks",
-    )
+    raw_hooks_dir = hooks_config.get("hooks_dir", "hooks")
     hooks_dir = _resolve_config_path(
         key="hooks_dir",
         value=raw_hooks_dir,
-        base_dir=hooks_base_dir,
+        base_dir=global_config_dir,
     )
 
     _config = Config(

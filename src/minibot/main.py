@@ -11,12 +11,20 @@ from .utils.output import clear_screen, print_panel, print_system, prompt_input,
 from .utils.rich_utils import rich_enabled, get_console
 from .utils.prompt_toolkit import SlashCommand, PromptToolkitInput, prompt_toolkit_enabled
 from .utils.path import resolve_app_home, resolve_project_root
+from .ui.cmd_memory import handle_memory_cmd
+from .ui.cmd_agent import handle_agent_cmd
+from .ui.cmd_mcp import handle_mcp_cmd
+from .ui.cmd_model import handle_model_cmd
 
 
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show this help",
     "/info": "Show session info",
     "/stream": "Streaming control: /stream [on|off|status]",
+    "/memory": "Memory management: /memory [show|edit|list|daily|append]",
+    "/agent": "Subagent management: /agent [list|info|enable|disable|create|delete]",
+    "/mcp": "MCP server management: /mcp [list]",
+    "/model": "Model management: /model [config]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
     "/clear": "Clear the screen",
@@ -208,6 +216,42 @@ async def repl(agent: Agent) -> None:
                         history.clear()
                         print_system("Conversation history cleared.")
                     continue
+                if cmd == "/memory":
+                    cmd_args = user_input.strip()[len("/memory"):].strip()
+                    await handle_memory_cmd(cmd_args, agent.memory_manager)
+                    continue
+                if cmd == "/agent":
+                    cmd_args = user_input.strip()[len("/agent"):].strip()
+                    config_path = agent.config.app_home / "config" / "default.yaml"
+
+                    async def _agent_prompt(rich_label: str, plain_label: str) -> str:
+                        return await _prompt(rich_label=rich_label, plain_label=plain_label)
+
+                    await handle_agent_cmd(
+                        cmd_args, agent.agent_registry,
+                        config_path, _agent_prompt,
+                    )
+                    continue
+                if cmd == "/mcp":
+                    cmd_args = user_input.strip()[len("/mcp"):].strip()
+                    config_path = agent.config.app_home / "config" / "mcp_servers.yaml"
+                    await handle_mcp_cmd(
+                        cmd_args, agent.mcp_manager,
+                        config_path, agent.tool_registry,
+                    )
+                    continue
+                if cmd == "/model":
+                    cmd_args = user_input.strip()[len("/model"):].strip()
+                    app_home = agent.config.app_home
+
+                    async def _model_prompt(rich_label: str, plain_label: str) -> str:
+                        return await _prompt(rich_label=rich_label, plain_label=plain_label)
+
+                    await handle_model_cmd(
+                        cmd_args, app_home, _model_prompt,
+                    )
+                    continue
+
                 if cmd == "/paste":
                     user_input = await _read_paste_mode()
                     if not user_input:
