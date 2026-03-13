@@ -20,6 +20,7 @@ from .schema import (
     TeamsConfig,
     SubagentConfig,
     SubagentsConfig,
+    SessionConfig,
 )
 from ..utils.path import resolve_app_home, resolve_project_root
 
@@ -320,6 +321,18 @@ def _parse_subagents_config(data: dict | None) -> SubagentsConfig:
     return SubagentsConfig(agents=agents)
 
 
+def _parse_session_config(data: dict | None, app_home: Path) -> SessionConfig:
+    """Parse session configuration."""
+    if data is None:
+        data = {}
+    raw_dir = data.get("sessions_dir", "sessions")
+    resolved = _resolve_config_path(key="session.sessions_dir", value=raw_dir, base_dir=app_home)
+    return SessionConfig(
+        enabled=data.get("enabled", True),
+        sessions_dir=str(resolved),
+    )
+
+
 def load_config(
     workdir: Path | None = None,
     app_home: Path | None = None,
@@ -371,6 +384,7 @@ def load_config(
         memory=_parse_memory_config(default_config.get("memory"), app_home),
         teams=_parse_teams_config(default_config.get("teams")),
         subagents=_parse_subagents_config(default_config.get("subagents")),
+        session=_parse_session_config(default_config.get("session"), app_home),
     )
 
     return _config

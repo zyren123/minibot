@@ -6,8 +6,9 @@ from pathlib import Path
 
 from .config import load_config
 from .agent import Agent, UserInterruptedError
+from .session.manager import SessionManager
 from .utils.esc_interrupt import EscInterruptMonitor
-from .utils.output import clear_screen, print_panel, print_system, prompt_input, prompt_input_markup
+from .utils.output import clear_screen, print_assistant, print_panel, print_system, prompt_input, prompt_input_markup
 from .utils.rich_utils import rich_enabled, get_console
 from .utils.prompt_toolkit import SlashCommand, PromptToolkitInput, prompt_toolkit_enabled
 from .utils.path import resolve_app_home, resolve_project_root
@@ -15,6 +16,7 @@ from .ui.cmd_memory import handle_memory_cmd
 from .ui.cmd_agent import handle_agent_cmd
 from .ui.cmd_mcp import handle_mcp_cmd
 from .ui.cmd_model import handle_model_cmd
+from .ui.cmd_session import handle_session_cmd
 
 
 SLASH_COMMANDS: dict[str, str] = {
@@ -25,6 +27,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/agent": "Subagent management: /agent [list|info|enable|disable|create|delete]",
     "/mcp": "MCP server management: /mcp [list]",
     "/model": "Model management: /model [config]",
+    "/session": "Session management: /session [list|new|load|delete|info]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
     "/clear": "Clear the screen",
@@ -101,6 +104,25 @@ def _print_banner(agent: Agent) -> None:
     print_panel("MiniBot", "\n".join(lines))
 
 
+def _render_history(history: list[dict]) -> None:
+    """Render loaded session history to the terminal."""
+    if not history:
+        return
+    print_system("── session history ──")
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "user":
+            if rich_enabled():
+                get_console().print(f"[bold bright_green]You:[/] {content}")
+            else:
+                print(f"You: {content}")
+        elif role == "assistant" and content:
+            print_assistant(content)
+    print_system("── end of history ──")
+    print()
+
+
 async def repl(agent: Agent) -> None:
     """Run the interactive REPL."""
     # Start session
@@ -115,6 +137,17 @@ async def repl(agent: Agent) -> None:
     _print_banner(agent)
 
     history: list[dict] = []
+    session_mgr: SessionManager | None = None
+    current_session_id = agent.session_id
+
+    if agent.config.session.enabled:
+        from pathlib import Path as _Path
+
+        session_mgr = SessionManager(_Path(agent.config.session.sessions_dir))
+        current_session_id = session_mgr.create()
+        agent.reset_session(current_session_id)
+    else:
+        session_mgr = None
     pt_input: PromptToolkitInput | None = None
     if prompt_toolkit_enabled():
         app_home = resolve_app_home()
@@ -251,6 +284,19 @@ async def repl(agent: Agent) -> None:
                         cmd_args, app_home, _model_prompt,
                     )
                     continue
+                if cmd == "/session":
+                    cmd_args = user_input.strip()[len("/session"):].strip()
+                    action = await handle_session_cmd(
+                        cmd_args, session_mgr, current_session_id,
+                    )
+                    if action is not None and "switch_to" in action:
+                        current_session_id = action["switch_to"]
+                        history.clear()
+                        history.extend(action.get("new_history", []))
+                        agent.reset_session(current_session_id)
+                        _print_banner(agent)
+                        _render_history(history)
+                    continue
 
                 if cmd == "/paste":
                     user_input = await _read_paste_mode()
@@ -261,6 +307,12 @@ async def repl(agent: Agent) -> None:
                     continue
 
             history.append({"role": "user", "content": user_input})
+            if session_mgr is not None:
+                session_mgr.append_message(
+                    current_session_id, {"role": "user", "content": user_input},
+                )
+
+            pre_len = len(history)
 
             try:
                 async with EscInterruptMonitor() as esc_monitor:
@@ -270,6 +322,11 @@ async def repl(agent: Agent) -> None:
                 history.append({"role": "assistant", "content": "[Generation interrupted by user via ESC]"})
             except Exception as e:
                 print_system(f"Error: {e}")
+
+            # Persist newly added messages
+            if session_mgr is not None:
+                for msg in history[pre_len:]:
+                    session_mgr.append_message(current_session_id, msg)
 
             print()
     finally:

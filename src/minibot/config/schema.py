@@ -98,6 +98,13 @@ class SubagentsConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Session persistence configuration."""
+    enabled: bool = True
+    sessions_dir: str = "sessions"  # relative to app_home
+
+
+@dataclass
 class Config:
     """Main configuration."""
     workdir: Path = field(default_factory=Path.cwd)
@@ -111,6 +118,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
 
     def __post_init__(self):
         if isinstance(self.workdir, str):

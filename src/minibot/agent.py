@@ -89,6 +89,7 @@ class Agent:
         config: Config | None = None,
         *,
         role: AgentRole = "solo",
+        session_id: str | None = None,
         team_runtime: TeamRuntime | None = None,
         team_id: str | None = None,
         member_id: str | None = None,
@@ -98,7 +99,7 @@ class Agent:
 
         self.config = config or get_config()
         self.workdir = self.config.workdir
-        self.session_id = str(uuid.uuid4())[:8]
+        self.session_id = session_id or str(uuid.uuid4())[:8]
         self.role: AgentRole = role
         self.team_role: Literal["lead", "teammate"] = "teammate" if role == "teammate" else "lead"
         self.team_id = team_id
@@ -170,6 +171,10 @@ class Agent:
         if self.stream_enabled:
             # Re-enable stream attempts after an earlier degraded fallback.
             self.stream_degraded = False
+
+    def reset_session(self, session_id: str) -> None:
+        """Update the session id (used when switching sessions)."""
+        self.session_id = session_id
 
     def _streaming_active(self) -> bool:
         """Whether this agent should attempt streaming responses now."""
