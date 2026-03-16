@@ -62,11 +62,23 @@ class SessionStore:
             f.write(json.dumps(message, ensure_ascii=False) + "\n")
 
     def load(self, session_id: str) -> list[dict]:
-        """Load full conversation history from JSONL."""
+        """Load conversation history from JSONL, starting from the last compaction point."""
         path = self._find_path(session_id)
         if path is None:
             return []
-        return self._read_jsonl(path)
+        
+        messages = self._read_jsonl(path)
+        
+        # Find the last compaction message if any
+        compaction_index = -1
+        for i, msg in enumerate(messages):
+            if msg.get("is_compaction"):
+                compaction_index = i
+                
+        if compaction_index >= 0:
+            return messages[compaction_index:]
+            
+        return messages
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict]:

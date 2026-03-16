@@ -43,6 +43,7 @@ class LLMClient:
         chat_messages = []
         if system:
             chat_messages.append({"role": "system", "content": system})
+            
         chat_messages.extend(messages)
 
         kwargs: dict[str, Any] = {
@@ -54,6 +55,7 @@ class LLMClient:
             kwargs["tools"] = tools
         if stream:
             kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
         return kwargs
 
     def create_message(

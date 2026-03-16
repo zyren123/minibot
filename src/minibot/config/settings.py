@@ -224,6 +224,7 @@ def _parse_llm_config(data: dict, env_defaults: dict[str, str]) -> LLMConfig:
             or "gpt-4.1-mini"
         ),
         max_tokens=data.get("max_tokens", 8000),
+        max_context_tokens=data.get("max_context_tokens", 100000),
         stream_enabled=data.get("stream_enabled", True),
     )
 

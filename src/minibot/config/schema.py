@@ -12,6 +12,7 @@ class LLMConfig:
     api_key: str | None = None
     model: str = "gpt-4.1-mini"
     max_tokens: int = 8000
+    max_context_tokens: int = 100000
     stream_enabled: bool = True
 
 

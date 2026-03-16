@@ -525,6 +525,7 @@ You are now live. Await instructions and begin the ReAct loop."""
     ) -> dict[str, Any]:
         text_parts: list[str] = []
         finish_reason: str | None = None
+        usage: dict[str, int] | None = None
         tool_call_map: dict[int, dict[str, Any]] = {}
         stream_line_open = False
         rendered_any = False
@@ -645,6 +646,14 @@ You are now live. Await instructions and begin the ReAct loop."""
                 chunk_finish = self._field(choice, "finish_reason")
                 if chunk_finish:
                     finish_reason = str(chunk_finish)
+
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0),
+                        "total_tokens": getattr(chunk_usage, "total_tokens", 0),
+                    }
         finally:
             if thinking_open:
                 with suppress(Exception):
@@ -669,6 +678,7 @@ You are now live. Await instructions and begin the ReAct loop."""
             "finish_reason": finish_reason or "stop",
             "tool_calls": tool_calls,
             "stream_rendered": rendered_any and not self.silent,
+            "usage": usage,
         }
 
     async def _create_message_with_interrupt(
@@ -732,6 +742,8 @@ You are now live. Await instructions and begin the ReAct loop."""
             stream_rendered = False
             stream_success = False
 
+            usage = None
+
             if self._streaming_active():
                 try:
                     stream_result = await self._create_message_stream_with_interrupt(
@@ -745,6 +757,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                     finish_reason = stream_result["finish_reason"]
                     tool_calls = stream_result["tool_calls"]
                     stream_rendered = bool(stream_result["stream_rendered"])
+                    usage = stream_result.get("usage")
                     stream_success = True
                 except UserInterruptedError:
                     raise
@@ -773,6 +786,67 @@ You are now live. Await instructions and begin the ReAct loop."""
                 finish_reason = choice.finish_reason
                 content = assistant_message.content or ""
                 tool_calls = assistant_message.tool_calls or []
+                
+                if hasattr(response, "usage") and response.usage:
+                    usage = {
+                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                        "total_tokens": getattr(response.usage, "total_tokens", 0),
+                    }
+                    
+            if usage:
+                total_tokens = usage.get("total_tokens", 0)
+                if not self.silent:
+                    print_system(f"\\[Context: {total_tokens}/{self.config.llm.max_context_tokens}]")
+                
+                # Check for context compaction threshold (80%)
+                if total_tokens > (self.config.llm.max_context_tokens * 0.8):
+                    if not self.silent:
+                        print_system(f"Context length exceeds 80% ({total_tokens} > {int(self.config.llm.max_context_tokens * 0.8)}). "
+                                     f"Running automatic compaction...")
+                    
+                    compaction_system = (
+                        "You are an internal system agent responsible for summarizing long conversation histories. "
+                        "Summarize the conversation strictly in markdown format. "
+                        "Include the following details clearly: "
+                        "1. What happened previously.\n"
+                        "2. The user's goal/purpose.\n"
+                        "3. What tasks exist and their current status/progress.\n"
+                        "Be detailed but concise enough to replace the previous message history."
+                    )
+                    
+                    try:
+                        status_ctx = (
+                            status("[bright_black]Compacting context…[/]")
+                            if self.status_enabled
+                            else nullcontext()
+                        )
+                        with status_ctx:
+                            compaction_resp = await self._create_message_with_interrupt(
+                                messages=messages,
+                                system=compaction_system,
+                                tools=None,
+                                max_tokens=self.config.llm.max_tokens,
+                                interrupt_queue=interrupt_queue,
+                            )
+                        summary = compaction_resp.choices[0].message.content or "Failed to summarize context."
+                        
+                        # Replace history with compaction message, keeping only the final assistant/tool calls logic intact.
+                        compaction_msg = {
+                            "role": "assistant",
+                            "content": f"**[SYSTEM: Context Compacted]**\n\n{summary}",
+                            "is_compaction": True
+                        }
+                        # We clear the existing message list safely and append the summary
+                        messages.clear()
+                        messages.append(compaction_msg)
+                        
+                        if not self.silent:
+                            print_system("Context compaction completed. Older history dropped.")
+                            
+                    except Exception as e:
+                        if not self.silent:
+                            print_system(f"Warning: Context compaction failed: {e}")
 
             if content and not self.silent and not stream_rendered:
                 print_assistant(content, title=self._assistant_title())

@@ -125,17 +125,6 @@ def _render_history(history: list[dict]) -> None:
 
 async def repl(agent: Agent) -> None:
     """Run the interactive REPL."""
-    # Start session
-    await agent.start_session()
-
-    # Connect to MCP servers
-    mcp_errors = await agent.connect_mcp_servers()
-    for server, error in mcp_errors.items():
-        if error:
-            print_system(f"Warning: MCP server '{server}' connect failed: {error}")
-
-    _print_banner(agent)
-
     history: list[dict] = []
     session_mgr: SessionManager | None = None
     current_session_id = agent.session_id
@@ -148,6 +137,17 @@ async def repl(agent: Agent) -> None:
         agent.reset_session(current_session_id)
     else:
         session_mgr = None
+
+    # Start session
+    await agent.start_session()
+
+    # Connect to MCP servers
+    mcp_errors = await agent.connect_mcp_servers()
+    for server, error in mcp_errors.items():
+        if error:
+            print_system(f"Warning: MCP server '{server}' connect failed: {error}")
+
+    _print_banner(agent)
     pt_input: PromptToolkitInput | None = None
     if prompt_toolkit_enabled():
         app_home = resolve_app_home()

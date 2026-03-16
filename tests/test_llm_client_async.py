@@ -92,6 +92,7 @@ async def test_create_message_stream_async_sets_stream_flag(monkeypatch):
         ],
         "max_tokens": 321,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
 
 
