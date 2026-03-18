@@ -83,6 +83,24 @@ We use `uv` for modern Python package management (pip is also supported).
 ### Installation
 
 ```bash
+uv tool install minibotclaw
+
+# Run REPL
+minibot
+
+# Launch WebUI
+minibot-web
+```
+
+Upgrade:
+
+```bash
+uv tool upgrade minibotclaw
+```
+
+Install from source (development):
+
+```bash
 git clone https://github.com/zyren123/minibot.git
 cd minibot
 
@@ -105,6 +123,10 @@ MINIBOT_RICH=1
 ### Launch REPL
 
 ```bash
+# PyPI / uv tool install
+minibot
+
+# Source install (uv sync)
 uv run minibot
 ```
 

@@ -83,6 +83,24 @@ MiniBot 采用极其精简的模块化设计，没有任何复杂的类继承链
 ### 安装
 
 ```bash
+uv tool install minibotclaw
+
+# 运行 REPL
+minibot
+
+# 启动 WebUI
+minibot-web
+```
+
+升级：
+
+```bash
+uv tool upgrade minibotclaw
+```
+
+从源码安装（开发用）：
+
+```bash
 git clone https://github.com/zyren123/minibot.git
 cd minibot
 
@@ -105,6 +123,10 @@ MINIBOT_RICH=1
 ### 启动 REPL
 
 ```bash
+# PyPI / uv tool 安装
+minibot
+
+# 源码安装（uv sync）
 uv run minibot
 ```
 
@@ -117,6 +139,10 @@ uv run minibot
 ### 启动 WebUI（本机）
 
 ```bash
+# PyPI / uv tool 安装
+minibot-web
+
+# 源码安装（uv sync）
 uv run minibot-web
 ```
 
