@@ -59,6 +59,7 @@ dmypy.json
 # Logs
 *.log
 logs/
+error.txt
 
 # Environment variables
 .env

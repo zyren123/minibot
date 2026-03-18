@@ -121,7 +121,11 @@ class SessionStore:
         except OSError:
             return None
 
-        created_at = datetime.fromtimestamp(stat.st_birthtime)
+        # macOS provides st_birthtime; Linux often does not. Fall back to st_ctime.
+        created_ts = getattr(stat, "st_birthtime", None)
+        if created_ts is None:
+            created_ts = stat.st_ctime
+        created_at = datetime.fromtimestamp(created_ts)
         modified_at = datetime.fromtimestamp(stat.st_mtime)
 
         messages = self._read_jsonl(path)
