@@ -71,3 +71,7 @@ Thumbs.db
 
 # Minibot specific
 .minibot/
+
+# WebUI
+webui/node_modules/
+webui/dist/

@@ -42,6 +42,7 @@ from .hooks.manager import HookManager
 from .mcp.manager import MCPManager
 from .teams.context import TeamExecutionContext, team_execution_context
 from .teams.runtime import TeamRuntime
+from .events import EventSink, StreamEvent
 from .utils.output import (
     print_assistant,
     print_tool_call,
@@ -90,6 +91,9 @@ class Agent:
         *,
         role: AgentRole = "solo",
         session_id: str | None = None,
+        extra_system_prompt: str | None = None,
+        event_sink: EventSink | None = None,
+        skills_dir: Any = None,
         team_runtime: TeamRuntime | None = None,
         team_id: str | None = None,
         member_id: str | None = None,
@@ -100,6 +104,8 @@ class Agent:
         self.config = config or get_config()
         self.workdir = self.config.workdir
         self.session_id = session_id or str(uuid.uuid4())[:8]
+        self.extra_system_prompt = (extra_system_prompt or "").strip()
+        self.event_sink = event_sink
         self.role: AgentRole = role
         self.team_role: Literal["lead", "teammate"] = "teammate" if role == "teammate" else "lead"
         self.team_id = team_id
@@ -118,7 +124,8 @@ class Agent:
             model=self.config.llm.model,
         )
 
-        self.skill_loader = SkillLoader(self.config.skills_dir)
+        resolved_skills_dir = skills_dir if skills_dir is not None else self.config.skills_dir
+        self.skill_loader = SkillLoader(resolved_skills_dir)
         self.todo_manager = TodoManager()
         self.agent_registry = AgentRegistry()
         self.agent_registry.apply_config(self.config.subagents)
@@ -139,7 +146,8 @@ class Agent:
         if self.memory_manager is not None:
             notice = self.memory_manager.migration_notice()
             if notice:
-                print_system(f"Warning: {notice}")
+                if self._ui_enabled():
+                    print_system(f"Warning: {notice}")
 
         self.team_runtime: TeamRuntime | None = team_runtime
         self._owns_team_runtime = False
@@ -164,6 +172,22 @@ class Agent:
 
         self._register_tools()
         self.system_prompt = self._build_system_prompt()
+
+    def _ui_enabled(self) -> bool:
+        """Whether terminal rendering should be used."""
+        return self.event_sink is None and not self.silent
+
+    async def _emit(self, event: StreamEvent) -> None:
+        """Emit one structured event if an event sink is configured."""
+        if self.event_sink is None:
+            return
+        try:
+            # Ensure the session_id is always present for consumers.
+            event.setdefault("session_id", self.session_id)
+            await self.event_sink.emit(event)
+        except Exception:
+            # Event emission must not break the agent runtime.
+            return
 
     def set_stream_enabled(self, enabled: bool) -> None:
         """Toggle streaming output for the current session."""
@@ -341,7 +365,7 @@ Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines).
 - Keep updates concise and unblock other teammates quickly.
 """
 
-        return f"""You are an advanced autonomous Coding Agent operating in `{self.workdir}`. your name is Minibot.
+        prompt = f"""You are an advanced autonomous Coding Agent operating in `{self.workdir}`. your name is Minibot.
 Your goal is to solve complex software engineering tasks by following a strict ReAct (Reason -> Act -> Observe) loop.
 
 ## Environment Context
@@ -378,6 +402,11 @@ You must not act without reasoning. For every step, follow this process:
 {team_section}
 {memory_section}
 You are now live. Await instructions and begin the ReAct loop."""
+
+        if self.extra_system_prompt:
+            prompt = f"{prompt}\n\n{self.extra_system_prompt}\n"
+
+        return prompt
 
     async def _execute_tool_with_hooks(
         self,
@@ -530,9 +559,10 @@ You are now live. Await instructions and begin the ReAct loop."""
         stream_line_open = False
         rendered_any = False
         pending_display_parts: list[str] = []
+        assistant_started = False
         thinking_ctx = (
             status("[bright_black]Thinking…[/]")
-            if self.status_enabled and not self.silent
+            if self.status_enabled and self._ui_enabled()
             else nullcontext()
         )
         thinking_open = False
@@ -623,7 +653,11 @@ You are now live. Await instructions and begin the ReAct loop."""
                     chunk_text = self._extract_stream_text(self._field(delta, "content"))
                     if chunk_text:
                         text_parts.append(chunk_text)
-                        if not self.silent:
+                        if not assistant_started:
+                            assistant_started = True
+                            await self._emit({"type": "assistant_start"})
+                        await self._emit({"type": "assistant_delta", "delta_text": chunk_text})
+                        if self._ui_enabled():
                             if not rendered_any:
                                 pending_display_parts.append(chunk_text)
                                 candidate = "".join(pending_display_parts)
@@ -763,13 +797,20 @@ You are now live. Await instructions and begin the ReAct loop."""
                     raise
                 except Exception as exc:
                     self.stream_degraded = True
-                    if not self.silent:
+                    await self._emit(
+                        {
+                            "type": "system",
+                            "message": "Streaming unavailable, fell back to non-streaming.",
+                            "data": {"error": str(exc)},
+                        }
+                    )
+                    if self._ui_enabled():
                         print_system(f"Streaming unavailable, fell back to non-streaming: {exc}")
 
             if not stream_success:
                 status_ctx = (
                     status("[bright_black]Thinking…[/]")
-                    if self.status_enabled
+                    if self.status_enabled and self._ui_enabled()
                     else nullcontext()
                 )
                 with status_ctx:
@@ -795,13 +836,32 @@ You are now live. Await instructions and begin the ReAct loop."""
                     }
                     
             if usage:
+                await self._emit(
+                    {
+                        "type": "system",
+                        "data": {
+                            "usage": usage,
+                            "max_context_tokens": self.config.llm.max_context_tokens,
+                        },
+                    }
+                )
                 total_tokens = usage.get("total_tokens", 0)
-                if not self.silent:
+                if self._ui_enabled():
                     print_system(f"\\[Context: {total_tokens}/{self.config.llm.max_context_tokens}]")
                 
                 # Check for context compaction threshold (80%)
                 if total_tokens > (self.config.llm.max_context_tokens * 0.8):
-                    if not self.silent:
+                    await self._emit(
+                        {
+                            "type": "system",
+                            "message": "Context length exceeds 80%. Running automatic compaction...",
+                            "data": {
+                                "total_tokens": total_tokens,
+                                "threshold": int(self.config.llm.max_context_tokens * 0.8),
+                            },
+                        }
+                    )
+                    if self._ui_enabled():
                         print_system(f"Context length exceeds 80% ({total_tokens} > {int(self.config.llm.max_context_tokens * 0.8)}). "
                                      f"Running automatic compaction...")
                     
@@ -818,7 +878,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                     try:
                         status_ctx = (
                             status("[bright_black]Compacting context…[/]")
-                            if self.status_enabled
+                            if self.status_enabled and self._ui_enabled()
                             else nullcontext()
                         )
                         with status_ctx:
@@ -841,14 +901,46 @@ You are now live. Await instructions and begin the ReAct loop."""
                         messages.clear()
                         messages.append(compaction_msg)
                         
-                        if not self.silent:
+                        await self._emit(
+                            {
+                                "type": "system",
+                                "message": "Context compaction completed. Older history dropped.",
+                            }
+                        )
+                        if self._ui_enabled():
                             print_system("Context compaction completed. Older history dropped.")
                             
                     except Exception as e:
-                        if not self.silent:
+                        await self._emit(
+                            {
+                                "type": "system",
+                                "message": "Warning: Context compaction failed.",
+                                "data": {"error": str(e)},
+                            }
+                        )
+                        if self._ui_enabled():
                             print_system(f"Warning: Context compaction failed: {e}")
 
-            if content and not self.silent and not stream_rendered:
+            # Emit structured assistant end event for all non-interrupted responses.
+            tool_call_summaries = [
+                {
+                    "id": self._tool_call_id(tc) or f"tool-call-{i}",
+                    "name": self._tool_call_name(tc),
+                    "arguments": self._tool_call_arguments(tc),
+                }
+                for i, tc in enumerate(tool_calls, start=1)
+            ]
+            await self._emit(
+                {
+                    "type": "assistant_end",
+                    "content": content,
+                    "finish_reason": finish_reason,
+                    "tool_calls": tool_call_summaries,
+                    "usage": usage or {},
+                }
+            )
+
+            if content and self._ui_enabled() and not stream_rendered:
                 print_assistant(content, title=self._assistant_title())
 
             if finish_reason != "tool_calls":
@@ -866,14 +958,43 @@ You are now live. Await instructions and begin the ReAct loop."""
                         f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
                         f"raw={tc_args_raw!r}"
                     )[:50000]
-                    if not self.silent:
+                    await self._emit(
+                        {
+                            "type": "tool_call",
+                            "tool_call_id": tc_id,
+                            "tool_name": tc_name,
+                            "tool_args": {},
+                            "is_error": True,
+                            "note": parse_note or "invalid_args",
+                        }
+                    )
+                    await self._emit(
+                        {
+                            "type": "tool_result",
+                            "tool_call_id": tc_id,
+                            "tool_name": tc_name,
+                            "tool_output": output,
+                            "is_error": True,
+                        }
+                    )
+                    if self._ui_enabled():
                         print()
                         print_tool_call(f"{self._tool_log_prefix()}> {tc_name}(invalid_args)")
                         print_tool_output(self._tool_output_name(tc_name), output)
                     tool_results.append({"tool_call_id": tc_id, "output": output})
                     continue
 
-                if not self.silent:
+                await self._emit(
+                    {
+                        "type": "tool_call",
+                        "tool_call_id": tc_id,
+                        "tool_name": tc_name,
+                        "tool_args": tc_input,
+                        "note": parse_note or "",
+                    }
+                )
+
+                if self._ui_enabled():
                     if tc_name == "Task":
                         print()
                         print_tool_call(
@@ -894,7 +1015,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                 else:
                     tool_status_ctx = (
                         status(f"[bright_black]Running {tc_name}…[/]")
-                        if self.status_enabled
+                        if self.status_enabled and self._ui_enabled()
                         else nullcontext()
                     )
                     with tool_status_ctx:
@@ -902,7 +1023,17 @@ You are now live. Await instructions and begin the ReAct loop."""
 
                 if parse_note:
                     output = f"Warning: {parse_note}\n{output}"
-                if not self.silent:
+                await self._emit(
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": tc_id,
+                        "tool_name": tc_name,
+                        "tool_output": output,
+                        "is_error": False,
+                        "note": parse_note or "",
+                    }
+                )
+                if self._ui_enabled():
                     print_tool_output(self._tool_output_name(tc_name), output)
                 tool_results.append({"tool_call_id": tc_id, "output": output})
 

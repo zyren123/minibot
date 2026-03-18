@@ -11,10 +11,14 @@ dependencies = [
     "httpx>=0.25.0",
     "rich>=13.7.0",
     "prompt-toolkit>=3.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "sse-starlette>=1.6.5",
 ]
 
 [project.scripts]
 minibot = "minibot.main:main"
+minibot-web = "minibot.server.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -22,3 +26,17 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/minibot"]
+include = ["src/minibot/server/static/**"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/minibot/**",
+    "webui/**",
+    "README.md",
+    "docs/**",
+    "config/**",
+    "hooks/**",
+    "skills/**",
+    "examples/**",
+    "tests/**",
+]

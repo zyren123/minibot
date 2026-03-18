@@ -114,6 +114,64 @@ uv run minibot
 - `/info`
 - `/stream [on|off|status]`
 
+### 启动 WebUI（本机）
+
+```bash
+uv run minibot-web
+```
+
+然后打开：`http://127.0.0.1:7860/`
+
+开发模式（前后端分离）：
+
+```bash
+# Terminal A
+uv run minibot-web --reload
+
+# Terminal B
+cd webui
+npm install
+npm run dev
+```
+
+### SDK 使用（Python）
+
+非流式：
+
+```python
+from minibot import Minibot
+
+agent = Minibot(system_prompt="你是一个中文助手。")
+result = agent.chat_sync("你好")
+print(result.assistant_text)
+```
+
+流式（事件）：
+
+```python
+import asyncio
+from minibot import Minibot
+
+async def main():
+    agent = Minibot()
+    async for ev in agent.stream("给我讲个笑话"):
+        if ev.get("type") == "assistant_delta":
+            print(ev.get("delta_text", ""), end="", flush=True)
+
+asyncio.run(main())
+```
+
+注册自定义工具（直接传 Python function）：
+
+```python
+from minibot import Minibot
+
+def echo(text: str) -> str:
+    return text
+
+agent = Minibot(tools=[echo])
+```
+
 ---
 
 ## 💻 源码导读 (Where to Learn)
