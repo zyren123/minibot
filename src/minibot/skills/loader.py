@@ -21,8 +21,14 @@ class SkillLoader:
         Path("~/.claude/skills"),
     )
 
-    def __init__(self, skills_dir: Path | Iterable[Path]):
+    def __init__(
+        self,
+        skills_dir: Path | Iterable[Path],
+        *,
+        disabled_skills: Iterable[str] | None = None,
+    ):
         self.skills_dirs = self._normalize_dirs(skills_dir)
+        self.disabled_skills = {str(name) for name in (disabled_skills or [])}
         self.skills: dict[str, dict[str, Any]] = {}
         self.load_skills()
 
@@ -89,7 +95,11 @@ class SkillLoader:
                     continue
 
                 skill = self.parse_skill_md(skill_md)
-                if skill and skill["name"] not in self.skills:
+                if not skill:
+                    continue
+                if skill["name"] in self.disabled_skills:
+                    continue
+                if skill["name"] not in self.skills:
                     self.skills[skill["name"]] = skill
 
     def get_descriptions(self) -> str:

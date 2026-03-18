@@ -50,6 +50,7 @@ class Minibot:
         skills_dir: str | Path | Iterable[str | Path] | None = None,
         tools: list[ToolInput] | None = None,
         system_prompt: str | None = None,
+        disabled_skills: Iterable[str] | None = None,
     ) -> None:
         if config is None:
             resolved_workdir = Path(workdir).resolve() if workdir is not None else None
@@ -81,6 +82,7 @@ class Minibot:
             extra_system_prompt=system_prompt,
             event_sink=self._event_router,
             skills_dir=skills_dir,
+            disabled_skills=disabled_skills,
         )
 
         if tools:

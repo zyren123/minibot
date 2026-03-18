@@ -3,13 +3,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import type { Message, SessionMeta, StreamEvent } from "../lib/types";
-import { cancelSession, createSession, listSessions, loadSession, streamChat } from "../lib/api";
+import { cancelSession, createSession, deleteSession, listSessions, loadSession, streamChat } from "../lib/api";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-export default function ChatView() {
+export default function ChatView(props: { botId: string; botName?: string }) {
+  const { botId, botName } = props;
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -24,30 +25,36 @@ export default function ChatView() {
     [sessions],
   );
 
-  async function refreshSessions() {
-    const list = await listSessions();
+  async function refreshSessions(nextBotId: string = botId) {
+    const list = await listSessions(nextBotId);
     setSessions(list);
-    if (!sessionId && list.length > 0) setSessionId(list[0].session_id);
+    setSessionId((prev) => {
+      if (prev && list.some((s) => s.session_id === prev)) return prev;
+      return list.length > 0 ? list[0].session_id : null;
+    });
   }
 
   async function ensureSession() {
     if (sessionId) return sessionId;
-    const created = await createSession();
+    const created = await createSession(botId);
     setSessionId(created.session_id);
-    await refreshSessions();
+    await refreshSessions(botId);
     return created.session_id;
   }
 
   async function selectSession(id: string) {
     setSessionId(id);
-    const sess = await loadSession(id);
+    const sess = await loadSession(botId, id);
     setMessages(sess.messages);
   }
 
   useEffect(() => {
-    refreshSessions().catch((e) => setStatus(String(e)));
+    setSessionId(null);
+    setMessages([]);
+    setStatus(null);
+    refreshSessions(botId).catch((e) => setStatus(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [botId]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -107,10 +114,10 @@ export default function ChatView() {
     setPrompt("");
 
     try {
-      for await (const ev of streamChat(sid, prompt.trim())) {
+      for await (const ev of streamChat(botId, sid, prompt.trim())) {
         applyStreamEvent(ev);
       }
-      await refreshSessions();
+      await refreshSessions(botId);
       await selectSession(sid);
     } catch (e) {
       setStatus(String(e));
@@ -122,7 +129,23 @@ export default function ChatView() {
   async function onStop() {
     if (!sessionId) return;
     try {
-      await cancelSession(sessionId);
+      await cancelSession(botId, sessionId);
+    } catch (e) {
+      setStatus(String(e));
+    }
+  }
+
+  async function onDeleteSession(id: string) {
+    if (streaming) return;
+    if (!window.confirm("Delete this session? This cannot be undone.")) return;
+    try {
+      setStatus(null);
+      await deleteSession(botId, id);
+      if (sessionId === id) {
+        setSessionId(null);
+        setMessages([]);
+      }
+      await refreshSessions(botId);
     } catch (e) {
       setStatus(String(e));
     }
@@ -136,14 +159,18 @@ export default function ChatView() {
           <div className="flex gap-2">
             <button
               className="rounded-md bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
-              onClick={() => createSession().then((r) => setSessionId(r.session_id)).then(refreshSessions)}
+              onClick={() =>
+                createSession(botId)
+                  .then((r) => setSessionId(r.session_id))
+                  .then(() => refreshSessions(botId))
+              }
               disabled={streaming}
             >
               New
             </button>
             <button
               className="rounded-md bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
-              onClick={() => refreshSessions().catch((e) => setStatus(String(e)))}
+              onClick={() => refreshSessions(botId).catch((e) => setStatus(String(e)))}
               disabled={streaming}
             >
               Refresh
@@ -152,21 +179,30 @@ export default function ChatView() {
         </div>
         <div className="h-[calc(100%-40px)] overflow-auto px-2 pb-2">
           {sortedSessions.map((s) => (
-            <button
-              key={s.session_id}
-              className={classNames(
-                "w-full rounded-md px-3 py-2 text-left text-sm",
-                sessionId === s.session_id ? "bg-zinc-900 text-zinc-100" : "text-zinc-300 hover:bg-zinc-900/60",
-              )}
-              onClick={() => setSessionId(s.session_id)}
-              disabled={streaming}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="font-mono text-xs">{s.session_id}</div>
-                <div className="text-[10px] text-zinc-500">{s.message_count}</div>
-              </div>
-              <div className="mt-1 line-clamp-2 text-xs text-zinc-400">{s.preview || "(no preview)"}</div>
-            </button>
+            <div key={s.session_id} className="mb-1 flex items-stretch gap-1">
+              <button
+                className={classNames(
+                  "flex-1 rounded-md px-3 py-2 text-left text-sm",
+                  sessionId === s.session_id ? "bg-zinc-900 text-zinc-100" : "text-zinc-300 hover:bg-zinc-900/60",
+                )}
+                onClick={() => setSessionId(s.session_id)}
+                disabled={streaming}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-mono text-xs">{s.session_id}</div>
+                  <div className="text-[10px] text-zinc-500">{s.message_count}</div>
+                </div>
+                <div className="mt-1 line-clamp-2 text-xs text-zinc-400">{s.preview || "(no preview)"}</div>
+              </button>
+              <button
+                className="rounded-md bg-zinc-900 px-2 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                onClick={() => void onDeleteSession(s.session_id)}
+                disabled={streaming}
+                title="Delete session"
+              >
+                Del
+              </button>
+            </div>
           ))}
           {sortedSessions.length === 0 && (
             <div className="px-3 py-2 text-xs text-zinc-500">No sessions yet. Click “New”.</div>
@@ -177,6 +213,7 @@ export default function ChatView() {
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
           <div className="text-xs text-zinc-400">
+            Bot: <span className="font-mono">{botName ?? botId}</span> •{" "}
             Session: <span className="font-mono">{sessionId ?? "(none)"}</span>
           </div>
           <div className="flex items-center gap-2">
@@ -250,4 +287,3 @@ export default function ChatView() {
     </div>
   );
 }
-

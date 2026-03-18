@@ -1,4 +1,13 @@
-import type { Config, Message, SessionMeta, StreamEvent } from "./types";
+import type {
+  BotConfig,
+  BotMeta,
+  Config,
+  MCPServerInfo,
+  Message,
+  SessionMeta,
+  SkillInfo,
+  StreamEvent,
+} from "./types";
 
 export async function apiGet<T>(path: string): Promise<T> {
   const resp = await fetch(path);
@@ -26,22 +35,63 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return (await resp.json()) as T;
 }
 
-export async function listSessions(): Promise<SessionMeta[]> {
-  return apiGet<SessionMeta[]>("/api/sessions");
+export async function listBots(): Promise<BotMeta[]> {
+  return apiGet<BotMeta[]>("/api/bots");
 }
 
-export async function createSession(): Promise<{ session_id: string }> {
-  return apiPost<{ session_id: string }>("/api/sessions", {});
+export async function createBot(name?: string): Promise<BotMeta> {
+  return apiPost<BotMeta>("/api/bots", { name: name?.trim() || null });
 }
 
-export async function deleteSession(sessionId: string): Promise<{ deleted: boolean }> {
-  const resp = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+export async function deleteBot(botId: string): Promise<{ deleted: boolean }> {
+  const resp = await fetch(`/api/bots/${encodeURIComponent(botId)}`, { method: "DELETE" });
   if (!resp.ok) throw new Error(await resp.text());
   return (await resp.json()) as { deleted: boolean };
 }
 
-export async function loadSession(sessionId: string): Promise<{ session_id: string; messages: Message[] }> {
-  return apiGet<{ session_id: string; messages: Message[] }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
+export async function getBotConfig(botId: string): Promise<BotConfig> {
+  return apiGet<BotConfig>(`/api/bots/${encodeURIComponent(botId)}/config`);
+}
+
+export async function updateBotConfig(
+  botId: string,
+  body: Partial<BotConfig> & { api_key?: string | null },
+): Promise<{ status: string }> {
+  return apiPut<{ status: string }>(`/api/bots/${encodeURIComponent(botId)}/config`, body);
+}
+
+export async function listSkills(): Promise<SkillInfo[]> {
+  return apiGet<SkillInfo[]>("/api/skills");
+}
+
+export async function listMcpServers(): Promise<MCPServerInfo[]> {
+  return apiGet<MCPServerInfo[]>("/api/mcp/servers");
+}
+
+export async function listSessions(botId: string): Promise<SessionMeta[]> {
+  return apiGet<SessionMeta[]>(`/api/bots/${encodeURIComponent(botId)}/sessions`);
+}
+
+export async function createSession(botId: string): Promise<{ session_id: string }> {
+  return apiPost<{ session_id: string }>(`/api/bots/${encodeURIComponent(botId)}/sessions`, {});
+}
+
+export async function deleteSession(botId: string, sessionId: string): Promise<{ deleted: boolean }> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as { deleted: boolean };
+}
+
+export async function loadSession(
+  botId: string,
+  sessionId: string,
+): Promise<{ session_id: string; messages: Message[] }> {
+  return apiGet<{ session_id: string; messages: Message[] }>(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+  );
 }
 
 export async function getConfig(): Promise<Config> {
@@ -52,12 +102,15 @@ export async function updateConfig(body: Partial<Config> & { api_key?: string | 
   return apiPut<{ status: string }>("/api/config", body);
 }
 
-export async function cancelSession(sessionId: string): Promise<{ status: string }> {
-  return apiPost<{ status: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {});
+export async function cancelSession(botId: string, sessionId: string): Promise<{ status: string }> {
+  return apiPost<{ status: string }>(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/cancel`,
+    {},
+  );
 }
 
-export async function* streamChat(sessionId: string | null, prompt: string): AsyncGenerator<StreamEvent> {
-  const resp = await fetch("/api/stream", {
+export async function* streamChat(botId: string, sessionId: string | null, prompt: string): AsyncGenerator<StreamEvent> {
+  const resp = await fetch(`/api/bots/${encodeURIComponent(botId)}/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, prompt }),
@@ -94,4 +147,3 @@ export async function* streamChat(sessionId: string | null, prompt: string): Asy
     }
   }
 }
-

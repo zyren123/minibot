@@ -52,3 +52,36 @@ export type Config = {
   api_key_masked: string | null;
 };
 
+export type BotMeta = {
+  bot_id: string;
+  name: string;
+  is_default: boolean;
+};
+
+export type BotConfig = {
+  bot_id: string;
+  name: string;
+  base_url: string | null;
+  model: string | null;
+  stream_enabled: boolean;
+  api_key_masked: string | null;
+  tool_plugins: string[];
+  skills_disabled: string[];
+  mcp_overrides: Record<string, boolean>;
+  soul: string;
+};
+
+export type SkillInfo = {
+  name: string;
+  description: string;
+};
+
+export type MCPServerInfo = {
+  name: string;
+  transport: string;
+  enabled_default: boolean;
+  command?: string | null;
+  args: string[];
+  url?: string | null;
+  env_keys: string[];
+};

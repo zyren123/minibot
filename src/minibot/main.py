@@ -16,6 +16,7 @@ from .ui.cmd_memory import handle_memory_cmd
 from .ui.cmd_agent import handle_agent_cmd
 from .ui.cmd_mcp import handle_mcp_cmd
 from .ui.cmd_model import handle_model_cmd
+from .ui.cmd_skills import handle_skills_cmd, load_skills_disabled
 from .ui.cmd_session import handle_session_cmd
 
 
@@ -24,6 +25,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/info": "Show session info",
     "/stream": "Streaming control: /stream [on|off|status]",
     "/memory": "Memory management: /memory [show|edit|list|daily|append]",
+    "/skills": "Skills toggle: /skills [list|enable|disable|toggle]",
     "/agent": "Subagent management: /agent [list|info|enable|disable|create|delete]",
     "/mcp": "MCP server management: /mcp [list]",
     "/model": "Model management: /model [config]",
@@ -253,6 +255,10 @@ async def repl(agent: Agent) -> None:
                     cmd_args = user_input.strip()[len("/memory"):].strip()
                     await handle_memory_cmd(cmd_args, agent.memory_manager)
                     continue
+                if cmd == "/skills":
+                    cmd_args = user_input.strip()[len("/skills"):].strip()
+                    await handle_skills_cmd(cmd_args, agent)
+                    continue
                 if cmd == "/agent":
                     cmd_args = user_input.strip()[len("/agent"):].strip()
                     config_path = agent.config.app_home / "config" / "default.yaml"
@@ -342,7 +348,7 @@ def main() -> None:
     project_root = resolve_project_root(workdir)
     _setup_readline(app_home / "history" / "history")
     config = load_config(workdir=workdir, app_home=app_home, project_root=project_root)
-    agent = Agent(config)
+    agent = Agent(config, disabled_skills=load_skills_disabled(app_home))
 
     asyncio.run(repl(agent))
 

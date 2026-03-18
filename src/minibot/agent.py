@@ -94,6 +94,7 @@ class Agent:
         extra_system_prompt: str | None = None,
         event_sink: EventSink | None = None,
         skills_dir: Any = None,
+        disabled_skills: Any = None,
         team_runtime: TeamRuntime | None = None,
         team_id: str | None = None,
         member_id: str | None = None,
@@ -125,7 +126,8 @@ class Agent:
         )
 
         resolved_skills_dir = skills_dir if skills_dir is not None else self.config.skills_dir
-        self.skill_loader = SkillLoader(resolved_skills_dir)
+        self._skills_dir_source = resolved_skills_dir
+        self.skill_loader = SkillLoader(resolved_skills_dir, disabled_skills=disabled_skills)
         self.todo_manager = TodoManager()
         self.agent_registry = AgentRegistry()
         self.agent_registry.apply_config(self.config.subagents)
@@ -195,6 +197,20 @@ class Agent:
         if self.stream_enabled:
             # Re-enable stream attempts after an earlier degraded fallback.
             self.stream_degraded = False
+
+    def set_disabled_skills(self, disabled_skills: list[str]) -> None:
+        """Update the set of disabled skills and refresh dependent components."""
+        self.skill_loader = SkillLoader(
+            self._skills_dir_source,
+            disabled_skills=disabled_skills,
+        )
+
+        tool = self.tool_registry.get("Skill")
+        if tool is not None and hasattr(tool, "skill_loader"):
+            tool.skill_loader = self.skill_loader
+
+        self.subagent_executor.skill_loader = self.skill_loader
+        self.system_prompt = self._build_system_prompt()
 
     def reset_session(self, session_id: str) -> None:
         """Update the session id (used when switching sessions)."""
