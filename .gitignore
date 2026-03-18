@@ -75,3 +75,7 @@ Thumbs.db
 # WebUI
 webui/node_modules/
 webui/dist/
+
+# WebUI source should not be ignored by generic Python patterns
+!webui/src/lib/
+!webui/src/lib/**
