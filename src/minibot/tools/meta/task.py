@@ -45,7 +45,7 @@ Agent types:
                 },
                 "agent_type": {
                     "type": "string",
-                    "enum": self.agent_registry.list_names(),
+                    "enum": self.agent_registry.list_enabled_names(),
                 },
             },
             "required": ["description", "prompt", "agent_type"],

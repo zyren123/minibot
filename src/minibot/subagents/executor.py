@@ -74,6 +74,10 @@ class SubagentExecutor:
         agent = self.agent_registry.get(agent_type)
         if agent is None:
             return f"Error: Unknown agent type '{agent_type}'"
+        if not agent.enabled:
+            return f"Error: Subagent '{agent_type}' is disabled"
+        if agent.handler is not None:
+            return await agent.handler(description, prompt, agent)
 
         skills_section = ""
         if agent.skills_enabled and self.skill_loader:

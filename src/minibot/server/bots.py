@@ -76,6 +76,9 @@ class BotStore:
 
         return bots
 
+    def all_bot_ids(self) -> list[str]:
+        return [meta.bot_id for meta in self.list_bots()]
+
     def create_bot(self, *, name: str | None = None) -> BotMeta:
         bot_id = _generate_bot_id()
         while (self.bots_root / bot_id).exists():
@@ -103,6 +106,7 @@ class BotStore:
             raise ValueError("Refusing to delete bot outside bots root")
 
         shutil.rmtree(home)
+        self.remove_subagent_references(bot_id)
         return True
 
     def read_soul(self, bot_id: str) -> str:
@@ -129,6 +133,15 @@ class BotStore:
             data[key] = value
         self._write_bot_json(bot_id, data)
         return dict(data)
+
+    def remove_subagent_references(self, subagent_bot_id: str) -> None:
+        for bot_id in self.all_bot_ids():
+            data = self._read_bot_json(bot_id)
+            attached = data.get("attached_subagent_bot_ids")
+            if not isinstance(attached, list) or subagent_bot_id not in attached:
+                continue
+            data["attached_subagent_bot_ids"] = [item for item in attached if item != subagent_bot_id]
+            self._write_bot_json(bot_id, data)
 
     def _read_bot_json(self, bot_id: str) -> dict[str, Any]:
         path = self.bot_home(bot_id) / "bot.json"
@@ -159,4 +172,3 @@ class BotStore:
     def _validate_bot_id(bot_id: str) -> None:
         if not _BOT_ID_RE.match(bot_id):
             raise ValueError("Invalid bot_id")
-

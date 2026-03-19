@@ -61,6 +61,16 @@ class SessionStore:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(message, ensure_ascii=False) + "\n")
 
+    def overwrite(self, session_id: str, messages: list[dict]) -> None:
+        """Rewrite the session JSONL file with the provided messages."""
+        path = self._find_path(session_id)
+        if path is None:
+            path = self.create(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for message in messages:
+                f.write(json.dumps(message, ensure_ascii=False) + "\n")
+
     def load(self, session_id: str) -> list[dict]:
         """Load conversation history from JSONL, starting from the last compaction point."""
         path = self._find_path(session_id)

@@ -27,16 +27,22 @@ class FakeStream:
         self.closed = True
 
 
-def _chunk(*, content=None, tool_calls=None, finish_reason=None):
+def _chunk(*, content=None, tool_calls=None, finish_reason=None, usage=None):
     delta = SimpleNamespace(content=content, tool_calls=tool_calls or [])
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
-    return SimpleNamespace(choices=[choice])
+    return SimpleNamespace(choices=[choice], usage=usage)
 
 
 def _response(*, content: str, finish_reason: str = "stop", tool_calls=None):
     message = SimpleNamespace(content=content, tool_calls=tool_calls or [])
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice])
+
+
+def _assert_assistant_message(message, content: str) -> None:
+    assert message["role"] == "assistant"
+    assert message["content"] == content
+    assert isinstance(message.get("message_id"), str)
 
 
 def _make_agent(tmp_path, *, role="solo", teams_enabled=False):
@@ -94,7 +100,45 @@ async def test_run_loop_streaming_happy_path(tmp_path):
 
     assert client.stream_calls == 1
     assert client.async_calls == 0
-    assert result[-1] == {"role": "assistant", "content": "hello world"}
+    _assert_assistant_message(result[-1], "hello world")
+
+
+@pytest.mark.asyncio
+async def test_run_loop_extracts_reasoning_and_usage_from_stream_chunks(tmp_path):
+    agent = _make_agent(tmp_path)
+    usage = SimpleNamespace(prompt_tokens=12, completion_tokens=34, total_tokens=46)
+
+    class ReasoningClient:
+        model = "test-model"
+
+        async def create_message_stream_async(self, **_kwargs):
+            return FakeStream(
+                [
+                    _chunk(
+                        content=[
+                            SimpleNamespace(type="reasoning", text="step "),
+                            SimpleNamespace(type="text", text="answer"),
+                        ]
+                    ),
+                    _chunk(
+                        content=[SimpleNamespace(type="reasoning", text="by step")],
+                        finish_reason="stop",
+                        usage=usage,
+                    ),
+                ]
+            )
+
+        async def create_message_async(self, **_kwargs):
+            raise AssertionError("fallback should not be used")
+
+    agent.client = ReasoningClient()
+    history = [{"role": "user", "content": "hello"}]
+
+    result = await agent.run_loop(history)
+
+    _assert_assistant_message(result[-1], "answer")
+    assert result[-1]["reasoning"] == "step by step"
+    assert result[-1]["usage"] == {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
 
 
 @pytest.mark.asyncio
@@ -151,7 +195,7 @@ async def test_run_loop_streaming_slow_chunks_are_not_cancelled_by_polling(tmp_p
 
     result = await agent.run_loop(history, interrupt_queue=interrupt_queue)
 
-    assert result[-1] == {"role": "assistant", "content": "slow reply"}
+    _assert_assistant_message(result[-1], "slow reply")
     assert client.stream.cancelled is False
     assert client.stream.closed is True
 
@@ -202,7 +246,7 @@ async def test_stream_thinking_status_starts_before_stream_is_ready(tmp_path, mo
     release_stream.set()
     result = await run_task
 
-    assert result[-1] == {"role": "assistant", "content": "ok"}
+    _assert_assistant_message(result[-1], "ok")
 
 
 @pytest.mark.asyncio
@@ -232,7 +276,7 @@ async def test_run_loop_stream_failure_falls_back_and_marks_degraded(tmp_path):
 
     assert client.stream_calls == 1
     assert client.async_calls == 1
-    assert result[-1] == {"role": "assistant", "content": "fallback"}
+    _assert_assistant_message(result[-1], "fallback")
     assert agent.get_stream_state()["degraded"] is True
 
 
@@ -297,7 +341,7 @@ async def test_stream_tool_call_arguments_are_merged(tmp_path):
 
     assert executed == [("echo", {"text": "hello"})]
     assert any(item.get("role") == "tool" and item.get("tool_call_id") == "call-1" for item in result)
-    assert result[-1] == {"role": "assistant", "content": "done"}
+    _assert_assistant_message(result[-1], "done")
 
 
 @pytest.mark.asyncio
@@ -325,7 +369,7 @@ async def test_teammate_does_not_use_streaming(tmp_path):
 
     result = await agent.run_loop(history)
 
-    assert result[-1] == {"role": "assistant", "content": "ok"}
+    _assert_assistant_message(result[-1], "ok")
     assert client.stream_calls == 0
     assert client.async_calls == 1
 
@@ -389,5 +433,5 @@ async def test_whitespace_before_tool_call_does_not_start_stream_render(tmp_path
 
     result = await agent.run_loop(history)
 
-    assert result[-1] == {"role": "assistant", "content": "done"}
+    _assert_assistant_message(result[-1], "done")
     assert started["count"] == 1

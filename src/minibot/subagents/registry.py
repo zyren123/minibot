@@ -1,10 +1,15 @@
 """Subagent type registry."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config.schema import SubagentsConfig
+
+
+SubagentHandler = Callable[[str, str, "AgentType"], Awaitable[str]]
 
 
 @dataclass
@@ -16,6 +21,8 @@ class AgentType:
     prompt: str
     skills_enabled: bool = False
     enabled: bool = True
+    metadata: dict[str, Any] | None = None
+    handler: SubagentHandler | None = None
 
 
 class AgentRegistry:
@@ -111,6 +118,10 @@ class AgentRegistry:
         """List all agent type names."""
         return list(self._agents.keys())
 
+    def list_enabled_names(self) -> list[str]:
+        """List enabled agent type names."""
+        return [name for name, agent in self._agents.items() if agent.enabled]
+
     def get_descriptions(self) -> str:
         """Get formatted descriptions for system prompt (enabled only)."""
         return "\n".join(
@@ -132,4 +143,3 @@ class AgentRegistry:
                 entry["description"] = agent.description
             result[name] = entry
         return result
-

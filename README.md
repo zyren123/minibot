@@ -106,6 +106,12 @@ cd minibot
 
 # 极速安装依赖
 uv sync
+
+# WebUI 静态资源不再提交到仓库，源码运行前需要先构建一次
+cd webui
+npm install
+npm run build
+cd ..
 ```
 
 ### 配置
@@ -142,7 +148,7 @@ uv run minibot
 # PyPI / uv tool 安装
 minibot-web
 
-# 源码安装（uv sync）
+# 源码安装（需先执行一次 webui/npm run build）
 uv run minibot-web
 ```
 

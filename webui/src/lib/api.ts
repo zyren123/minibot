@@ -1,11 +1,21 @@
 import type {
+  AvailableModel,
   BotConfig,
   BotMeta,
   Config,
+  DeletedMessageResult,
+  DeletedModelsResult,
+  DashboardData,
+  FetchedModel,
   MCPServerInfo,
   Message,
+  ProviderRecord,
+  RegisteredModel,
+  RegeneratedMessageResult,
+  SessionData,
   SessionMeta,
   SkillInfo,
+  SubagentCandidate,
   StreamEvent,
 } from "./types";
 
@@ -60,6 +70,59 @@ export async function updateBotConfig(
   return apiPut<{ status: string }>(`/api/bots/${encodeURIComponent(botId)}/config`, body);
 }
 
+export async function listDashboard(): Promise<DashboardData> {
+  return apiGet<DashboardData>("/api/dashboard");
+}
+
+export async function listAvailableModels(): Promise<AvailableModel[]> {
+  return apiGet<AvailableModel[]>("/api/models/available");
+}
+
+export async function listSubagentCandidates(botId: string): Promise<SubagentCandidate[]> {
+  return apiGet<SubagentCandidate[]>(`/api/bots/${encodeURIComponent(botId)}/subagent-candidates`);
+}
+
+export async function createProvider(body: {
+  name: string;
+  base_url: string;
+  api_key?: string | null;
+  enabled?: boolean;
+}): Promise<ProviderRecord> {
+  return apiPost<ProviderRecord>("/api/providers", body);
+}
+
+export async function updateProvider(
+  providerId: string,
+  body: { name?: string | null; base_url?: string | null; api_key?: string | null; enabled?: boolean | null },
+): Promise<ProviderRecord> {
+  return apiPut<ProviderRecord>(`/api/providers/${encodeURIComponent(providerId)}`, body);
+}
+
+export async function fetchProviderModels(providerId: string): Promise<FetchedModel[]> {
+  return apiPost<FetchedModel[]>(`/api/providers/${encodeURIComponent(providerId)}/fetch-models`, {});
+}
+
+export async function createProviderModels(
+  providerId: string,
+  body: { model_names: string[]; added_via?: string },
+): Promise<RegisteredModel[]> {
+  return apiPost<RegisteredModel[]>(`/api/providers/${encodeURIComponent(providerId)}/models`, body);
+}
+
+export async function deleteProviderModels(
+  providerId: string,
+  body: { model_ids: string[] },
+): Promise<DeletedModelsResult> {
+  return apiPost<DeletedModelsResult>(`/api/providers/${encodeURIComponent(providerId)}/models/delete`, body);
+}
+
+export async function updateModel(
+  modelId: string,
+  body: { label?: string | null; enabled?: boolean | null },
+): Promise<RegisteredModel> {
+  return apiPut<RegisteredModel>(`/api/models/${encodeURIComponent(modelId)}`, body);
+}
+
 export async function listSkills(): Promise<SkillInfo[]> {
   return apiGet<SkillInfo[]>("/api/skills");
 }
@@ -88,9 +151,33 @@ export async function deleteSession(botId: string, sessionId: string): Promise<{
 export async function loadSession(
   botId: string,
   sessionId: string,
-): Promise<{ session_id: string; messages: Message[] }> {
-  return apiGet<{ session_id: string; messages: Message[] }>(
+): Promise<SessionData> {
+  return apiGet<SessionData>(
     `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export async function deleteSessionMessage(
+  botId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<DeletedMessageResult> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as DeletedMessageResult;
+}
+
+export async function regenerateSessionMessage(
+  botId: string,
+  sessionId: string,
+  messageId: string,
+): Promise<RegeneratedMessageResult> {
+  return apiPost<RegeneratedMessageResult>(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/regenerate`,
+    {},
   );
 }
 

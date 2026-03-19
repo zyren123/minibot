@@ -30,6 +30,10 @@ class SessionManager:
         """Persist a single message to the session."""
         self.store.append(session_id, message)
 
+    def overwrite(self, session_id: str, messages: list[dict]) -> None:
+        """Rewrite the full conversation history for a session."""
+        self.store.overwrite(session_id, messages)
+
     def list_all(self) -> list[SessionMeta]:
         """List all sessions sorted by last modified descending."""
         return self.store.list_sessions()

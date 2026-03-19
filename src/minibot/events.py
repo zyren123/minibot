@@ -12,6 +12,7 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
 EventType = Literal[
     "assistant_start",
+    "assistant_reasoning_delta",
     "assistant_delta",
     "assistant_end",
     "tool_call",
@@ -27,7 +28,11 @@ class StreamEvent(TypedDict, total=False):
     session_id: str
 
     # Assistant streaming
+    message_id: str
+    parent_user_message_id: str | None
     delta_text: str
+    reasoning_text: str
+    reasoning: str
     content: str
     finish_reason: str
     tool_calls: list[dict[str, Any]]
@@ -64,4 +69,3 @@ class AsyncQueueEventSink:
 
     async def emit(self, event: StreamEvent) -> None:
         await self.queue.put(event)
-

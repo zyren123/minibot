@@ -37,6 +37,30 @@ def _last_assistant_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _last_assistant_usage(messages: list[dict[str, Any]]) -> dict[str, int] | None:
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        usage = msg.get("usage")
+        if isinstance(usage, dict) and usage:
+            return dict(usage)
+    return None
+
+
+def _last_user_message_id(messages: list[dict[str, Any]]) -> str | None:
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        message_id = msg.get("message_id")
+        if isinstance(message_id, str) and message_id.strip():
+            return message_id
+    return None
+
+
+def _new_message_id() -> str:
+    return f"msg-{uuid.uuid4().hex[:12]}"
+
+
 class Minibot:
     """A friendly wrapper around :class:`minibot.agent.Agent` for SDK usage."""
 
@@ -51,6 +75,8 @@ class Minibot:
         tools: list[ToolInput] | None = None,
         system_prompt: str | None = None,
         disabled_skills: Iterable[str] | None = None,
+        allow_subagent_delegation: bool = True,
+        allow_team_tools: bool = True,
     ) -> None:
         if config is None:
             resolved_workdir = Path(workdir).resolve() if workdir is not None else None
@@ -83,6 +109,8 @@ class Minibot:
             event_sink=self._event_router,
             skills_dir=skills_dir,
             disabled_skills=disabled_skills,
+            allow_subagent_delegation=allow_subagent_delegation,
+            allow_team_tools=allow_team_tools,
         )
 
         if tools:
@@ -197,12 +225,12 @@ class Minibot:
         self.agent.set_stream_enabled(False)
 
         try:
-            result_messages, _usage = await self._run_once(prompt, interrupt_queue=None)
+            result_messages, run_usage = await self._run_once(prompt, interrupt_queue=None)
         finally:
             self.agent.set_stream_enabled(prev_stream)
             await self._event_router.set_queue(None)
 
-        usage: dict[str, int] | None = None
+        usage: dict[str, int] | None = run_usage
         drained: list[StreamEvent] = []
         while True:
             try:
@@ -275,7 +303,12 @@ class Minibot:
             return
 
         if isinstance(run_exc, UserInterruptedError):
-            interrupted = {"role": "assistant", "content": "[Generation interrupted]"}
+            interrupted = {
+                "role": "assistant",
+                "content": "[Generation interrupted]",
+                "message_id": _new_message_id(),
+                "parent_user_message_id": _last_user_message_id(self.messages),
+            }
             self.messages.append(interrupted)
             if self._session_manager is not None:
                 self._session_manager.append_message(self.session_id, interrupted)
@@ -314,7 +347,7 @@ class Minibot:
         *,
         interrupt_queue: "asyncio.Queue[None] | None",
     ) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
-        user_msg = {"role": "user", "content": prompt}
+        user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
         self.messages.append(user_msg)
         if self._session_manager is not None:
             self._session_manager.append_message(self.session_id, user_msg)
@@ -327,7 +360,12 @@ class Minibot:
         except UserInterruptedError:
             raise
         except Exception as exc:
-            error_msg = {"role": "assistant", "content": f"[Error: {exc}]"}
+            error_msg = {
+                "role": "assistant",
+                "content": f"[Error: {exc}]",
+                "message_id": _new_message_id(),
+                "parent_user_message_id": user_msg["message_id"],
+            }
             self.messages.append(error_msg)
 
         new_messages = self.messages[pre_len:] if len(self.messages) >= pre_len else self.messages
@@ -337,4 +375,5 @@ class Minibot:
 
         # Best-effort extract latest usage from emitted events (assistant_end includes it).
         # If no sink/consumer is attached, usage will remain None.
+        usage = _last_assistant_usage(new_messages) or _last_assistant_usage(self.messages)
         return self.messages, usage

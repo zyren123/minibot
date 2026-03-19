@@ -1,8 +1,11 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from src.minibot.session.manager import SessionManager
 
 
 @pytest.fixture()
@@ -124,3 +127,299 @@ def test_manager_delete_session_clears_cache(server_env: dict[str, Path]) -> Non
     ok = asyncio.run(manager.delete_session(bot_id, sid))
     assert ok is True
     assert (bot_id, sid) not in manager._bots
+
+
+def test_session_load_returns_structured_message_metadata(client: TestClient, server_env: dict[str, Path]) -> None:
+    session_id = client.post("/api/sessions", json={}).json()["session_id"]
+    manager = SessionManager(server_env["home"] / "sessions")
+    manager.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "hello", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "world",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+                "reasoning": "step by step",
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            },
+        ],
+    )
+
+    resp = client.get(f"/api/sessions/{session_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["messages"][1]["message_id"] == "msg-assistant-1"
+    assert body["messages"][1]["parent_user_message_id"] == "msg-user-1"
+    assert body["messages"][1]["reasoning"] == "step by step"
+    assert body["messages"][1]["usage"] == {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+
+
+def test_message_turn_delete_removes_full_turn(client: TestClient, server_env: dict[str, Path]) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Delete Turn Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    manager = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    manager.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "first", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "tool preface",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+            },
+            {
+                "role": "tool",
+                "content": "tool output",
+                "message_id": "msg-tool-1",
+                "parent_user_message_id": "msg-user-1",
+            },
+            {
+                "role": "assistant",
+                "content": "first answer",
+                "message_id": "msg-assistant-2",
+                "parent_user_message_id": "msg-user-1",
+            },
+            {"role": "user", "content": "second", "message_id": "msg-user-2"},
+            {
+                "role": "assistant",
+                "content": "second answer",
+                "message_id": "msg-assistant-3",
+                "parent_user_message_id": "msg-user-2",
+            },
+        ],
+    )
+
+    resp = client.delete(f"/api/bots/{bot_id}/sessions/{session_id}/messages/msg-assistant-2")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deleted_message_ids"] == ["msg-user-1", "msg-assistant-1", "msg-tool-1", "msg-assistant-2"]
+    remaining_ids = [item["message_id"] for item in body["messages"]]
+    assert remaining_ids == ["msg-user-2", "msg-assistant-3"]
+
+
+def test_message_regenerate_rewrites_latest_turn(
+    client: TestClient,
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Regenerate Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "persisted", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "old answer",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+            },
+        ],
+    )
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+        assert requested_session_id == session_id
+
+        class FakeBot:
+            async def chat(self, prompt: str, *, session_id: str | None = None):
+                assert prompt == "persisted"
+                assert session_id == requested_session_id
+                messages = [
+                    {
+                        "role": "user",
+                        "content": "persisted",
+                        "message_id": "msg-user-new",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "new answer",
+                        "message_id": "msg-assistant-new",
+                        "parent_user_message_id": "msg-user-new",
+                        "reasoning": "updated reasoning",
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+                    },
+                ]
+                session_mgr.overwrite(requested_session_id, messages)
+                return SimpleNamespace(
+                    session_id=requested_session_id,
+                    messages=messages,
+                    assistant_text="new answer",
+                    usage={"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+                )
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    resp = client.post(f"/api/bots/{bot_id}/sessions/{session_id}/messages/msg-assistant-1/regenerate", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["regenerated_from_message_id"] == "msg-assistant-1"
+    assert body["messages"][-1]["content"] == "new answer"
+    assert body["messages"][-1]["reasoning"] == "updated reasoning"
+    assert body["messages"][-1]["usage"] == {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}
+
+    persisted = client.get(f"/api/bots/{bot_id}/sessions/{session_id}")
+    assert persisted.status_code == 200, persisted.text
+    assert persisted.json()["messages"][-1]["message_id"] == "msg-assistant-new"
+
+
+def test_dashboard_provider_models_and_chat_gating(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.minibot.server.manager.AgentManager._fetch_provider_model_names",
+        lambda self, **kwargs: asyncio.sleep(0, result=["gpt-4.1-mini", "gpt-4.1"]),
+    )
+
+    provider = client.post(
+        "/api/providers",
+        json={
+            "name": "OpenAI Compatible",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "secret-key",
+        },
+    )
+    assert provider.status_code == 200, provider.text
+    provider_id = provider.json()["provider_id"]
+
+    fetched = client.post(f"/api/providers/{provider_id}/fetch-models", json={})
+    assert fetched.status_code == 200, fetched.text
+    fetched_names = [item["model_name"] for item in fetched.json()]
+    assert fetched_names == ["gpt-4.1", "gpt-4.1-mini"]
+
+    imported = client.post(
+        f"/api/providers/{provider_id}/models",
+        json={"model_names": ["gpt-4.1-mini"], "added_via": "fetched"},
+    )
+    assert imported.status_code == 200, imported.text
+    model_id = imported.json()[0]["model_id"]
+
+    bot_id = client.post("/api/bots", json={"name": "Model Bot"}).json()["bot_id"]
+    put = client.put(
+        f"/api/bots/{bot_id}/config",
+        json={"chat_model_id": model_id},
+    )
+    assert put.status_code == 200, put.text
+
+    dashboard = client.get("/api/dashboard")
+    assert dashboard.status_code == 200, dashboard.text
+    body = dashboard.json()
+    assert any(item["provider_id"] == provider_id for item in body["providers"])
+    assert any(item["model_id"] == model_id for item in body["models"])
+    assert any(item["model_id"] == model_id for item in body["available_models"])
+
+    cfg = client.get(f"/api/bots/{bot_id}/config").json()
+    assert cfg["chat_model_id"] == model_id
+    assert cfg["chat_ready"] is True
+
+    disabled = client.put(f"/api/providers/{provider_id}", json={"enabled": False})
+    assert disabled.status_code == 200, disabled.text
+
+    cfg2 = client.get(f"/api/bots/{bot_id}/config").json()
+    assert cfg2["chat_ready"] is False
+    assert "disabled" in cfg2["chat_disabled_reason"].lower()
+
+    rejected = client.post(f"/api/bots/{bot_id}/chat", json={"prompt": "hello"})
+    assert rejected.status_code == 400
+
+
+def test_provider_models_can_be_deleted_in_batch(client: TestClient) -> None:
+    provider_id = client.post(
+        "/api/providers",
+        json={
+            "name": "Batch Delete Provider",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "secret-key",
+        },
+    ).json()["provider_id"]
+
+    imported = client.post(
+        f"/api/providers/{provider_id}/models",
+        json={"model_names": ["gpt-a", "gpt-b"], "added_via": "manual"},
+    )
+    assert imported.status_code == 200, imported.text
+    imported_models = imported.json()
+    model_a = imported_models[0]["model_id"]
+    model_b = imported_models[1]["model_id"]
+
+    bot_id = client.post("/api/bots", json={"name": "Delete Model Bot"}).json()["bot_id"]
+    put = client.put(
+        f"/api/bots/{bot_id}/config",
+        json={"chat_model_id": model_a},
+    )
+    assert put.status_code == 200, put.text
+
+    deleted = client.post(
+        f"/api/providers/{provider_id}/models/delete",
+        json={"model_ids": [model_a, model_b]},
+    )
+    assert deleted.status_code == 200, deleted.text
+    body = deleted.json()
+    assert body["deleted_count"] == 2
+    assert set(body["deleted_model_ids"]) == {model_a, model_b}
+
+    dashboard = client.get("/api/dashboard")
+    assert dashboard.status_code == 200, dashboard.text
+    remaining_ids = {item["model_id"] for item in dashboard.json()["models"]}
+    assert model_a not in remaining_ids
+    assert model_b not in remaining_ids
+
+    cfg = client.get(f"/api/bots/{bot_id}/config").json()
+    assert cfg["chat_ready"] is False
+    assert "unavailable" in cfg["chat_disabled_reason"].lower()
+
+
+def test_bot_subagent_candidates_and_cleanup(client: TestClient, server_env: dict[str, Path]) -> None:
+    worker_id = client.post("/api/bots", json={"name": "Worker"}).json()["bot_id"]
+    owner_id = client.post("/api/bots", json={"name": "Owner"}).json()["bot_id"]
+
+    put_worker = client.put(
+        f"/api/bots/{worker_id}/config",
+        json={
+            "subagent_exposable": True,
+            "subagent_name": "Research Worker",
+            "subagent_description": "Collects context before implementation.",
+        },
+    )
+    assert put_worker.status_code == 200, put_worker.text
+
+    candidates = client.get(f"/api/bots/{owner_id}/subagent-candidates")
+    assert candidates.status_code == 200, candidates.text
+    candidate_ids = {item["bot_id"] for item in candidates.json()}
+    assert worker_id in candidate_ids
+
+    attached = client.put(
+        f"/api/bots/{owner_id}/config",
+        json={"attached_subagent_bot_ids": [worker_id]},
+    )
+    assert attached.status_code == 200, attached.text
+
+    cfg = client.get(f"/api/bots/{owner_id}/config").json()
+    assert cfg["attached_subagent_bot_ids"] == [worker_id]
+
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    sid = manager.sessions_for(owner_id).create()
+    bot = asyncio.run(manager.get_bot(owner_id, sid))
+    agent_name = f"bot_{worker_id}"
+    assert bot.agent.agent_registry.get(agent_name) is not None
+    tool_names = {item["function"]["name"] for item in bot.agent.subagent_executor._get_tools_for_agent(agent_name)}
+    assert "Task" not in tool_names
+    assert "TeamCreate" not in tool_names
+
+    deleted = client.delete(f"/api/bots/{worker_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    cfg_after = client.get(f"/api/bots/{owner_id}/config").json()
+    assert cfg_after["attached_subagent_bot_ids"] == []

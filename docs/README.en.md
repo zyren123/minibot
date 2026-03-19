@@ -106,6 +106,12 @@ cd minibot
 
 # Fast dependency installation
 uv sync
+
+# WebUI static assets are not committed to the repo, so build them once before running from source
+cd webui
+npm install
+npm run build
+cd ..
 ```
 
 ### Configuration

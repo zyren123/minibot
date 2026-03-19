@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .manager import AgentManager
 from .models import (
+    AvailableModelResponse,
     BotConfigResponse,
     BotConfigUpdate,
     BotCreateRequest,
@@ -20,9 +21,34 @@ from .models import (
     ChatRequest,
     ConfigResponse,
     ConfigUpdate,
+    DashboardResponse,
+    FetchedModelResponse,
     MCPServerInfo,
+    MessageDeleteResponse,
+    MessageRegenerateResponse,
+    SessionMessagesResponse,
+    ModelCreateRequest,
+    ModelDeleteRequest,
+    ModelDeleteResponse,
+    ModelResponse,
+    ModelUpdateRequest,
+    ProviderCreateRequest,
+    ProviderResponse,
+    ProviderUpdateRequest,
     SkillInfo,
+    SubagentCandidateResponse,
 )
+
+
+def _resolve_static_dir(server_dir: Path) -> Path | None:
+    candidates = [
+        server_dir / "static",
+        server_dir.parents[2] / "webui" / "dist",
+    ]
+    for candidate in candidates:
+        if (candidate / "index.html").exists():
+            return candidate
+    return None
 
 
 def create_app(*, workdir: str | Path | None = None) -> FastAPI:
@@ -41,6 +67,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     async def put_config(update: ConfigUpdate) -> dict[str, str]:
         await manager.update_config(update.model_dump(exclude_unset=True))
         return {"status": "ok"}
+
+    @app.get("/api/dashboard", response_model=DashboardResponse)
+    async def get_dashboard() -> Any:
+        return manager.dashboard_snapshot()
 
     @app.get("/api/bots", response_model=list[BotMetaResponse])
     async def list_bots() -> list[dict[str, Any]]:
@@ -64,8 +94,15 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
 
     @app.put("/api/bots/{bot_id}/config")
     async def put_bot_config(bot_id: str, update: BotConfigUpdate) -> dict[str, str]:
-        await manager.update_bot_config(bot_id, update.model_dump(exclude_unset=True))
+        try:
+            await manager.update_bot_config(bot_id, update.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "ok"}
+
+    @app.get("/api/bots/{bot_id}/subagent-candidates", response_model=list[SubagentCandidateResponse])
+    async def get_subagent_candidates(bot_id: str) -> Any:
+        return manager.subagent_candidates(bot_id)
 
     @app.get("/api/skills", response_model=list[SkillInfo])
     async def list_skills() -> Any:
@@ -74,6 +111,55 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/mcp/servers", response_model=list[MCPServerInfo])
     async def list_mcp_servers() -> Any:
         return manager.mcp_servers_snapshot()
+
+    @app.get("/api/models/available", response_model=list[AvailableModelResponse])
+    async def list_available_models() -> Any:
+        return manager.active_models_snapshot()
+
+    @app.post("/api/providers", response_model=ProviderResponse)
+    async def create_provider(req: ProviderCreateRequest) -> Any:
+        return manager.create_provider(req.model_dump(exclude_unset=True))
+
+    @app.put("/api/providers/{provider_id}", response_model=ProviderResponse)
+    async def update_provider(provider_id: str, req: ProviderUpdateRequest) -> Any:
+        try:
+            return manager.update_provider(provider_id, req.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Provider not found") from exc
+
+    @app.get("/api/providers/{provider_id}/models", response_model=list[ModelResponse])
+    async def list_provider_models(provider_id: str) -> Any:
+        return manager.list_provider_models(provider_id)
+
+    @app.post("/api/providers/{provider_id}/fetch-models", response_model=list[FetchedModelResponse])
+    async def fetch_provider_models(provider_id: str) -> Any:
+        try:
+            return await manager.fetch_provider_models(provider_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Provider not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/providers/{provider_id}/models", response_model=list[ModelResponse])
+    async def create_provider_models(provider_id: str, req: ModelCreateRequest) -> Any:
+        try:
+            return manager.create_models_for_provider(provider_id, req.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Provider not found") from exc
+
+    @app.post("/api/providers/{provider_id}/models/delete", response_model=ModelDeleteResponse)
+    async def delete_provider_models(provider_id: str, req: ModelDeleteRequest) -> Any:
+        try:
+            return manager.delete_models_for_provider(provider_id, req.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Provider not found") from exc
+
+    @app.put("/api/models/{model_id}", response_model=ModelResponse)
+    async def update_model(model_id: str, req: ModelUpdateRequest) -> Any:
+        try:
+            return manager.update_model(model_id, req.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Model not found") from exc
 
     def _session_meta(bot_id: str) -> list[dict[str, Any]]:
         sessions = manager.sessions_for(bot_id).list_all()
@@ -109,17 +195,17 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         session_id = manager.sessions_for(bot_id).create()
         return {"session_id": session_id}
 
-    @app.get("/api/sessions/{session_id}")
+    @app.get("/api/sessions/{session_id}", response_model=SessionMessagesResponse)
     async def get_session(session_id: str) -> dict[str, Any]:
         if not manager.sessions_for("default").exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
-        return {"session_id": session_id, "messages": manager.sessions_for("default").load(session_id)}
+        return {"session_id": session_id, "messages": manager.session_messages("default", session_id)}
 
-    @app.get("/api/bots/{bot_id}/sessions/{session_id}")
+    @app.get("/api/bots/{bot_id}/sessions/{session_id}", response_model=SessionMessagesResponse)
     async def get_bot_session(bot_id: str, session_id: str) -> dict[str, Any]:
         if not manager.sessions_for(bot_id).exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
-        return {"session_id": session_id, "messages": manager.sessions_for(bot_id).load(session_id)}
+        return {"session_id": session_id, "messages": manager.session_messages(bot_id, session_id)}
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
@@ -131,22 +217,61 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         ok = await manager.delete_session(bot_id, session_id)
         return {"deleted": ok}
 
+    @app.delete(
+        "/api/bots/{bot_id}/sessions/{session_id}/messages/{message_id}",
+        response_model=MessageDeleteResponse,
+    )
+    async def delete_bot_session_message(bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+        try:
+            lock = await manager.session_lock(bot_id, session_id)
+            async with lock:
+                return await manager.delete_message_turn(bot_id, session_id, message_id)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "Session not found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail) from exc
+
+    @app.post(
+        "/api/bots/{bot_id}/sessions/{session_id}/messages/{message_id}/regenerate",
+        response_model=MessageRegenerateResponse,
+    )
+    async def regenerate_bot_session_message(bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+        try:
+            lock = await manager.session_lock(bot_id, session_id)
+            async with lock:
+                return await manager.regenerate_message_turn(bot_id, session_id, message_id)
+        except ValueError as exc:
+            detail = str(exc)
+            if detail == "Session not found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail) from exc
+
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
-        bot = await manager.get_bot("default", session_id)
+        try:
+            bot = await manager.get_bot("default", session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         bot.cancel()
         return {"status": "ok"}
 
     @app.post("/api/bots/{bot_id}/sessions/{session_id}/cancel")
     async def cancel_bot_session(bot_id: str, session_id: str) -> dict[str, str]:
-        bot = await manager.get_bot(bot_id, session_id)
+        try:
+            bot = await manager.get_bot(bot_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         bot.cancel()
         return {"status": "ok"}
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> Any:
         session_id = req.session_id or manager.sessions_for("default").create()
-        bot = await manager.get_bot("default", session_id)
+        try:
+            bot = await manager.get_bot("default", session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock("default", session_id)
         async with lock:
             try:
@@ -163,7 +288,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.post("/api/bots/{bot_id}/chat")
     async def bot_chat(bot_id: str, req: ChatRequest) -> Any:
         session_id = req.session_id or manager.sessions_for(bot_id).create()
-        bot = await manager.get_bot(bot_id, session_id)
+        try:
+            bot = await manager.get_bot(bot_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock(bot_id, session_id)
         async with lock:
             try:
@@ -180,7 +308,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.post("/api/stream")
     async def stream(req: ChatRequest, request: Request) -> StreamingResponse:
         session_id = req.session_id or manager.sessions_for("default").create()
-        bot = await manager.get_bot("default", session_id)
+        try:
+            bot = await manager.get_bot("default", session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock("default", session_id)
 
         def _frame(*, event: str, data: str) -> str:
@@ -224,7 +355,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.post("/api/bots/{bot_id}/stream")
     async def bot_stream(bot_id: str, req: ChatRequest, request: Request) -> StreamingResponse:
         session_id = req.session_id or manager.sessions_for(bot_id).create()
-        bot = await manager.get_bot(bot_id, session_id)
+        try:
+            bot = await manager.get_bot(bot_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock(bot_id, session_id)
 
         def _frame(*, event: str, data: str) -> str:
@@ -265,9 +399,26 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    static_dir = Path(__file__).resolve().parent / "static"
-    if static_dir.exists():
+    static_dir = _resolve_static_dir(Path(__file__).resolve().parent)
+    if static_dir is not None:
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="ui")
+    else:
+        @app.get("/", include_in_schema=False)
+        async def ui_unavailable() -> HTMLResponse:
+            return HTMLResponse(
+                """
+                <html>
+                  <body style="font-family: sans-serif; padding: 2rem; line-height: 1.5;">
+                    <h1>Minibot WebUI is not built</h1>
+                    <p>
+                      Build the frontend first:
+                      <code>cd webui &amp;&amp; npm install &amp;&amp; npm run build</code>
+                    </p>
+                  </body>
+                </html>
+                """.strip(),
+                status_code=503,
+            )
 
     @app.exception_handler(HTTPException)
     async def _http_exc(_request: Request, exc: HTTPException) -> JSONResponse:

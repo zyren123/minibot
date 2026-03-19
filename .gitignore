@@ -76,6 +76,8 @@ Thumbs.db
 # WebUI
 webui/node_modules/
 webui/dist/
+src/minibot/server/static/*
+!src/minibot/server/static/.gitkeep
 
 # WebUI source should not be ignored by generic Python patterns
 !webui/src/lib/

@@ -98,6 +98,8 @@ class Agent:
         team_runtime: TeamRuntime | None = None,
         team_id: str | None = None,
         member_id: str | None = None,
+        allow_subagent_delegation: bool = True,
+        allow_team_tools: bool = True,
     ):
         if role not in {"solo", "lead", "teammate"}:
             raise ValueError(f"Unknown role: {role}")
@@ -111,6 +113,8 @@ class Agent:
         self.team_role: Literal["lead", "teammate"] = "teammate" if role == "teammate" else "lead"
         self.team_id = team_id
         self.member_id = member_id
+        self.allow_subagent_delegation = bool(allow_subagent_delegation) and role != "teammate"
+        self.allow_team_tools = bool(allow_team_tools)
         self.quiet_teammates = self.config.teams.quiet_teammates
         self.debug_teammate_output = self.config.teams.debug_teammate_output
         teammate_quiet = role == "teammate" and self.quiet_teammates and not self.debug_teammate_output
@@ -153,7 +157,7 @@ class Agent:
 
         self.team_runtime: TeamRuntime | None = team_runtime
         self._owns_team_runtime = False
-        if self.config.teams.enabled and self.role in {"solo", "lead"}:
+        if self.allow_team_tools and self.config.teams.enabled and self.role in {"solo", "lead"}:
             if self.team_runtime is None:
                 self.team_runtime = TeamRuntime(
                     config=self.config.teams,
@@ -210,6 +214,10 @@ class Agent:
             tool.skill_loader = self.skill_loader
 
         self.subagent_executor.skill_loader = self.skill_loader
+        self.refresh_system_prompt()
+
+    def refresh_system_prompt(self) -> None:
+        """Rebuild the current system prompt after capability changes."""
         self.system_prompt = self._build_system_prompt()
 
     def reset_session(self, session_id: str) -> None:
@@ -274,14 +282,14 @@ class Agent:
         self.tool_registry.register(SkillTool(self.skill_loader))
 
         # Teammates are explicitly blocked from recursive delegation.
-        if self.role != "teammate":
+        if self.allow_subagent_delegation:
             self.tool_registry.register(TaskTool(self.agent_registry, self.subagent_executor))
 
         if self.memory_manager is not None:
             self.tool_registry.register(MemoryReadTool(self.memory_manager))
             self.tool_registry.register(MemoryWriteTool(self.memory_manager))
 
-        if self.config.teams.enabled and self.team_runtime is not None:
+        if self.allow_team_tools and self.config.teams.enabled and self.team_runtime is not None:
             self.tool_registry.register(TeamMembersTool(self.team_runtime))
             self.tool_registry.register(
                 TeamTaskTool(self.team_runtime)
@@ -314,7 +322,7 @@ class Agent:
 
         tool_count = self.mcp_manager.register_tools(self.tool_registry)
         if tool_count > 0:
-            self.system_prompt = self._build_system_prompt()
+            self.refresh_system_prompt()
 
         return errors
 
@@ -351,7 +359,7 @@ Use `memory_write` tool to update memories as you work:
 Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines). Daily memory is for ephemeral context."""
 
         subagent_section = ""
-        if self.role != "teammate":
+        if self.allow_subagent_delegation:
             subagent_section = f"""
 2. **Specialized Subagents** (Delegation):
    {self.agent_registry.get_descriptions()}
@@ -363,7 +371,7 @@ Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines).
 """
 
         team_section = ""
-        if self.role in {"solo", "lead"} and self.config.teams.enabled:
+        if self.allow_team_tools and self.role in {"solo", "lead"} and self.config.teams.enabled:
             team_section = """
 ## Team Orchestration Policy
 - You can decide whether to create a team (`TeamCreate`) and how many teammates to spawn.
@@ -372,7 +380,7 @@ Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines).
 - Typical teammate count is 2-6. Start small unless clear parallelism exists.
 - Use `TeamTask`, `TeamMessage`, `TeamBroadcast`, and `TeamWait` to coordinate and synthesize results.
 """
-        elif self.role == "teammate":
+        elif self.allow_team_tools and self.role == "teammate":
             team_section = f"""
 ## Team Role Constraints
 - You are teammate `{self.member_id}` in team `{self.team_id}`.
@@ -476,11 +484,109 @@ You are now live. Await instructions and begin the ReAct loop."""
                 if isinstance(item, str):
                     parts.append(item)
                     continue
+                item_type = str(cls._field(item, "type", "") or "").lower()
+                if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
+                    continue
                 text = cls._field(item, "text")
-                if text:
-                    parts.append(str(text))
+                if text is not None:
+                    parts.append(cls._extract_stream_text(text))
+                    continue
+                content = cls._field(item, "content")
+                if content is not None:
+                    parts.append(cls._extract_stream_text(content))
             return "".join(parts)
-        return str(value)
+        item_type = str(cls._field(value, "type", "") or "").lower()
+        if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
+            return ""
+        text = cls._field(value, "text")
+        if text is not None:
+            return cls._extract_stream_text(text)
+        content = cls._field(value, "content")
+        if content is not None:
+            return cls._extract_stream_text(content)
+        return ""
+
+    @classmethod
+    def _extract_reasoning_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                item_type = str(cls._field(item, "type", "") or "").lower()
+                if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
+                    text = cls._extract_stream_text(cls._field(item, "text"))
+                    if text:
+                        parts.append(text)
+                        continue
+                    content = cls._extract_stream_text(cls._field(item, "content"))
+                    if content:
+                        parts.append(content)
+                        continue
+                for key in ("reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"):
+                    nested = cls._field(item, key)
+                    if nested is not None:
+                        parts.append(cls._extract_reasoning_text(nested))
+            return "".join(parts)
+        parts: list[str] = []
+        for key in ("reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"):
+            nested = cls._field(value, key)
+            if nested is not None:
+                parts.append(cls._extract_reasoning_text(nested))
+        if parts:
+            return "".join(parts)
+        item_type = str(cls._field(value, "type", "") or "").lower()
+        if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
+            text = cls._extract_stream_text(cls._field(value, "text"))
+            if text:
+                return text
+            return cls._extract_stream_text(cls._field(value, "content"))
+        content = cls._field(value, "content")
+        if isinstance(content, list):
+            return cls._extract_reasoning_text(content)
+        return ""
+
+    @staticmethod
+    def _new_message_id() -> str:
+        return f"msg-{uuid.uuid4().hex[:12]}"
+
+    @classmethod
+    def _normalize_usage(cls, usage: Any) -> dict[str, int] | None:
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            raw = usage
+        else:
+            raw = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+        normalized: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = raw.get(key)
+            if value is None:
+                continue
+            try:
+                normalized[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return normalized or None
+
+    @staticmethod
+    def _latest_user_message_id(messages: list[dict[str, Any]]) -> str | None:
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            message_id = message.get("message_id")
+            if isinstance(message_id, str) and message_id.strip():
+                return message_id
+        return None
 
     @classmethod
     def _merge_stream_tool_call_delta(
@@ -566,9 +672,12 @@ You are now live. Await instructions and begin the ReAct loop."""
         system: str,
         tools: list[dict] | None,
         max_tokens: int,
+        assistant_message_id: str,
+        parent_user_message_id: str | None,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
     ) -> dict[str, Any]:
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         finish_reason: str | None = None
         usage: dict[str, int] | None = None
         tool_call_map: dict[int, dict[str, Any]] = {}
@@ -666,13 +775,47 @@ You are now live. Await instructions and begin the ReAct loop."""
                 delta = self._field(choice, "delta")
 
                 if delta is not None:
+                    reasoning_text = self._extract_reasoning_text(delta)
+                    if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
+                        if not assistant_started:
+                            assistant_started = True
+                            await self._emit(
+                                {
+                                    "type": "assistant_start",
+                                    "message_id": assistant_message_id,
+                                    "parent_user_message_id": parent_user_message_id,
+                                }
+                            )
+                        await self._emit(
+                            {
+                                "type": "assistant_reasoning_delta",
+                                "message_id": assistant_message_id,
+                                "parent_user_message_id": parent_user_message_id,
+                                "reasoning_text": reasoning_text,
+                            }
+                        )
+
                     chunk_text = self._extract_stream_text(self._field(delta, "content"))
                     if chunk_text:
                         text_parts.append(chunk_text)
                         if not assistant_started:
                             assistant_started = True
-                            await self._emit({"type": "assistant_start"})
-                        await self._emit({"type": "assistant_delta", "delta_text": chunk_text})
+                            await self._emit(
+                                {
+                                    "type": "assistant_start",
+                                    "message_id": assistant_message_id,
+                                    "parent_user_message_id": parent_user_message_id,
+                                }
+                            )
+                        await self._emit(
+                            {
+                                "type": "assistant_delta",
+                                "message_id": assistant_message_id,
+                                "parent_user_message_id": parent_user_message_id,
+                                "delta_text": chunk_text,
+                            }
+                        )
                         if self._ui_enabled():
                             if not rendered_any:
                                 pending_display_parts.append(chunk_text)
@@ -697,13 +840,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                 if chunk_finish:
                     finish_reason = str(chunk_finish)
 
-                chunk_usage = getattr(chunk, "usage", None)
-                if chunk_usage is not None:
-                    usage = {
-                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0),
-                        "total_tokens": getattr(chunk_usage, "total_tokens", 0),
-                    }
+                usage = self._normalize_usage(getattr(chunk, "usage", None)) or usage
         finally:
             if thinking_open:
                 with suppress(Exception):
@@ -725,6 +862,7 @@ You are now live. Await instructions and begin the ReAct loop."""
 
         return {
             "content": "".join(text_parts),
+            "reasoning": "".join(reasoning_parts),
             "finish_reason": finish_reason or "stop",
             "tool_calls": tool_calls,
             "stream_rendered": rendered_any and not self.silent,
@@ -787,12 +925,15 @@ You are now live. Await instructions and begin the ReAct loop."""
         while True:
             tools = self.tool_registry.get_definitions()
             content = ""
+            reasoning = ""
             finish_reason = "stop"
             tool_calls: list[Any] = []
             stream_rendered = False
             stream_success = False
 
             usage = None
+            assistant_message_id = self._new_message_id()
+            parent_user_message_id = self._latest_user_message_id(messages)
 
             if self._streaming_active():
                 try:
@@ -801,9 +942,12 @@ You are now live. Await instructions and begin the ReAct loop."""
                         system=self.system_prompt,
                         tools=tools,
                         max_tokens=self.config.llm.max_tokens,
+                        assistant_message_id=assistant_message_id,
+                        parent_user_message_id=parent_user_message_id,
                         interrupt_queue=interrupt_queue,
                     )
                     content = stream_result["content"]
+                    reasoning = stream_result.get("reasoning", "")
                     finish_reason = stream_result["finish_reason"]
                     tool_calls = stream_result["tool_calls"]
                     stream_rendered = bool(stream_result["stream_rendered"])
@@ -841,16 +985,12 @@ You are now live. Await instructions and begin the ReAct loop."""
                 choice = response.choices[0]
                 assistant_message = choice.message
                 finish_reason = choice.finish_reason
-                content = assistant_message.content or ""
+                content = self._extract_stream_text(self._field(assistant_message, "content"))
+                reasoning = self._extract_reasoning_text(assistant_message)
                 tool_calls = assistant_message.tool_calls or []
-                
-                if hasattr(response, "usage") and response.usage:
-                    usage = {
-                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),
-                        "total_tokens": getattr(response.usage, "total_tokens", 0),
-                    }
-                    
+
+                usage = self._normalize_usage(getattr(response, "usage", None))
+
             if usage:
                 await self._emit(
                     {
@@ -911,7 +1051,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                         compaction_msg = {
                             "role": "assistant",
                             "content": f"**[SYSTEM: Context Compacted]**\n\n{summary}",
-                            "is_compaction": True
+                            "is_compaction": True,
+                            "message_id": self._new_message_id(),
                         }
                         # We clear the existing message list safely and append the summary
                         messages.clear()
@@ -949,7 +1090,10 @@ You are now live. Await instructions and begin the ReAct loop."""
             await self._emit(
                 {
                     "type": "assistant_end",
+                    "message_id": assistant_message_id,
+                    "parent_user_message_id": parent_user_message_id,
                     "content": content,
+                    "reasoning": reasoning,
                     "finish_reason": finish_reason,
                     "tool_calls": tool_call_summaries,
                     "usage": usage or {},
@@ -960,7 +1104,17 @@ You are now live. Await instructions and begin the ReAct loop."""
                 print_assistant(content, title=self._assistant_title())
 
             if finish_reason != "tool_calls":
-                messages.append({"role": "assistant", "content": content})
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content,
+                    "message_id": assistant_message_id,
+                    "parent_user_message_id": parent_user_message_id,
+                }
+                if reasoning:
+                    assistant_msg["reasoning"] = reasoning
+                if usage:
+                    assistant_msg["usage"] = usage
+                messages.append(assistant_msg)
                 return messages
 
             tool_results: list[dict[str, str]] = []
@@ -1053,7 +1207,16 @@ You are now live. Await instructions and begin the ReAct loop."""
                     print_tool_output(self._tool_output_name(tc_name), output)
                 tool_results.append({"tool_call_id": tc_id, "output": output})
 
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+            assistant_msg = {
+                "role": "assistant",
+                "content": content,
+                "message_id": assistant_message_id,
+                "parent_user_message_id": parent_user_message_id,
+            }
+            if reasoning:
+                assistant_msg["reasoning"] = reasoning
+            if usage:
+                assistant_msg["usage"] = usage
             if tool_calls:
                 assistant_msg["tool_calls"] = [
                     {
@@ -1072,6 +1235,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                 messages.append(
                     {
                         "role": "tool",
+                        "message_id": self._new_message_id(),
+                        "parent_user_message_id": parent_user_message_id,
                         "tool_call_id": result["tool_call_id"],
                         "content": result["output"],
                     }

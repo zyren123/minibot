@@ -30,6 +30,12 @@ def _make_response(content: str = "ok"):
     return SimpleNamespace(choices=[choice])
 
 
+def _assert_assistant_message(message, content: str) -> None:
+    assert message["role"] == "assistant"
+    assert message["content"] == content
+    assert isinstance(message.get("message_id"), str)
+
+
 @pytest.mark.asyncio
 async def test_run_loop_interrupts_on_esc(tmp_path):
     agent = _make_agent(tmp_path)
@@ -82,7 +88,7 @@ async def test_run_loop_without_interrupt_queue_unchanged(tmp_path):
 
     result = await agent.run_loop(history)
 
-    assert result[-1] == {"role": "assistant", "content": "done"}
+    _assert_assistant_message(result[-1], "done")
     assert client.calls == 1
 
 
@@ -104,5 +110,5 @@ async def test_stale_interrupt_token_is_drained(tmp_path):
 
     result = await agent.run_loop(history, interrupt_queue=interrupt_queue)
 
-    assert result[-1] == {"role": "assistant", "content": "ok"}
+    _assert_assistant_message(result[-1], "ok")
     assert interrupt_queue.empty()
