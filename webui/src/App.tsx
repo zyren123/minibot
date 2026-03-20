@@ -428,11 +428,15 @@ export default function App() {
         </header>
 
         <main className="min-h-0 flex-1">
-          {tab === "chat" ? (
+          {/* Keep ChatView mounted so in-flight streaming state survives tab switches. */}
+          <div className="h-full" hidden={tab !== "chat"} aria-hidden={tab !== "chat"}>
             <ChatView botId={botId} botName={currentBot?.name || botId} />
-          ) : (
-            <ConfigView botId={botId} onBotsChanged={refreshBots} onSelectBot={setBotId} />
-          )}
+          </div>
+          {tab === "config" ? (
+            <div className="h-full">
+              <ConfigView botId={botId} onBotsChanged={refreshBots} onSelectBot={setBotId} />
+            </div>
+          ) : null}
         </main>
 
         {createOpen ? (
