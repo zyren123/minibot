@@ -5,6 +5,7 @@ import type {
   Config,
   DeletedMessageResult,
   DeletedModelsResult,
+  SkillDeleteResult,
   DashboardData,
   FetchedModel,
   MCPServerInfo,
@@ -128,6 +129,22 @@ export async function listSkills(): Promise<SkillInfo[]> {
   return apiGet<SkillInfo[]>("/api/skills");
 }
 
+export async function createSkill(body: {
+  name: string;
+  description?: string | null;
+  scope?: "user" | "project";
+}): Promise<SkillInfo> {
+  return apiPost<SkillInfo>("/api/skills", body);
+}
+
+export async function deleteSkill(scope: string, folderName: string): Promise<SkillDeleteResult> {
+  const resp = await fetch(`/api/skills/${encodeURIComponent(scope)}/${encodeURIComponent(folderName)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as SkillDeleteResult;
+}
+
 export async function listMcpServers(): Promise<MCPServerInfo[]> {
   return apiGet<MCPServerInfo[]>("/api/mcp/servers");
 }
@@ -182,6 +199,39 @@ export async function regenerateSessionMessage(
   );
 }
 
+async function* streamResponse(resp: Response): AsyncGenerator<StreamEvent> {
+  if (!resp.body) return;
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    while (true) {
+      const sep = buffer.indexOf("\n\n");
+      if (sep === -1) break;
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+
+      const lines = rawEvent.split("\n");
+      let data = "";
+      for (const line of lines) {
+        if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      try {
+        yield JSON.parse(data) as StreamEvent;
+      } catch {
+        yield { type: "system", message: "Failed to parse stream event.", data: { raw: data } };
+      }
+    }
+  }
+}
+
 export async function getConfig(): Promise<Config> {
   return apiGet<Config>("/api/config");
 }
@@ -213,34 +263,25 @@ export async function* streamChat(
     }),
   });
   if (!resp.ok) throw new Error(await resp.text());
-  if (!resp.body) return;
+  yield* streamResponse(resp);
+}
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    while (true) {
-      const sep = buffer.indexOf("\n\n");
-      if (sep === -1) break;
-      const rawEvent = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-
-      const lines = rawEvent.split("\n");
-      let data = "";
-      for (const line of lines) {
-        if (line.startsWith("data:")) data += line.slice(5).trim();
-      }
-      if (!data) continue;
-      try {
-        yield JSON.parse(data) as StreamEvent;
-      } catch {
-        yield { type: "system", message: "Failed to parse stream event.", data: { raw: data } };
-      }
-    }
-  }
+export async function* streamRegenerateSessionMessage(
+  botId: string,
+  sessionId: string,
+  messageId: string,
+  reasoningEffort?: ReasoningEffort | null,
+): AsyncGenerator<StreamEvent> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/regenerate/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        reasoning_effort: reasoningEffort || null,
+      }),
+    },
+  );
+  if (!resp.ok) throw new Error(await resp.text());
+  yield* streamResponse(resp);
 }

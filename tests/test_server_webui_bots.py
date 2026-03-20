@@ -111,7 +111,97 @@ def test_skills_endpoint_uses_configured_skills_dirs(client: TestClient, server_
 
     skills = client.get("/api/skills").json()
     names = {s["name"] for s in skills}
+    assert "skill-installer" in names
+    assert "skill-creator" in names
     assert "test-skill" in names
+
+
+def test_skills_endpoint_prefers_higher_priority_override(client: TestClient, server_env: dict[str, Path]) -> None:
+    skills_root = server_env["workdir"] / "skills"
+    skill_dir = skills_root / "custom-skill-creator"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: skill-creator\ndescription: Override skill creator\n---\n\nCustom creator body.\n",
+        encoding="utf-8",
+    )
+
+    put = client.put("/api/config", json={"skills_dirs": [str(skills_root)]})
+    assert put.status_code == 200, put.text
+
+    skills = client.get("/api/skills").json()
+    by_name = {item["name"]: item["description"] for item in skills}
+    assert by_name["skill-creator"] == "Override skill creator"
+
+
+def test_skills_endpoint_returns_source_metadata_and_override_state(
+    client: TestClient,
+    server_env: dict[str, Path],
+) -> None:
+    project_root = server_env["workdir"] / "skills"
+    project_skill = project_root / "priority-skill"
+    project_skill.mkdir(parents=True, exist_ok=True)
+    (project_skill / "SKILL.md").write_text(
+        "---\nname: priority-skill\ndescription: Project copy\n---\n\nProject body.\n",
+        encoding="utf-8",
+    )
+
+    user_root = server_env["home"] / "skills"
+    user_skill = user_root / "priority-skill"
+    user_skill.mkdir(parents=True, exist_ok=True)
+    (user_skill / "SKILL.md").write_text(
+        "---\nname: priority-skill\ndescription: User copy\n---\n\nUser body.\n",
+        encoding="utf-8",
+    )
+
+    skills = client.get("/api/skills").json()
+    matches = [item for item in skills if item["name"] == "priority-skill"]
+    assert len(matches) == 2
+
+    project_entry = next(item for item in matches if item["source_type"] == "project")
+    user_entry = next(item for item in matches if item["source_type"] == "user")
+
+    assert project_entry["is_active"] is True
+    assert project_entry["override_count"] == 1
+    assert project_entry["deletable"] is False
+    assert user_entry["is_active"] is False
+    assert user_entry["deletable"] is True
+    assert user_entry["overridden_by_source_type"] == "project"
+
+
+def test_create_and_delete_user_skill_via_api(client: TestClient, server_env: dict[str, Path]) -> None:
+    created = client.post(
+        "/api/skills",
+        json={
+            "name": "Inbox Triage",
+            "description": "Sort urgent messages before responding.",
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["name"] == "inbox-triage"
+    assert body["source_type"] == "user"
+    assert body["deletable"] is True
+    assert Path(body["resolved_path"]) == (server_env["home"] / "skills" / "inbox-triage").resolve()
+    assert (server_env["home"] / "skills" / "inbox-triage" / "SKILL.md").exists()
+
+    deleted = client.delete("/api/skills/user/inbox-triage")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+    assert not (server_env["home"] / "skills" / "inbox-triage").exists()
+
+
+def test_skill_delete_rejects_non_user_scope(client: TestClient, server_env: dict[str, Path]) -> None:
+    project_root = server_env["workdir"] / "skills"
+    project_skill = project_root / "repo-only"
+    project_skill.mkdir(parents=True, exist_ok=True)
+    (project_skill / "SKILL.md").write_text(
+        "---\nname: repo-only\ndescription: Project skill\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    deleted = client.delete("/api/skills/project/repo-only")
+    assert deleted.status_code == 400
+    assert "Only user skills can be deleted" in deleted.text
 
 
 def test_sessions_are_isolated_and_deletable(client: TestClient) -> None:
@@ -290,6 +380,112 @@ def test_message_regenerate_rewrites_latest_turn(
     assert body["messages"][-1]["content"] == "new answer"
     assert body["messages"][-1]["reasoning"] == "updated reasoning"
     assert body["messages"][-1]["usage"] == {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}
+
+    persisted = client.get(f"/api/bots/{bot_id}/sessions/{session_id}")
+    assert persisted.status_code == 200, persisted.text
+    assert persisted.json()["messages"][-1]["message_id"] == "msg-assistant-new"
+
+
+def test_message_regenerate_stream_rewrites_latest_turn_and_streams_events(
+    client: TestClient,
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Regenerate Stream Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "persisted", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "old answer",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+            },
+        ],
+    )
+    seen: dict[str, object] = {}
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+        assert requested_session_id == session_id
+
+        class FakeBot:
+            async def chat(self, *_args, **_kwargs):
+                raise AssertionError("stream regenerate should not call chat()")
+
+            async def stream(
+                self,
+                prompt: str,
+                *,
+                session_id: str | None = None,
+                reasoning_effort: str | None = None,
+            ):
+                seen["stream"] = {
+                    "prompt": prompt,
+                    "session_id": session_id,
+                    "reasoning_effort": reasoning_effort,
+                }
+                assert session_mgr.load(requested_session_id) == []
+                messages = [
+                    {
+                        "role": "user",
+                        "content": "persisted",
+                        "message_id": "msg-user-new",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "new streamed answer",
+                        "message_id": "msg-assistant-new",
+                        "parent_user_message_id": "msg-user-new",
+                        "reasoning": "updated reasoning",
+                        "usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6},
+                    },
+                ]
+                session_mgr.overwrite(requested_session_id, messages)
+                yield {
+                    "type": "assistant_start",
+                    "message_id": "msg-assistant-new",
+                    "parent_user_message_id": "msg-user-new",
+                }
+                yield {
+                    "type": "assistant_delta",
+                    "message_id": "msg-assistant-new",
+                    "parent_user_message_id": "msg-user-new",
+                    "delta_text": "new streamed answer",
+                }
+                yield {
+                    "type": "assistant_end",
+                    "message_id": "msg-assistant-new",
+                    "parent_user_message_id": "msg-user-new",
+                    "content": "new streamed answer",
+                    "reasoning": "updated reasoning",
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6},
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    resp = client.post(
+        f"/api/bots/{bot_id}/sessions/{session_id}/messages/msg-assistant-1/regenerate/stream",
+        json={"reasoning_effort": "high"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert seen["stream"] == {
+        "prompt": "persisted",
+        "session_id": session_id,
+        "reasoning_effort": "high",
+    }
+    assert "assistant_start" in resp.text
+    assert "new streamed answer" in resp.text
+    assert "updated reasoning" in resp.text
 
     persisted = client.get(f"/api/bots/{bot_id}/sessions/{session_id}")
     assert persisted.status_code == 200, persisted.text

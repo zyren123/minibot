@@ -120,6 +120,7 @@ def test_bootstrap_global_config_writes_templates(tmp_path):
     assert config.tools.timeout == 60
     assert config.llm.stream_enabled is True
     assert config.teams.debug_teammate_output is False
+    assert config.skills_dir == (app_home / "skills").resolve()
     assert config.memory.memory_dir == str((app_home / "memory").resolve())
 
 

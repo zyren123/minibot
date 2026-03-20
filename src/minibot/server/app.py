@@ -25,8 +25,11 @@ from .models import (
     FetchedModelResponse,
     MCPServerInfo,
     MessageDeleteResponse,
+    MessageRegenerateRequest,
     MessageRegenerateResponse,
     SessionMessagesResponse,
+    SkillCreateRequest,
+    SkillDeleteResponse,
     ModelCreateRequest,
     ModelDeleteRequest,
     ModelDeleteResponse,
@@ -107,6 +110,20 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/skills", response_model=list[SkillInfo])
     async def list_skills() -> Any:
         return manager.skills_snapshot()
+
+    @app.post("/api/skills", response_model=SkillInfo)
+    async def create_skill(req: SkillCreateRequest) -> Any:
+        try:
+            return await manager.create_skill(req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/skills/{scope}/{folder_name}", response_model=SkillDeleteResponse)
+    async def delete_skill(scope: str, folder_name: str) -> Any:
+        try:
+            return await manager.delete_skill(scope=scope, folder_name=folder_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/mcp/servers", response_model=list[MCPServerInfo])
     async def list_mcp_servers() -> Any:
@@ -246,6 +263,67 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
             if detail == "Session not found":
                 raise HTTPException(status_code=404, detail=detail) from exc
             raise HTTPException(status_code=400, detail=detail) from exc
+
+    @app.post("/api/bots/{bot_id}/sessions/{session_id}/messages/{message_id}/regenerate/stream")
+    async def stream_regenerate_bot_session_message(
+        bot_id: str,
+        session_id: str,
+        message_id: str,
+        req: MessageRegenerateRequest,
+        request: Request,
+    ) -> StreamingResponse:
+        lock = await manager.session_lock(bot_id, session_id)
+        await lock.acquire()
+        try:
+            prompt = manager.prepare_regenerate_message_turn(bot_id, session_id, message_id)
+            bot = await manager.get_bot(bot_id, session_id)
+        except ValueError as exc:
+            if lock.locked():
+                lock.release()
+            detail = str(exc)
+            if detail == "Session not found":
+                raise HTTPException(status_code=404, detail=detail) from exc
+            raise HTTPException(status_code=400, detail=detail) from exc
+        except Exception:
+            if lock.locked():
+                lock.release()
+            raise
+
+        def _frame(*, event: str, data: str) -> str:
+            return f"event: {event}\ndata: {data}\n\n"
+
+        async def _gen() -> AsyncIterator[str]:
+            try:
+                async for event in bot.stream(
+                    prompt,
+                    session_id=session_id,
+                    reasoning_effort=req.reasoning_effort,
+                ):
+                    if await request.is_disconnected():
+                        bot.cancel()
+                        break
+                    payload = json.dumps(event, ensure_ascii=False)
+                    yield _frame(event=event.get("type", "message"), data=payload)
+            except asyncio.CancelledError:
+                bot.cancel()
+                raise
+            except Exception as exc:
+                yield _frame(
+                    event="system",
+                    data=json.dumps(
+                        {"type": "system", "session_id": session_id, "message": str(exc)},
+                        ensure_ascii=False,
+                    ),
+                )
+            finally:
+                if lock.locked():
+                    lock.release()
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:

@@ -149,6 +149,15 @@ class BotStore:
             data["attached_subagent_bot_ids"] = [item for item in attached if item != subagent_bot_id]
             self._write_bot_json(bot_id, data)
 
+    def remove_skill_references(self, skill_name: str) -> None:
+        for bot_id in self.all_bot_ids():
+            data = self._read_bot_json(bot_id)
+            disabled = data.get("skills_disabled")
+            if not isinstance(disabled, list) or skill_name not in disabled:
+                continue
+            data["skills_disabled"] = [item for item in disabled if item != skill_name]
+            self._write_bot_json(bot_id, data)
+
     def _read_bot_json(self, bot_id: str) -> dict[str, Any]:
         path = self.bot_home(bot_id) / "bot.json"
         try:

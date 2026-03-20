@@ -1,9 +1,9 @@
 """Skill loader for loading SKILL.md files."""
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
-from collections.abc import Iterable
 
 
 class SkillLoader:
@@ -17,9 +17,8 @@ class SkillLoader:
     - assets/ (optional): Templates, files for output
     """
 
-    COMMON_SKILL_DIRS = (
-        Path("~/.claude/skills"),
-    )
+    BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent.parent / "builtin_skills"
+    COMMON_SKILL_DIRS = (Path("~/.claude/skills"),)
 
     def __init__(
         self,
@@ -38,7 +37,10 @@ class SkillLoader:
         else:
             dirs = [Path(path) for path in skills_dir]
 
-        # Add common skill directories (if not already present).
+        # Explicit or configured directories win over bundled defaults.
+        dirs.append(self.BUILTIN_SKILLS_DIR)
+
+        # Common external directories come last.
         for common_dir in self.COMMON_SKILL_DIRS:
             dirs.append(common_dir)
 

@@ -29,7 +29,7 @@ _config: Config | None = None
 
 _DEFAULT_CONFIG_TEMPLATE = """# Minibot Default Configuration
 
-skills_dir: skills
+skills_dir: ../skills
 
 llm:
   base_url: ${OPENAI_BASE_URL}
@@ -355,7 +355,7 @@ def load_config(
     hooks_config = _load_yaml(global_config_dir / "hooks.yaml", env_defaults)
     mcp_config = _load_yaml(global_config_dir / "mcp_servers.yaml", env_defaults)
 
-    raw_skills_dir = default_config.get("skills_dir", "skills")
+    raw_skills_dir = default_config.get("skills_dir", "../skills")
     skills_dir = _resolve_config_path(
         key="skills_dir",
         value=raw_skills_dir,

@@ -20,7 +20,7 @@ import {
   listAvailableModels,
   listSessions,
   loadSession,
-  regenerateSessionMessage,
+  streamRegenerateSessionMessage,
   streamChat,
   updateBotConfig,
 } from "../lib/api";
@@ -63,6 +63,56 @@ function updateAssistantMessage(
 
   if (!fallback) return messages;
   return [...messages, fallback()];
+}
+
+function findAssistantTurnBounds(messages: Message[], messageId: string) {
+  const assistantIndex = messages.findIndex((item) => item.message_id === messageId);
+  if (assistantIndex < 0) return null;
+
+  const assistantMessage = messages[assistantIndex];
+  if (assistantMessage.role !== "assistant") return null;
+
+  let userIndex = -1;
+  const parentUserMessageId = assistantMessage.parent_user_message_id?.trim();
+  if (parentUserMessageId) {
+    for (let index = assistantIndex; index >= 0; index -= 1) {
+      const candidate = messages[index];
+      if (candidate.role !== "user") continue;
+      if (candidate.message_id === parentUserMessageId) {
+        userIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (userIndex < 0) {
+    for (let index = assistantIndex; index >= 0; index -= 1) {
+      if (messages[index].role === "user") {
+        userIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (userIndex < 0) return null;
+
+  let turnEnd = messages.length;
+  for (let index = userIndex + 1; index < messages.length; index += 1) {
+    if (messages[index].role === "user") {
+      turnEnd = index;
+      break;
+    }
+  }
+
+  if (assistantIndex >= turnEnd) return null;
+  return { userIndex, turnEnd };
+}
+
+function removeAssistantTurn(messages: Message[], messageId: string, preserveUserMessage: boolean) {
+  const bounds = findAssistantTurnBounds(messages, messageId);
+  if (!bounds) return messages;
+  const turnStart = preserveUserMessage ? bounds.userIndex + 1 : bounds.userIndex;
+  return [...messages.slice(0, turnStart), ...messages.slice(bounds.turnEnd)];
 }
 
 function usageParts(usage: Usage | null | undefined) {
@@ -420,9 +470,23 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
   const toolRenderState = useMemo(() => buildToolRenderState(messages), [messages]);
 
+  const chatBusy = streaming;
   const chatBlocked = Boolean(botConfig && (!botConfig.enabled || !botConfig.chat_ready));
   const blockedReason =
     botConfig?.chat_disabled_reason ?? (botConfig?.enabled === false ? t("chat.fallbackDisabledReason") : null);
+
+  function syncContextSnapshot(targetSessionId: string, nextMessages: Message[]) {
+    setContextBySession((prev) => {
+      const next = { ...prev };
+      const snapshot = contextSnapshotFromMessages(nextMessages);
+      if (snapshot) {
+        next[targetSessionId] = snapshot;
+      } else {
+        delete next[targetSessionId];
+      }
+      return next;
+    });
+  }
 
   async function refreshSessions(nextBotId: string = botId) {
     const list = await listSessions(nextBotId);
@@ -454,16 +518,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setReasoningOpenById({});
     setToolOpenById({});
     setMessages(sess.messages);
-    setContextBySession((prev) => {
-      const next = { ...prev };
-      const snapshot = contextSnapshotFromMessages(sess.messages);
-      if (snapshot) {
-        next[id] = snapshot;
-      } else {
-        delete next[id];
-      }
-      return next;
-    });
+    syncContextSnapshot(id, sess.messages);
   }
 
   useEffect(() => {
@@ -472,6 +527,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setContextBySession({});
     setStatus(null);
     setReasoningEffort("");
+    setMessageActionId(null);
     setReasoningOpenById({});
     setToolOpenById({});
     Promise.all([refreshSessions(botId), refreshBotState(botId)]).catch((err) => setStatus(errorMessage(err)));
@@ -642,7 +698,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   async function onSend() {
-    if (!prompt.trim() || streaming || chatBlocked) return;
+    if (!prompt.trim() || chatBusy || chatBlocked) return;
     setStatus(null);
     setStreaming(true);
 
@@ -686,7 +742,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   async function onDeleteMessage(messageId: string) {
-    if (!sessionId || streaming) return;
+    if (!sessionId || chatBusy) return;
     setMessageActionId(messageId);
     setStatus(null);
     try {
@@ -694,16 +750,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(result.messages);
-      setContextBySession((prev) => {
-        const next = { ...prev };
-        const snapshot = contextSnapshotFromMessages(result.messages);
-        if (snapshot) {
-          next[sessionId] = snapshot;
-        } else {
-          delete next[sessionId];
-        }
-        return next;
-      });
+      syncContextSnapshot(sessionId, result.messages);
       await refreshSessions(botId);
       setStatus(t("chat.status.deletedTurn"));
     } catch (err) {
@@ -714,42 +761,55 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   async function onRegenerateMessage(messageId: string) {
-    if (!sessionId || streaming) return;
+    if (!sessionId || chatBusy) return;
+    const previousMessages = messages;
+    const optimisticMessages = removeAssistantTurn(previousMessages, messageId, true);
     setMessageActionId(messageId);
-    setStatus(null);
+    setStatus(t("chat.status.regeneratingReply"));
+    setStreaming(true);
     try {
-      const result = await regenerateSessionMessage(botId, sessionId, messageId);
+      let interrupted = false;
       setReasoningOpenById({});
       setToolOpenById({});
-      setMessages(result.messages);
-      setContextBySession((prev) => {
-        const next = { ...prev };
-        const snapshot = contextSnapshotFromMessages(result.messages);
-        if (snapshot) {
-          next[sessionId] = snapshot;
-        } else {
-          delete next[sessionId];
+      setMessages(optimisticMessages);
+      syncContextSnapshot(sessionId, optimisticMessages);
+      for await (const ev of streamRegenerateSessionMessage(botId, sessionId, messageId, reasoningEffort || null)) {
+        if (ev.type === "system" && ev.message === "Generation interrupted.") {
+          interrupted = true;
         }
-        return next;
-      });
+        applyStreamEvent(ev);
+      }
       await refreshSessions(botId);
-      setStatus(t("chat.status.regeneratedReply"));
+      await selectSession(sessionId);
+      await refreshBotState(botId);
+      if (!interrupted) {
+        setStatus(t("chat.status.regeneratedReply"));
+      }
     } catch (err) {
       setStatus(errorMessage(err));
+      try {
+        await selectSession(sessionId);
+      } catch {
+        setMessages(previousMessages);
+        syncContextSnapshot(sessionId, previousMessages);
+      }
+      await refreshSessions(botId).catch(() => null);
+      await refreshBotState(botId).catch(() => null);
     } finally {
+      setStreaming(false);
       setMessageActionId(null);
     }
   }
 
   function requestDeleteSession(id: string) {
-    if (streaming) return;
+    if (chatBusy) return;
     setPendingDeleteSessionId(id);
     setDeleteOpen(true);
   }
 
   async function confirmDeleteSession() {
     const id = pendingDeleteSessionId;
-    if (!id || streaming) return;
+    if (!id || chatBusy) return;
     try {
       setStatus(null);
       await deleteSession(botId, id);
@@ -773,7 +833,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   async function onSelectModel(nextModelId: string) {
-    if (streaming) return;
+    if (chatBusy) return;
     setModelSaving(true);
     setStatus(null);
     try {
@@ -814,7 +874,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                   })
                   .then(() => refreshSessions(botId))
               }
-              disabled={streaming || chatBlocked}
+              disabled={chatBusy || chatBlocked}
             >
               {t("chat.sessions.new")}
             </button>
@@ -822,7 +882,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               type="button"
               className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
               onClick={() => void refreshSessions(botId).catch((err) => setStatus(errorMessage(err)))}
-              disabled={streaming}
+              disabled={chatBusy}
             >
               {t("chat.sessions.refresh")}
             </button>
@@ -841,7 +901,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                     : "bg-zinc-950 text-zinc-300 hover:bg-zinc-900/70",
                 )}
                 onClick={() => setSessionId(item.session_id)}
-                disabled={streaming}
+                disabled={chatBusy}
               >
                 <div className="flex items-center justify-between gap-2">
                   <div className="font-mono text-xs">{item.session_id}</div>
@@ -855,7 +915,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 type="button"
                 className="rounded-2xl bg-zinc-900 px-3 py-3 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
                 onClick={() => requestDeleteSession(item.session_id)}
-                disabled={streaming}
+                disabled={chatBusy}
                 title={t("chat.sessions.deleteTitle")}
               >
                 {t("chat.sessions.deleteShort")}
@@ -944,7 +1004,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                   value={botConfig?.chat_model_id ?? ""}
                   onChange={(e) => void onSelectModel(e.target.value)}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                  disabled={streaming || modelSaving}
+                  disabled={chatBusy || modelSaving}
                 >
                   <option value="">{t("chat.model.fallbackOption")}</option>
                   {availableModels.map((item) => (
@@ -957,7 +1017,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                   value={reasoningEffort}
                   onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort | "")}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                  disabled={streaming}
+                  disabled={chatBusy}
                 >
                   <option value="">{t("chat.reasoningEffort.auto")}</option>
                   <option value="low">{t("chat.reasoningEffort.low")}</option>
@@ -1017,9 +1077,9 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 const messageId = message.message_id ?? null;
                 const actionBusy = Boolean(messageId && messageActionId === messageId);
                 const canRegenerate = Boolean(
-                  messageId && latestRegeneratableAssistantId === messageId && !streaming,
+                  messageId && latestRegeneratableAssistantId === messageId && !chatBusy,
                 );
-                const canDelete = Boolean(messageId && !streaming);
+                const canDelete = Boolean(messageId && !chatBusy);
                 const reasoningOpen = Boolean(messageId && reasoningOpenById[messageId]);
                 const assistantText = message.content?.trim() ?? "";
                 const wideAssistantShell = showReasoning || assistantInvocations.length > 0;
@@ -1196,7 +1256,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               placeholder={chatBlocked ? t("chat.input.blocked") : t("chat.input.ready")}
               className="min-h-[48px] w-full resize-none rounded-3xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600 disabled:opacity-60"
               rows={1}
-              disabled={streaming || chatBlocked}
+              disabled={chatBusy || chatBlocked}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -1208,7 +1268,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               type="button"
               className="rounded-3xl bg-zinc-100 px-5 py-3 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
               onClick={() => void onSend()}
-              disabled={streaming || chatBlocked || !prompt.trim()}
+              disabled={chatBusy || chatBlocked || !prompt.trim()}
             >
               {t("chat.input.send")}
             </button>
@@ -1249,7 +1309,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 type="button"
                 className="rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                 onClick={() => void confirmDeleteSession()}
-                disabled={!pendingDeleteSessionId || streaming}
+                disabled={!pendingDeleteSessionId || chatBusy}
               >
                 {t("common.delete")}
               </button>

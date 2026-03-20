@@ -25,7 +25,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-artifacts = ["src/minibot/server/static/**"]
+artifacts = ["src/minibot/server/static/**", "src/minibot/builtin_skills/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/minibot"]

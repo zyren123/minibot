@@ -97,6 +97,10 @@ export type Config = {
   model: string | null;
   stream_enabled: boolean;
   skills_dirs: string[];
+  user_skills_dir: string | null;
+  project_skills_dir: string | null;
+  default_skill_target: string;
+  available_skill_targets: string[];
   tool_plugins: string[];
   api_key_masked: string | null;
 };
@@ -141,6 +145,26 @@ export type BotConfig = {
 export type SkillInfo = {
   name: string;
   description: string;
+  folder_name: string;
+  source_type: string;
+  scope: string;
+  source_dir: string;
+  resolved_path: string;
+  resources: string[];
+  writable: boolean;
+  deletable: boolean;
+  builtin: boolean;
+  is_active: boolean;
+  override_count: number;
+  overridden_by_source_type: string | null;
+  overridden_by_path: string | null;
+};
+
+export type SkillDeleteResult = {
+  deleted: boolean;
+  skill_name: string;
+  scope: string;
+  folder_name: string;
 };
 
 export type MCPServerInfo = {

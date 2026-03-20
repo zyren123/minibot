@@ -49,11 +49,19 @@ class MessageRegenerateResponse(BaseModel):
     regenerated_from_message_id: str
 
 
+class MessageRegenerateRequest(BaseModel):
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+
+
 class ConfigResponse(BaseModel):
     base_url: str | None = None
     model: str | None = None
     stream_enabled: bool = True
     skills_dirs: list[str] = Field(default_factory=list)
+    user_skills_dir: str | None = None
+    project_skills_dir: str | None = None
+    default_skill_target: str = "user"
+    available_skill_targets: list[str] = Field(default_factory=list)
     tool_plugins: list[str] = Field(default_factory=list)
     api_key_masked: str | None = None
 
@@ -129,6 +137,32 @@ class BotConfigUpdate(BaseModel):
 class SkillInfo(BaseModel):
     name: str
     description: str
+    folder_name: str
+    source_type: str
+    scope: str
+    source_dir: str
+    resolved_path: str
+    resources: list[str] = Field(default_factory=list)
+    writable: bool = False
+    deletable: bool = False
+    builtin: bool = False
+    is_active: bool = True
+    override_count: int = 0
+    overridden_by_source_type: str | None = None
+    overridden_by_path: str | None = None
+
+
+class SkillCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    description: str | None = None
+    scope: Literal["user", "project"] = "user"
+
+
+class SkillDeleteResponse(BaseModel):
+    deleted: bool = False
+    skill_name: str
+    scope: str
+    folder_name: str
 
 
 class MCPServerInfo(BaseModel):

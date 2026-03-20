@@ -24,12 +24,13 @@ import type {
   SubagentCandidate,
 } from "../lib/types";
 import { useI18n } from "../lib/i18n";
+import SkillsView from "./SkillsView";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type DashboardTab = "bots" | "providers";
+type DashboardTab = "bots" | "providers" | "skills";
 
 type BotDraft = {
   name: string;
@@ -235,8 +236,9 @@ export default function ConfigView(props: {
 
   const filteredSkills = useMemo(() => {
     const q = skillQuery.trim().toLowerCase();
-    if (!q) return skills;
-    return skills.filter((item) => `${item.name} ${item.description}`.toLowerCase().includes(q));
+    const activeOnly = skills.filter((item) => item.is_active);
+    if (!q) return activeOnly;
+    return activeOnly.filter((item) => `${item.name} ${item.description}`.toLowerCase().includes(q));
   }, [skillQuery, skills]);
 
   const currentBotMeta = useMemo(
@@ -316,10 +318,18 @@ export default function ConfigView(props: {
     setCandidates(await listSubagentCandidates(nextBotId));
   }
 
+  async function refreshSkills() {
+    setSkills(await listSkills());
+  }
+
+  async function handleSkillsChanged() {
+    await refreshSkills();
+    await refreshBot(botId);
+  }
+
   useEffect(() => {
-    Promise.all([listSkills(), listMcpServers()])
-      .then(([skillList, serverList]) => {
-        setSkills(skillList);
+    Promise.all([refreshSkills(), listMcpServers()])
+      .then(([, serverList]) => {
         setMcpServers(serverList);
       })
       .catch((err) => setStatus(String(err)));
@@ -621,8 +631,8 @@ export default function ConfigView(props: {
     { label: t("config.summary.models"), value: dashboard?.models.length ?? 0, accent: "from-emerald-500/25 to-emerald-500/5" },
     { label: t("config.summary.bots"), value: dashboard?.bots.length ?? 0, accent: "from-amber-500/25 to-amber-500/5" },
     {
-      label: t("config.summary.subagents"),
-      value: dashboard?.bots.filter((item) => item.subagent_exposable).length ?? 0,
+      label: t("config.summary.skills"),
+      value: skills.filter((item) => item.is_active).length,
       accent: "from-rose-500/25 to-rose-500/5",
     },
   ];
@@ -653,7 +663,7 @@ export default function ConfigView(props: {
           <div className="flex items-center gap-2">
             {status ? <div className="text-xs text-zinc-400">{status}</div> : null}
             <div className="rounded-2xl border border-zinc-800 bg-zinc-950/90 p-1">
-              {(["bots", "providers"] as DashboardTab[]).map((item) => (
+              {(["bots", "providers", "skills"] as DashboardTab[]).map((item) => (
                 <button
                   key={item}
                   type="button"
@@ -663,7 +673,11 @@ export default function ConfigView(props: {
                     tab === item ? "bg-zinc-100 text-zinc-900" : "text-zinc-300 hover:bg-zinc-900",
                   )}
                 >
-                  {item === "bots" ? t("config.tab.bots") : t("config.tab.providers")}
+                  {item === "bots"
+                    ? t("config.tab.bots")
+                    : item === "providers"
+                      ? t("config.tab.providers")
+                      : t("config.tab.skills")}
                 </button>
               ))}
             </div>
@@ -921,12 +935,21 @@ export default function ConfigView(props: {
                       title={t("config.section.skills.title")}
                       subtitle={t("config.section.skills.subtitle")}
                       right={
-                        <input
-                          value={skillQuery}
-                          onChange={(e) => setSkillQuery(e.target.value)}
-                          placeholder={t("config.skills.search")}
-                          className="w-52 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                        />
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={skillQuery}
+                            onChange={(e) => setSkillQuery(e.target.value)}
+                            placeholder={t("config.skills.search")}
+                            className="w-52 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                          />
+                          <button
+                            type="button"
+                            className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800"
+                            onClick={() => setTab("skills")}
+                          >
+                            {t("config.skills.manage")}
+                          </button>
+                        </div>
                       }
                     >
                       <div className="max-h-80 space-y-2 overflow-auto pr-1">
@@ -1028,7 +1051,7 @@ export default function ConfigView(props: {
               ) : null}
             </div>
           </div>
-        ) : (
+        ) : tab === "providers" ? (
           <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
             <div className="flex flex-col gap-4">
               <SectionCard
@@ -1332,6 +1355,12 @@ export default function ConfigView(props: {
               )}
             </div>
           </div>
+        ) : (
+          <SkillsView
+            skills={skills}
+            onSkillsChanged={handleSkillsChanged}
+            onStatus={setStatus}
+          />
         )}
       </div>
 

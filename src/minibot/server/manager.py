@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import copy
 from pathlib import Path
+import re
+import shutil
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -21,6 +23,9 @@ from .plugins import load_tools_from_plugin
 
 
 class AgentManager:
+    _MAX_SKILL_NAME_LENGTH = 64
+    _ALLOWED_SKILL_RESOURCES = ("scripts", "references", "assets")
+
     @staticmethod
     def _display_bot_name(bot_id: str, data: dict[str, Any]) -> str:
         raw_name = data.get("name")
@@ -41,6 +46,8 @@ class AgentManager:
         self._base_config = load_config(workdir=workdir)
         self._bot_store = BotStore(app_home=Path(self._base_config.app_home))
         self._dashboard_store = DashboardStore(app_home=Path(self._base_config.app_home))
+        self.user_skills_dir = Path(self._base_config.skills_dir).resolve()
+        self.project_skills_dir = (Path(self._base_config.project_root) / "skills").resolve()
 
         self._bots: dict[tuple[str, str], Minibot] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -48,11 +55,8 @@ class AgentManager:
         self._sessions: dict[str, SessionManager] = {}
         self._global_lock = asyncio.Lock()
 
-        project_skills = Path(self._base_config.project_root) / "skills"
-        if project_skills.exists():
-            self.skills_dirs: list[str] = [str(project_skills.resolve())]
-        else:
-            self.skills_dirs = [str(Path(self._base_config.skills_dir).resolve())]
+        default_dirs = [str(self.project_skills_dir), str(self.user_skills_dir)]
+        self.skills_dirs = list(dict.fromkeys(default_dirs))
 
     def config_snapshot(self) -> dict[str, Any]:
         bot_cfg = self.bot_config_snapshot(DEFAULT_BOT_ID)
@@ -61,6 +65,10 @@ class AgentManager:
             "model": bot_cfg.get("model"),
             "stream_enabled": bot_cfg.get("stream_enabled"),
             "skills_dirs": list(self.skills_dirs),
+            "user_skills_dir": str(self.user_skills_dir),
+            "project_skills_dir": str(self.project_skills_dir),
+            "default_skill_target": "user",
+            "available_skill_targets": ["user", "project"],
             "tool_plugins": list(bot_cfg.get("tool_plugins") or []),
             "api_key_masked": bot_cfg.get("api_key_masked"),
         }
@@ -371,14 +379,14 @@ class AgentManager:
         ]
         remaining = messages[:start] + messages[end:]
         session_mgr.overwrite(session_id, remaining)
-        self._clear_session_cache(bot_id, session_id)
+        self._clear_session_cache(bot_id, session_id, preserve_lock=True)
         return {
             "session_id": session_id,
             "messages": self._serialize_messages(remaining),
             "deleted_message_ids": deleted_message_ids,
         }
 
-    async def regenerate_message_turn(self, bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+    def prepare_regenerate_message_turn(self, bot_id: str, session_id: str, message_id: str) -> str:
         session_mgr = self.sessions_for(bot_id)
         if not session_mgr.exists(session_id):
             raise ValueError("Session not found")
@@ -393,8 +401,11 @@ class AgentManager:
 
         preserved = messages[:start]
         session_mgr.overwrite(session_id, preserved)
-        self._clear_session_cache(bot_id, session_id)
+        self._clear_session_cache(bot_id, session_id, preserve_lock=True)
+        return prompt
 
+    async def regenerate_message_turn(self, bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+        prompt = self.prepare_regenerate_message_turn(bot_id, session_id, message_id)
         bot = await self.get_bot(bot_id, session_id)
         result = await bot.chat(prompt, session_id=session_id)
         return {
@@ -404,10 +415,77 @@ class AgentManager:
         }
 
     def skills_snapshot(self) -> list[dict[str, Any]]:
-        loader = SkillLoader([Path(p) for p in self.skills_dirs])
-        items = [{"name": name, "description": str(meta.get("description") or "")} for name, meta in loader.skills.items()]
-        items.sort(key=lambda d: d["name"])
-        return items
+        records = self._skill_records()
+        records.sort(key=lambda item: (item["name"], item["source_type"], item["resolved_path"]))
+        return records
+
+    async def create_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._global_lock:
+            raw_name = str(payload.get("name") or "").strip()
+            if not raw_name:
+                raise ValueError("Skill name is required")
+
+            skill_name = self._normalize_skill_name(raw_name)
+            if not skill_name:
+                raise ValueError("Skill name must include at least one letter or digit")
+            if len(skill_name) > self._MAX_SKILL_NAME_LENGTH:
+                raise ValueError(
+                    f"Skill name '{skill_name}' is too long ({len(skill_name)} characters). "
+                    f"Maximum is {self._MAX_SKILL_NAME_LENGTH} characters."
+                )
+
+            scope = str(payload.get("scope") or "user").strip().lower()
+            if scope not in {"user", "project"}:
+                raise ValueError("Skill scope must be 'user' or 'project'")
+
+            target_root = self._skill_target_dir(scope)
+            target_root.mkdir(parents=True, exist_ok=True)
+            skill_dir = target_root / skill_name
+            if skill_dir.exists():
+                raise ValueError(f"Skill directory already exists: {skill_dir}")
+
+            description = self._optional_text(payload.get("description"))
+            skill_dir.mkdir(parents=True, exist_ok=False)
+            (skill_dir / "SKILL.md").write_text(
+                self._skill_template(skill_name, description),
+                encoding="utf-8",
+            )
+
+            self._ensure_active_skill_dir(scope)
+            created = self._find_skill_record(scope=scope, folder_name=skill_dir.name)
+            if created is None:
+                raise ValueError("Created skill could not be resolved")
+            return created
+
+    async def delete_skill(self, *, scope: str, folder_name: str) -> dict[str, Any]:
+        async with self._global_lock:
+            normalized_scope = str(scope or "").strip().lower()
+            if normalized_scope != "user":
+                raise ValueError("Only user skills can be deleted from the UI")
+            if not folder_name or Path(folder_name).name != folder_name or folder_name in {".", ".."}:
+                raise ValueError("Invalid skill folder name")
+
+            target_dir = self.user_skills_dir / folder_name
+            skill_md = target_dir / "SKILL.md"
+            if not skill_md.exists():
+                raise ValueError("Skill not found")
+
+            loader = SkillLoader([self.user_skills_dir])
+            parsed = loader.parse_skill_md(skill_md)
+            if not parsed:
+                raise ValueError("Skill metadata is invalid")
+
+            shutil.rmtree(target_dir)
+            self._bot_store.remove_skill_references(str(parsed.get("name") or folder_name))
+            for bot_id in self._bot_store.all_bot_ids():
+                self._clear_bot_cache(bot_id)
+
+            return {
+                "deleted": True,
+                "skill_name": str(parsed.get("name") or folder_name),
+                "scope": normalized_scope,
+                "folder_name": folder_name,
+            }
 
     def mcp_servers_snapshot(self) -> list[dict[str, Any]]:
         servers: list[dict[str, Any]] = []
@@ -425,6 +503,139 @@ class AgentManager:
             )
         servers.sort(key=lambda d: d["name"])
         return servers
+
+    def _skill_records(self) -> list[dict[str, Any]]:
+        loader = SkillLoader([Path(p) for p in self.skills_dirs])
+        records: list[dict[str, Any]] = []
+        common_dirs = {path.expanduser().resolve() for path in loader.COMMON_SKILL_DIRS}
+
+        for priority, skills_dir in enumerate(loader.skills_dirs):
+            root = Path(skills_dir).expanduser().resolve()
+            if not root.exists():
+                continue
+            for skill_dir in sorted(root.iterdir()):
+                if not skill_dir.is_dir():
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    continue
+                parsed = loader.parse_skill_md(skill_md)
+                if not parsed:
+                    continue
+
+                source_type = self._classify_skill_source(root, common_dirs)
+                resources = [
+                    name
+                    for name in self._ALLOWED_SKILL_RESOURCES
+                    if (skill_dir / name).exists() and any((skill_dir / name).iterdir())
+                ]
+                records.append(
+                    {
+                        "name": str(parsed.get("name") or ""),
+                        "description": str(parsed.get("description") or ""),
+                        "folder_name": skill_dir.name,
+                        "source_type": source_type,
+                        "scope": source_type,
+                        "source_dir": str(root),
+                        "resolved_path": str(skill_dir.resolve()),
+                        "resources": resources,
+                        "writable": source_type in {"user", "project", "custom"},
+                        "deletable": source_type == "user",
+                        "builtin": source_type == "builtin",
+                        "is_active": False,
+                        "override_count": 0,
+                        "overridden_by_source_type": None,
+                        "overridden_by_path": None,
+                        "_priority": priority,
+                    }
+                )
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in records:
+            grouped.setdefault(item["name"], []).append(item)
+
+        for items in grouped.values():
+            items.sort(key=lambda item: int(item["_priority"]))
+            active = items[0]
+            active["is_active"] = True
+            active["override_count"] = max(len(items) - 1, 0)
+            for entry in items[1:]:
+                entry["overridden_by_source_type"] = str(active["source_type"])
+                entry["overridden_by_path"] = str(active["resolved_path"])
+
+        for item in records:
+            item.pop("_priority", None)
+
+        return records
+
+    def _classify_skill_source(self, root: Path, common_dirs: set[Path]) -> str:
+        if root == self.project_skills_dir:
+            return "project"
+        if root == self.user_skills_dir:
+            return "user"
+        if root == SkillLoader.BUILTIN_SKILLS_DIR.resolve():
+            return "builtin"
+        if root in common_dirs:
+            return "common"
+        return "custom"
+
+    def _skill_target_dir(self, scope: str) -> Path:
+        if scope == "project":
+            return self.project_skills_dir
+        return self.user_skills_dir
+
+    def _ensure_active_skill_dir(self, scope: str) -> None:
+        target = str(self._skill_target_dir(scope))
+        if target in self.skills_dirs:
+            return
+        if scope == "project":
+            self.skills_dirs.insert(0, target)
+            return
+        project_dir = str(self.project_skills_dir)
+        if project_dir in self.skills_dirs:
+            self.skills_dirs.insert(1, target)
+        else:
+            self.skills_dirs.insert(0, target)
+
+    def _find_skill_record(self, *, scope: str, folder_name: str) -> dict[str, Any] | None:
+        for item in self._skill_records():
+            if item["scope"] == scope and item["folder_name"] == folder_name:
+                return item
+        return None
+
+    @classmethod
+    def _normalize_skill_name(cls, skill_name: str) -> str:
+        normalized = skill_name.strip().lower()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+        normalized = normalized.strip("-")
+        normalized = re.sub(r"-{2,}", "-", normalized)
+        return normalized
+
+    @staticmethod
+    def _skill_title(skill_name: str) -> str:
+        return " ".join(word.capitalize() for word in skill_name.split("-"))
+
+    @classmethod
+    def _skill_template(cls, skill_name: str, description: str | None) -> str:
+        skill_title = cls._skill_title(skill_name)
+        resolved_description = description or "[TODO: Describe what this skill does and when it should be used.]"
+        return (
+            f"---\n"
+            f"name: {skill_name}\n"
+            f"description: {resolved_description}\n"
+            f"---\n\n"
+            f"# {skill_title}\n\n"
+            f"## Goal\n\n"
+            f"[TODO: Explain the outcome this skill enables.]\n\n"
+            f"## Workflow\n\n"
+            f"1. [TODO: Describe the first important step.]\n"
+            f"2. [TODO: Describe the second important step.]\n"
+            f"3. [TODO: Describe how to verify the result.]\n\n"
+            f"## Notes\n\n"
+            f"- Keep this file concise.\n"
+            f"- Move long docs into `references/` when needed.\n"
+            f"- Add helper scripts only when deterministic execution matters.\n"
+        )
 
     async def session_lock(self, bot_id: str, session_id: str) -> asyncio.Lock:
         async with self._global_lock:
@@ -728,12 +939,13 @@ class AgentManager:
             self._locks.pop(key, None)
             self._mcp_connected.discard(key)
 
-    def _clear_session_cache(self, bot_id: str, session_id: str) -> None:
+    def _clear_session_cache(self, bot_id: str, session_id: str, *, preserve_lock: bool = False) -> None:
         key = (bot_id, session_id)
         bot = self._bots.pop(key, None)
         if bot is not None:
             bot.cancel()
-        self._locks.pop(key, None)
+        if not preserve_lock:
+            self._locks.pop(key, None)
         self._mcp_connected.discard(key)
 
     @classmethod
