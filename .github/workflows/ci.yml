@@ -26,10 +26,8 @@ jobs:
           npm install --no-fund --no-audit
           npm run build
 
-      - name: Copy WebUI dist into Python package
-        run: |
-          rm -rf src/minibot/server/static/*
-          cp -R webui/dist/* src/minibot/server/static/
+      - name: Sync WebUI dist into Python package
+        run: bash scripts/sync_webui_static.sh
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -47,3 +45,6 @@ jobs:
 
       - name: Build wheel/sdist (sanity)
         run: python -m build
+
+      - name: Verify packaged WebUI assets
+        run: python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz

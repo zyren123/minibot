@@ -1,6 +1,6 @@
 [project]
 name = "minibotclaw"
-version = "0.1.5"
+version = "0.1.6"
 description = "A assistant for education purpose"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,9 +24,11 @@ minibot-web = "minibot.server.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+artifacts = ["src/minibot/server/static/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/minibot"]
-include = ["src/minibot/server/static/**"]
 
 [tool.hatch.build.targets.sdist]
 include = [
