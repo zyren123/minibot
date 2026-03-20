@@ -3,9 +3,28 @@ export type StreamEventType =
   | "assistant_reasoning_delta"
   | "assistant_delta"
   | "assistant_end"
+  | "todo_snapshot"
   | "tool_call"
   | "tool_result"
   | "system";
+
+export type TodoItemStatus = "pending" | "active" | "done";
+
+export type TodoItem = {
+  id: string;
+  label: string;
+  status: TodoItemStatus;
+  detail?: string;
+};
+
+export type TodoSnapshot = {
+  title: string;
+  items: TodoItem[];
+  completed: number;
+  total: number;
+  visible: boolean;
+  completed_at?: string | null;
+};
 
 export type StreamEvent = {
   type?: StreamEventType;
@@ -20,6 +39,7 @@ export type StreamEvent = {
   finish_reason?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  todo?: TodoSnapshot;
 
   tool_call_id?: string;
   tool_name?: string;

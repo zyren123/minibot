@@ -5,6 +5,7 @@ import pytest
 
 from src.minibot.agent import Agent
 from src.minibot.config.schema import Config, LLMConfig, TeamsConfig
+from src.minibot.events import AsyncQueueEventSink
 
 
 class FakeStream:
@@ -504,3 +505,76 @@ async def test_whitespace_before_tool_call_does_not_start_stream_render(tmp_path
 
     _assert_assistant_message(result[-1], "done")
     assert started["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_todo_write_emits_structured_todo_snapshots(tmp_path):
+    agent = _make_agent(tmp_path)
+    agent.set_stream_enabled(False)
+    queue: asyncio.Queue = asyncio.Queue()
+    agent.event_sink = AsyncQueueEventSink(queue)
+
+    class TodoClient:
+        model = "test-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def create_message_stream_async(self, **_kwargs):
+            raise AssertionError("streaming should be disabled")
+
+        async def create_message_async(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _response(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call-1",
+                            function=SimpleNamespace(name="TodoWrite", arguments='{"items":[{"content":"Inspect layout","status":"completed","activeForm":"Inspecting layout"},{"content":"Design dock","status":"in_progress","activeForm":"Designing dock"},{"content":"Verify mobile behavior","status":"pending","activeForm":"Verifying mobile behavior"}]}'),
+                        )
+                    ],
+                )
+            if self.calls == 2:
+                return _response(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call-2",
+                            function=SimpleNamespace(name="TodoWrite", arguments='{"items":[{"content":"Inspect layout","status":"completed","activeForm":"Inspecting layout"},{"content":"Design dock","status":"completed","activeForm":"Designing dock"},{"content":"Verify mobile behavior","status":"completed","activeForm":"Verifying mobile behavior"}]}'),
+                        )
+                    ],
+                )
+            return _response(content="All done")
+
+    agent.client = TodoClient()
+    history = [{"role": "user", "content": "Implement the dock"}]
+
+    result = await agent.run_loop(history)
+
+    _assert_assistant_message(result[-1], "All done")
+
+    emitted = []
+    while not queue.empty():
+        emitted.append(await queue.get())
+
+    todo_events = [event for event in emitted if event.get("type") == "todo_snapshot"]
+    assert len(todo_events) == 2
+
+    first_snapshot = todo_events[0]["todo"]
+    assert first_snapshot["title"] == "Current plan"
+    assert first_snapshot["completed"] == 1
+    assert first_snapshot["total"] == 3
+    assert first_snapshot["visible"] is True
+    assert [item["status"] for item in first_snapshot["items"]] == ["done", "active", "pending"]
+    assert first_snapshot["items"][1]["detail"] == "Designing dock"
+    assert first_snapshot["completed_at"] is None
+
+    final_snapshot = todo_events[-1]["todo"]
+    assert final_snapshot["completed"] == 3
+    assert final_snapshot["total"] == 3
+    assert final_snapshot["visible"] is True
+    assert [item["status"] for item in final_snapshot["items"]] == ["done", "done", "done"]
+    assert final_snapshot["completed_at"]

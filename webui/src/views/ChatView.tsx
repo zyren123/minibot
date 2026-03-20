@@ -9,6 +9,7 @@ import type {
   ReasoningEffort,
   SessionMeta,
   StreamEvent,
+  TodoSnapshot,
   Usage,
 } from "../lib/types";
 import {
@@ -140,6 +141,36 @@ type ContextSnapshot = {
   totalTokens: number;
   compacted: boolean;
 };
+
+function normalizeTodoSnapshot(raw: StreamEvent["todo"] | undefined): TodoSnapshot | null {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.items)) return null;
+  const items = raw.items
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return null;
+      const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : `todo-${index + 1}`;
+      const label = typeof item.label === "string" ? item.label.trim() : "";
+      const status = item.status;
+      if (!label || (status !== "pending" && status !== "active" && status !== "done")) return null;
+      const detail = typeof item.detail === "string" && item.detail.trim() ? item.detail.trim() : undefined;
+      return { id, label, status, detail };
+    })
+    .filter((item): item is TodoSnapshot["items"][number] => Boolean(item));
+  const completed =
+    typeof raw.completed === "number" && Number.isFinite(raw.completed)
+      ? raw.completed
+      : items.filter((item) => item.status === "done").length;
+  const total = typeof raw.total === "number" && Number.isFinite(raw.total) ? raw.total : items.length;
+  const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "Current plan";
+  const completedAt = typeof raw.completed_at === "string" && raw.completed_at.trim() ? raw.completed_at : null;
+  return {
+    title,
+    items,
+    completed,
+    total,
+    visible: Boolean(raw.visible),
+    completed_at: completedAt,
+  };
+}
 
 function contextSnapshotFromMessages(messages: Message[]): ContextSnapshot | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -413,6 +444,10 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [messageActionId, setMessageActionId] = useState<string | null>(null);
   const [reasoningOpenById, setReasoningOpenById] = useState<Record<string, boolean>>({});
   const [toolOpenById, setToolOpenById] = useState<Record<string, boolean>>({});
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
+  const [mobileTodoOpen, setMobileTodoOpen] = useState(false);
+  const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -431,6 +466,20 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }, [contextBySession, messages, sessionId]);
   const sessionLocale = language === "en" ? "en-US" : "zh-CN";
   const contextThresholdTokens = botConfig?.auto_compact_threshold_tokens ?? null;
+  const todoVisible = Boolean(todoSnapshot?.visible && todoSnapshot.items.length);
+  const todoPercent =
+    todoSnapshot && todoSnapshot.total > 0 ? Math.min(100, Math.round((todoSnapshot.completed / todoSnapshot.total) * 100)) : 0;
+  const todoDone = Boolean(todoSnapshot && todoSnapshot.total > 0 && todoSnapshot.completed >= todoSnapshot.total);
+  const activeTodoItem = todoSnapshot?.items.find((item) => item.status === "active") ?? null;
+  const todoCompletedAtLabel = useMemo(() => {
+    if (!todoSnapshot?.completed_at) return null;
+    const parsed = new Date(todoSnapshot.completed_at);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return new Intl.DateTimeFormat(sessionLocale, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(parsed);
+  }, [sessionLocale, todoSnapshot?.completed_at]);
   const contextPercent =
     activeContextSnapshot && contextThresholdTokens
       ? Math.min(100, Math.round((activeContextSnapshot.totalTokens / contextThresholdTokens) * 100))
@@ -475,6 +524,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const blockedReason =
     botConfig?.chat_disabled_reason ?? (botConfig?.enabled === false ? t("chat.fallbackDisabledReason") : null);
 
+  function clearTodoState() {
+    setTodoSnapshot(null);
+    setMobileTodoOpen(false);
+  }
+
   function syncContextSnapshot(targetSessionId: string, nextMessages: Message[]) {
     setContextBySession((prev) => {
       const next = { ...prev };
@@ -508,6 +562,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     const created = await createSession(botId);
     setReasoningOpenById({});
     setToolOpenById({});
+    clearTodoState();
     setSessionId(created.session_id);
     await refreshSessions(botId);
     return created.session_id;
@@ -517,8 +572,20 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     const sess = await loadSession(botId, id);
     setReasoningOpenById({});
     setToolOpenById({});
+    clearTodoState();
     setMessages(sess.messages);
     syncContextSnapshot(id, sess.messages);
+  }
+
+  async function startNewSession() {
+    const result = await createSession(botId);
+    setReasoningOpenById({});
+    setToolOpenById({});
+    clearTodoState();
+    setMessages([]);
+    setSessionId(result.session_id);
+    setMobileSessionsOpen(false);
+    await refreshSessions(botId);
   }
 
   useEffect(() => {
@@ -530,6 +597,8 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setMessageActionId(null);
     setReasoningOpenById({});
     setToolOpenById({});
+    clearTodoState();
+    setMobileSessionsOpen(false);
     Promise.all([refreshSessions(botId), refreshBotState(botId)]).catch((err) => setStatus(errorMessage(err)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId]);
@@ -558,6 +627,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }, [deleteOpen]);
 
   function applyStreamEvent(ev: StreamEvent) {
+    if (ev.type === "todo_snapshot") {
+      setTodoSnapshot(normalizeTodoSnapshot(ev.todo));
+      return;
+    }
+
     if (ev.type === "assistant_start") {
       setMessages((prev) =>
         updateAssistantMessage(
@@ -701,6 +775,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     if (!prompt.trim() || chatBusy || chatBlocked) return;
     setStatus(null);
     setStreaming(true);
+    clearTodoState();
 
     const nextPrompt = prompt.trim();
     const sid = await ensureSession();
@@ -767,6 +842,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setMessageActionId(messageId);
     setStatus(t("chat.status.regeneratingReply"));
     setStreaming(true);
+    clearTodoState();
     try {
       let interrupted = false;
       setReasoningOpenById({});
@@ -817,6 +893,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         setSessionId(null);
         setReasoningOpenById({});
         setToolOpenById({});
+        clearTodoState();
         setMessages([]);
       }
       setContextBySession((prev) => {
@@ -855,88 +932,297 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setToolOpenById((prev) => ({ ...prev, [toolKey]: !prev[toolKey] }));
   }
 
-  return (
-    <div className="flex h-full bg-zinc-950">
-      <aside className="w-80 shrink-0 border-r border-zinc-800 bg-zinc-950/95">
-        <div className="border-b border-zinc-800 px-4 py-4">
-          <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{t("chat.sessions.title")}</div>
-          <div className="mt-3 flex gap-2">
+  const sessionListContent = (
+    <>
+      {sortedSessions.map((item, index) => {
+        const miniLabel = item.session_id.slice(0, 2).toUpperCase();
+        return (
+          <div key={item.session_id} className="mb-2 flex items-stretch gap-2">
             <button
               type="button"
-              className="rounded-2xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
-              onClick={() =>
-                createSession(botId)
-                  .then((result) => {
-                    setReasoningOpenById({});
-                    setToolOpenById({});
-                    setMessages([]);
-                    setSessionId(result.session_id);
-                  })
-                  .then(() => refreshSessions(botId))
-              }
-              disabled={chatBusy || chatBlocked}
-            >
-              {t("chat.sessions.new")}
-            </button>
-            <button
-              type="button"
-              className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-              onClick={() => void refreshSessions(botId).catch((err) => setStatus(errorMessage(err)))}
+              className={classNames(
+                "flex-1 rounded-2xl px-3 py-3 text-left transition",
+                sessionId === item.session_id
+                  ? "bg-zinc-900 text-zinc-100 ring-1 ring-sky-400/30"
+                  : "bg-zinc-950 text-zinc-300 hover:bg-zinc-900/70",
+              )}
+              onClick={() => {
+                setMobileSessionsOpen(false);
+                setSessionId(item.session_id);
+              }}
               disabled={chatBusy}
+              title={item.session_id}
             >
-              {t("chat.sessions.refresh")}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+                    {miniLabel}
+                  </div>
+                  <div className="font-mono text-xs">{item.session_id}</div>
+                </div>
+                <div className="text-[10px] text-zinc-500">{item.message_count}</div>
+              </div>
+              <div className="mt-2 line-clamp-2 text-xs text-zinc-400">
+                {item.preview || t("chat.sessions.noPreview")}
+              </div>
+              <div className="mt-3 text-[10px] uppercase tracking-[0.18em] text-zinc-600">
+                #{String(index + 1).padStart(2, "0")}
+              </div>
             </button>
+            <button
+              type="button"
+              className="rounded-2xl bg-zinc-900 px-3 py-3 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              onClick={() => requestDeleteSession(item.session_id)}
+              disabled={chatBusy}
+              title={t("chat.sessions.deleteTitle")}
+            >
+              {t("chat.sessions.deleteShort")}
+            </button>
+          </div>
+        );
+      })}
+      {sortedSessions.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">
+          {t("chat.sessions.empty")}
+        </div>
+      ) : null}
+    </>
+  );
+
+  const todoDockContent = todoVisible && todoSnapshot ? (
+    <div className="flex h-full flex-col p-4">
+      <div
+        className={classNames(
+          "flex h-full flex-col overflow-hidden rounded-[2rem] border px-4 py-4 shadow-[0_20px_60px_rgba(0,0,0,0.24)]",
+          todoDone
+            ? "border-emerald-500/25 bg-[radial-gradient(circle_at_top,#153829_0%,#0a0f0d_58%,#09090b_100%)]"
+            : "border-sky-500/20 bg-[radial-gradient(circle_at_top,#132136_0%,#0c1220_52%,#09090b_100%)]",
+        )}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-sky-200/75">
+              {t("chat.todo.dockLabel")}
+            </div>
+            <div className="mt-3 text-xl font-semibold text-zinc-50">
+              {todoDone ? t("chat.todo.doneTitle") : todoSnapshot.title}
+            </div>
+            <div className="mt-2 text-xs text-zinc-400">
+              {todoDone
+                ? todoCompletedAtLabel
+                  ? `${t("chat.todo.completedState")} • ${todoCompletedAtLabel}`
+                  : t("chat.todo.completedState")
+                : activeTodoItem?.detail ?? t("chat.todo.idle")}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-right">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{t("common.current")}</div>
+            <div className="mt-1 text-lg font-semibold text-zinc-100">
+              {todoSnapshot.completed} / {todoSnapshot.total}
+            </div>
           </div>
         </div>
 
-        <div className="h-[calc(100%-95px)] overflow-auto px-3 py-3">
-          {sortedSessions.map((item) => (
-            <div key={item.session_id} className="mb-2 flex items-stretch gap-2">
-              <button
-                type="button"
-                className={classNames(
-                  "flex-1 rounded-2xl px-3 py-3 text-left transition",
-                  sessionId === item.session_id
-                    ? "bg-zinc-900 text-zinc-100"
-                    : "bg-zinc-950 text-zinc-300 hover:bg-zinc-900/70",
-                )}
-                onClick={() => setSessionId(item.session_id)}
-                disabled={chatBusy}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="font-mono text-xs">{item.session_id}</div>
-                  <div className="text-[10px] text-zinc-500">{item.message_count}</div>
-                </div>
-                <div className="mt-2 line-clamp-2 text-xs text-zinc-400">
-                  {item.preview || t("chat.sessions.noPreview")}
-                </div>
-              </button>
-              <button
-                type="button"
-                className="rounded-2xl bg-zinc-900 px-3 py-3 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
-                onClick={() => requestDeleteSession(item.session_id)}
-                disabled={chatBusy}
-                title={t("chat.sessions.deleteTitle")}
-              >
-                {t("chat.sessions.deleteShort")}
-              </button>
-            </div>
-          ))}
-          {sortedSessions.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">
-              {t("chat.sessions.empty")}
-            </div>
-          ) : null}
+        <div className="mt-5 h-2 overflow-hidden rounded-full bg-zinc-900/90">
+          <div
+            className={classNames(
+              "h-full rounded-full transition-[width,background-color] duration-300",
+              todoDone ? "bg-emerald-400" : "bg-[linear-gradient(90deg,#38bdf8,#34d399)]",
+            )}
+            style={{ width: `${todoPercent}%` }}
+          />
         </div>
+
+        <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
+          <span>{todoDone ? t("chat.todo.completedState") : t("chat.todo.activeState")}</span>
+          <span>{todoPercent}%</span>
+        </div>
+
+        <div className="mt-5 flex-1 overflow-auto pr-1">
+          <div className="space-y-3">
+            {todoSnapshot.items.map((item) => {
+              const isActive = item.status === "active";
+              const isDone = item.status === "done";
+              const statusLabel = isDone
+                ? t("chat.todo.completedState")
+                : isActive
+                  ? t("chat.todo.activeState")
+                  : t("chat.todo.pendingState");
+
+              return (
+                <div
+                  key={item.id}
+                  className={classNames(
+                    "relative overflow-hidden rounded-[1.4rem] border px-4 py-3 transition-all duration-300",
+                    isDone
+                      ? "border-emerald-500/15 bg-emerald-500/8 text-zinc-300"
+                      : isActive
+                        ? "border-sky-400/35 bg-sky-500/10 text-zinc-100 shadow-[0_14px_30px_rgba(14,165,233,0.12)]"
+                        : "border-zinc-800 bg-zinc-950/65 text-zinc-400",
+                  )}
+                >
+                  {isActive ? <div className="absolute inset-y-3 left-0 w-1 rounded-full bg-sky-300 animate-pulse" /> : null}
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={classNames(
+                        "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl border text-sm font-semibold",
+                        isDone
+                          ? "border-emerald-400/20 bg-emerald-500/12 text-emerald-200"
+                          : isActive
+                            ? "border-sky-300/20 bg-sky-400/12 text-sky-100"
+                            : "border-zinc-800 bg-zinc-900 text-zinc-500",
+                      )}
+                    >
+                      {isDone ? "✓" : isActive ? "•" : "○"}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 text-sm font-semibold leading-6">{item.label}</div>
+                        <div
+                          className={classNames(
+                            "shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]",
+                            isDone
+                              ? "bg-emerald-500/12 text-emerald-200"
+                              : isActive
+                                ? "bg-sky-400/12 text-sky-100"
+                                : "bg-zinc-900 text-zinc-500",
+                          )}
+                        >
+                          {statusLabel}
+                        </div>
+                      </div>
+                      {item.detail ? <div className="mt-1 text-xs text-zinc-400">{item.detail}</div> : null}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <div className="flex h-full overflow-hidden bg-zinc-950">
+      <aside
+        className={classNames(
+          "hidden shrink-0 border-r border-zinc-800 bg-zinc-950/95 transition-[width] duration-300 lg:flex",
+          sidebarCollapsed ? "w-20" : "w-80",
+        )}
+      >
+        {sidebarCollapsed ? (
+          <div className="flex h-full w-full flex-col items-center gap-4 px-3 py-4">
+            <button
+              type="button"
+              className="flex h-12 w-12 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-lg text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800"
+              onClick={() => setSidebarCollapsed(false)}
+              title={t("chat.sessions.expand")}
+            >
+              &gt;
+            </button>
+            <button
+              type="button"
+              className="flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-100 text-xl font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+              onClick={() => void startNewSession()}
+              disabled={chatBusy || chatBlocked}
+              title={t("chat.sessions.new")}
+            >
+              +
+            </button>
+            <div className="h-px w-10 bg-zinc-800" />
+            <div className="flex flex-1 flex-col items-center gap-2 overflow-auto pb-2">
+              {sortedSessions.map((item) => (
+                <button
+                  key={item.session_id}
+                  type="button"
+                  className={classNames(
+                    "flex h-11 w-11 items-center justify-center rounded-2xl border text-[10px] font-semibold uppercase tracking-[0.16em] transition",
+                    sessionId === item.session_id
+                      ? "border-sky-400/30 bg-sky-400/12 text-sky-100"
+                      : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
+                  )}
+                  onClick={() => setSessionId(item.session_id)}
+                  disabled={chatBusy}
+                  title={item.session_id}
+                >
+                  {item.session_id.slice(0, 2)}
+                </button>
+              ))}
+            </div>
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+              {sortedSessions.length}
+            </div>
+          </div>
+        ) : (
+          <div className="flex h-full flex-col">
+            <div className="border-b border-zinc-800 px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{t("chat.sessions.title")}</div>
+                  <div className="mt-2 text-[11px] uppercase tracking-[0.18em] text-zinc-600">
+                    {sortedSessions.length}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-lg text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800"
+                  onClick={() => setSidebarCollapsed(true)}
+                  title={t("chat.sessions.collapse")}
+                >
+                  &lt;
+                </button>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-2xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                  onClick={() => void startNewSession()}
+                  disabled={chatBusy || chatBlocked}
+                >
+                  {t("chat.sessions.new")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                  onClick={() => void refreshSessions(botId).catch((err) => setStatus(errorMessage(err)))}
+                  disabled={chatBusy}
+                >
+                  {t("chat.sessions.refresh")}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto px-3 py-3">{sessionListContent}</div>
+          </div>
+        )}
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="border-b border-zinc-800 bg-zinc-950/95 px-5 py-4">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
+            <div className="min-w-0">
+              <div className="mb-3 flex flex-wrap items-center gap-2 lg:hidden">
+                <button
+                  type="button"
+                  className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800"
+                  onClick={() => setMobileSessionsOpen(true)}
+                >
+                  {t("chat.sessions.mobileOpen")}
+                </button>
+                {todoVisible ? (
+                  <button
+                    type="button"
+                    className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-100 hover:border-sky-400/30 hover:bg-sky-500/15"
+                    onClick={() => setMobileTodoOpen(true)}
+                  >
+                    {t("chat.todo.openMobile")} {todoSnapshot?.completed} / {todoSnapshot?.total}
+                  </button>
+                ) : null}
+              </div>
               <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{t("chat.header.label")}</div>
-              <div className="mt-2 text-lg font-semibold text-zinc-100">
-                {botName ?? botId}
+              <div className="mt-2 min-w-0 text-lg font-semibold text-zinc-100">
+                <span className="truncate">{botName ?? botId}</span>
                 {!botConfig?.enabled ? <span className="ml-2 text-sm text-amber-300">{t("chat.header.disabled")}</span> : null}
               </div>
               <div className="mt-1 text-xs text-zinc-500">
@@ -1061,7 +1347,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           {status ? <div className="mt-3 text-xs text-zinc-400">{status}</div> : null}
         </div>
 
-        <div ref={scrollRef} className="flex-1 overflow-auto px-6 py-6">
+        <div ref={scrollRef} className="flex-1 overflow-auto px-4 py-6 sm:px-6">
           <div className="mx-auto flex max-w-4xl flex-col gap-4">
             {messages.map((message, idx) => {
               if (message.role === "assistant") {
@@ -1276,6 +1562,79 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           <div className="mx-auto mt-2 max-w-4xl text-xs text-zinc-500">{t("chat.input.hint")}</div>
         </div>
       </section>
+
+      {todoDockContent ? (
+        <aside className="hidden w-[320px] shrink-0 border-l border-zinc-800 bg-zinc-950/95 lg:flex">
+          {todoDockContent}
+        </aside>
+      ) : null}
+
+      {mobileSessionsOpen ? (
+        <div className="fixed inset-0 z-40 flex lg:hidden">
+          <div className="flex h-full w-[min(24rem,calc(100vw-2.5rem))] flex-col border-r border-zinc-800 bg-zinc-950/98 shadow-2xl">
+            <div className="border-b border-zinc-800 px-4 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{t("chat.sessions.title")}</div>
+                <button
+                  type="button"
+                  className="flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800"
+                  onClick={() => setMobileSessionsOpen(false)}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-2xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                  onClick={() => void startNewSession()}
+                  disabled={chatBusy || chatBlocked}
+                >
+                  {t("chat.sessions.new")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                  onClick={() => void refreshSessions(botId).catch((err) => setStatus(errorMessage(err)))}
+                  disabled={chatBusy}
+                >
+                  {t("chat.sessions.refresh")}
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto px-3 py-3">{sessionListContent}</div>
+          </div>
+          <button
+            type="button"
+            className="flex-1 bg-black/70"
+            onClick={() => setMobileSessionsOpen(false)}
+            aria-label={t("common.cancel")}
+          />
+        </div>
+      ) : null}
+
+      {mobileTodoOpen && todoDockContent ? (
+        <div className="fixed inset-0 z-40 flex justify-end lg:hidden">
+          <button
+            type="button"
+            className="flex-1 bg-black/70"
+            onClick={() => setMobileTodoOpen(false)}
+            aria-label={t("common.cancel")}
+          />
+          <div className="h-full w-[min(24rem,calc(100vw-1rem))] border-l border-zinc-800 bg-zinc-950/98 shadow-2xl">
+            <div className="flex items-center justify-end px-4 pt-4">
+              <button
+                type="button"
+                className="flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800"
+                onClick={() => setMobileTodoOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            {todoDockContent}
+          </div>
+        </div>
+      ) : null}
 
       {deleteOpen ? (
         <div

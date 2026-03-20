@@ -196,6 +196,15 @@ class Agent:
             # Event emission must not break the agent runtime.
             return
 
+    async def _emit_todo_snapshot(self) -> None:
+        """Publish the current TodoWrite state for structured UI consumers."""
+        await self._emit(
+            {
+                "type": "todo_snapshot",
+                "todo": self.todo_manager.snapshot(),
+            }
+        )
+
     def set_stream_enabled(self, enabled: bool) -> None:
         """Toggle streaming output for the current session."""
         self.stream_enabled = bool(enabled)
@@ -1436,6 +1445,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                         "note": parse_note or "",
                     }
                 )
+                if tc_name == "TodoWrite" and not output.startswith("Error:"):
+                    await self._emit_todo_snapshot()
                 if self._ui_enabled():
                     print_tool_output(self._tool_output_name(tc_name), output)
                 tool_results.append({"tool_call_id": tc_id, "output": output})

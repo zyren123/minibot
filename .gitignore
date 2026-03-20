@@ -72,6 +72,8 @@ Thumbs.db
 
 # Minibot specific
 .minibot/
+.superpowers/
+.worktrees/
 
 # WebUI
 webui/node_modules/

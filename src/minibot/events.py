@@ -15,6 +15,7 @@ EventType = Literal[
     "assistant_reasoning_delta",
     "assistant_delta",
     "assistant_end",
+    "todo_snapshot",
     "tool_call",
     "tool_result",
     "system",
@@ -37,6 +38,7 @@ class StreamEvent(TypedDict, total=False):
     finish_reason: str
     tool_calls: list[dict[str, Any]]
     usage: dict[str, int]
+    todo: dict[str, Any]
 
     # Tool execution
     tool_call_id: str

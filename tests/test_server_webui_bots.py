@@ -632,6 +632,60 @@ def test_chat_and_stream_endpoints_forward_reasoning_effort(
     }
 
 
+def test_stream_endpoint_forwards_todo_snapshot_events(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Todo Bot"}).json()["bot_id"]
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+
+        class FakeBot:
+            async def stream(
+                self,
+                prompt: str,
+                *,
+                session_id: str | None = None,
+                reasoning_effort: str | None = None,
+            ):
+                yield {
+                    "type": "todo_snapshot",
+                    "todo": {
+                        "title": "Current plan",
+                        "completed": 1,
+                        "total": 2,
+                        "visible": True,
+                        "completed_at": None,
+                        "items": [
+                            {"id": "todo-1", "label": "Inspect layout", "status": "done"},
+                            {"id": "todo-2", "label": "Render dock", "status": "active", "detail": "Rendering"},
+                        ],
+                    },
+                }
+                yield {
+                    "type": "assistant_end",
+                    "message_id": "msg-assistant-2",
+                    "content": "stream-ok",
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    stream = client.post(
+        f"/api/bots/{bot_id}/stream",
+        json={"session_id": "sess-stream", "prompt": "hello stream"},
+    )
+    assert stream.status_code == 200, stream.text
+    assert "event: todo_snapshot" in stream.text
+    assert '"title": "Current plan"' in stream.text
+    assert '"status": "active"' in stream.text
+
+
 def test_provider_models_can_be_deleted_in_batch(client: TestClient) -> None:
     provider_id = client.post(
         "/api/providers",

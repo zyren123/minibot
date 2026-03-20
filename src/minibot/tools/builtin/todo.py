@@ -1,5 +1,6 @@
 """Todo management tool."""
 
+from datetime import datetime, UTC
 from typing import Any
 
 from ..base import BaseTool
@@ -10,6 +11,7 @@ class TodoManager:
 
     def __init__(self):
         self.items: list[dict] = []
+        self.completed_at: str | None = None
 
     def update(self, items: list[dict]) -> str:
         """Update the todo list."""
@@ -38,6 +40,10 @@ class TodoManager:
             raise ValueError("Only one task can be in_progress")
 
         self.items = validated[:20]
+        if self.items and all(item["status"] == "completed" for item in self.items):
+            self.completed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        else:
+            self.completed_at = None
         return self.render()
 
     def render(self) -> str:
@@ -64,6 +70,35 @@ class TodoManager:
             if item["status"] == "in_progress":
                 return item
         return None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a structured snapshot suitable for live UI rendering."""
+        status_map = {
+            "pending": "pending",
+            "in_progress": "active",
+            "completed": "done",
+        }
+        items = []
+        for index, item in enumerate(self.items, start=1):
+            entry = {
+                "id": f"todo-{index}",
+                "label": item["content"],
+                "status": status_map[item["status"]],
+            }
+            detail = item.get("activeForm")
+            if detail:
+                entry["detail"] = str(detail)
+            items.append(entry)
+
+        completed = sum(1 for item in self.items if item["status"] == "completed")
+        return {
+            "title": "Current plan",
+            "items": items,
+            "completed": completed,
+            "total": len(self.items),
+            "visible": bool(self.items),
+            "completed_at": self.completed_at,
+        }
 
 
 class TodoWriteTool(BaseTool):
