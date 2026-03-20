@@ -5,6 +5,7 @@ import asyncio
 from pathlib import Path
 from src.minibot.agent import Agent, UserInterruptedError
 from src.minibot.config.schema import Config, LLMConfig
+from src.minibot.events import AsyncQueueEventSink
 from src.minibot.session.manager import SessionManager
 
 
@@ -76,6 +77,9 @@ def mock_agent(tmp_path, monkeypatch):
     agent = Agent(config=config, role="solo")
     agent.client = MockLLMClient()
     agent.silent = True
+    queue: asyncio.Queue = asyncio.Queue()
+    agent.event_sink = AsyncQueueEventSink(queue)
+    agent._test_event_queue = queue
     return agent
 
 
@@ -96,10 +100,23 @@ async def test_agent_run_loop_triggers_compaction(mock_agent):
     final_messages = await mock_agent.run_loop(messages)
     
     assert mock_agent.client.call_count == 2, "Agent should have called LLM twice (normal + compaction)"
-    assert len(final_messages) == 2, "Expected exactly 2 messages (compacted summary + its user prompt)"
+    assert len(final_messages) == 2, "Expected exactly 2 messages (compacted summary + final assistant reply)"
     assert final_messages[0]["is_compaction"] is True
     assert "Context Compacted" in final_messages[0]["content"]
     assert "This is the compacted summary" in final_messages[0]["content"]
+    assert final_messages[0]["context_usage"]["total_tokens"] > 0
+    assert final_messages[1]["context_usage"] == final_messages[0]["context_usage"]
+
+    emitted = []
+    while not mock_agent._test_event_queue.empty():
+        emitted.append(await mock_agent._test_event_queue.get())
+    compaction_event = next(
+        event
+        for event in emitted
+        if event.get("type") == "system" and event.get("data", {}).get("context_compacted") is True
+    )
+    assert compaction_event["data"]["context_usage"]["total_tokens"] > 0
+    assert compaction_event["data"]["auto_compact_threshold_tokens"] == 800
 
 
 @pytest.mark.asyncio

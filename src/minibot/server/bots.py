@@ -16,6 +16,12 @@ DEFAULT_BOT_ID = "default"
 _BOT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
+def _default_bot_display_name(raw: Any) -> str:
+    if isinstance(raw, str) and raw.strip() and raw.strip() != "Default":
+        return raw.strip()
+    return "Minibot"
+
+
 def _mask_api_key(value: str | None) -> str | None:
     if not value:
         return None
@@ -62,7 +68,7 @@ class BotStore:
     def list_bots(self) -> list[BotMeta]:
         bots: list[BotMeta] = []
 
-        default_name = self._read_bot_json(DEFAULT_BOT_ID).get("name") or "Default"
+        default_name = _default_bot_display_name(self._read_bot_json(DEFAULT_BOT_ID).get("name"))
         bots.append(BotMeta(bot_id=DEFAULT_BOT_ID, name=str(default_name), is_default=True))
 
         for path in sorted(self.bots_root.iterdir()):

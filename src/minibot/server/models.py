@@ -28,6 +28,7 @@ class MessageResponse(BaseModel):
     parent_user_message_id: str | None = None
     reasoning: str | None = None
     usage: UsageResponse | None = None
+    context_usage: UsageResponse | None = None
     tool_calls: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -91,6 +92,8 @@ class BotConfigResponse(BaseModel):
     base_url: str | None = None
     model: str | None = None
     chat_model_id: str | None = None
+    max_context_tokens: int = 0
+    auto_compact_threshold_tokens: int = 0
     stream_enabled: bool = True
     api_key_masked: str | None = None
     tool_plugins: list[str] = Field(default_factory=list)

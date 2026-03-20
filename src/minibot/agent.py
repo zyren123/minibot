@@ -733,6 +733,38 @@ You are now live. Await instructions and begin the ReAct loop."""
         return normalized or None
 
     @staticmethod
+    def _auto_compact_threshold_tokens(max_context_tokens: int) -> int:
+        threshold = int(max_context_tokens * 0.8)
+        if threshold > 0:
+            return threshold
+        return max(max_context_tokens, 1)
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, (len(text.encode("utf-8")) + 3) // 4)
+
+    @classmethod
+    def _estimate_context_usage(cls, messages: list[dict[str, Any]]) -> dict[str, int]:
+        total_tokens = 0
+        for message in messages:
+            total_tokens += 6
+            for key in ("role", "content", "reasoning", "tool_call_id", "tool_name"):
+                value = message.get(key)
+                if value is None:
+                    continue
+                total_tokens += cls._estimate_text_tokens(str(value))
+            tool_calls = message.get("tool_calls")
+            if tool_calls:
+                try:
+                    tool_call_text = json.dumps(tool_calls, ensure_ascii=False)
+                except TypeError:
+                    tool_call_text = str(tool_calls)
+                total_tokens += cls._estimate_text_tokens(tool_call_text)
+        return {"total_tokens": max(total_tokens, 1)}
+
+    @staticmethod
     def _latest_user_message_id(messages: list[dict[str, Any]]) -> str | None:
         for message in reversed(messages):
             if message.get("role") != "user":
@@ -1086,10 +1118,13 @@ You are now live. Await instructions and begin the ReAct loop."""
             tool_calls: list[Any] = []
             stream_rendered = False
             stream_success = False
+            compaction_context_usage: dict[str, int] | None = None
 
             usage = None
             assistant_message_id = self._new_message_id()
             parent_user_message_id = self._latest_user_message_id(messages)
+            max_context_tokens = int(self.config.llm.max_context_tokens)
+            auto_compact_threshold_tokens = self._auto_compact_threshold_tokens(max_context_tokens)
 
             if self._streaming_active():
                 try:
@@ -1159,28 +1194,30 @@ You are now live. Await instructions and begin the ReAct loop."""
                         "type": "system",
                         "data": {
                             "usage": usage,
-                            "max_context_tokens": self.config.llm.max_context_tokens,
+                            "max_context_tokens": max_context_tokens,
+                            "auto_compact_threshold_tokens": auto_compact_threshold_tokens,
                         },
                     }
                 )
                 total_tokens = usage.get("total_tokens", 0)
                 if self._ui_enabled():
-                    print_system(f"\\[Context: {total_tokens}/{self.config.llm.max_context_tokens}]")
+                    print_system(f"\\[Context: {total_tokens}/{max_context_tokens}]")
                 
-                # Check for context compaction threshold (80%)
-                if total_tokens > (self.config.llm.max_context_tokens * 0.8):
+                if total_tokens > auto_compact_threshold_tokens:
                     await self._emit(
                         {
                             "type": "system",
                             "message": "Context length exceeds 80%. Running automatic compaction...",
                             "data": {
                                 "total_tokens": total_tokens,
-                                "threshold": int(self.config.llm.max_context_tokens * 0.8),
+                                "threshold": auto_compact_threshold_tokens,
+                                "max_context_tokens": max_context_tokens,
+                                "auto_compact_threshold_tokens": auto_compact_threshold_tokens,
                             },
                         }
                     )
                     if self._ui_enabled():
-                        print_system(f"Context length exceeds 80% ({total_tokens} > {int(self.config.llm.max_context_tokens * 0.8)}). "
+                        print_system(f"Context length exceeds 80% ({total_tokens} > {auto_compact_threshold_tokens}). "
                                      f"Running automatic compaction...")
                     
                     compaction_system = (
@@ -1222,6 +1259,26 @@ You are now live. Await instructions and begin the ReAct loop."""
                             "is_compaction": True,
                             "message_id": self._new_message_id(),
                         }
+                        assistant_preview: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": content,
+                        }
+                        if reasoning:
+                            assistant_preview["reasoning"] = reasoning
+                        if tool_calls:
+                            assistant_preview["tool_calls"] = [
+                                {
+                                    "id": self._tool_call_id(tc) or f"tool-call-{i}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": self._tool_call_name(tc),
+                                        "arguments": self._tool_call_arguments(tc),
+                                    },
+                                }
+                                for i, tc in enumerate(tool_calls, start=1)
+                            ]
+                        compaction_context_usage = self._estimate_context_usage([compaction_msg, assistant_preview])
+                        compaction_msg["context_usage"] = dict(compaction_context_usage)
                         # We clear the existing message list safely and append the summary
                         messages.clear()
                         messages.append(compaction_msg)
@@ -1230,6 +1287,12 @@ You are now live. Await instructions and begin the ReAct loop."""
                             {
                                 "type": "system",
                                 "message": "Context compaction completed. Older history dropped.",
+                                "data": {
+                                    "context_compacted": True,
+                                    "context_usage": compaction_context_usage,
+                                    "max_context_tokens": max_context_tokens,
+                                    "auto_compact_threshold_tokens": auto_compact_threshold_tokens,
+                                },
                             }
                         )
                         if self._ui_enabled():
@@ -1282,6 +1345,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                     assistant_msg["reasoning"] = reasoning
                 if usage:
                     assistant_msg["usage"] = usage
+                if compaction_context_usage:
+                    assistant_msg["context_usage"] = dict(compaction_context_usage)
                 messages.append(assistant_msg)
                 return messages
 
@@ -1385,6 +1450,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                 assistant_msg["reasoning"] = reasoning
             if usage:
                 assistant_msg["usage"] = usage
+            if compaction_context_usage:
+                assistant_msg["context_usage"] = dict(compaction_context_usage)
             if tool_calls:
                 assistant_msg["tool_calls"] = [
                     {

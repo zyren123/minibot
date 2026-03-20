@@ -21,6 +21,22 @@ from .plugins import load_tools_from_plugin
 
 
 class AgentManager:
+    @staticmethod
+    def _display_bot_name(bot_id: str, data: dict[str, Any]) -> str:
+        raw_name = data.get("name")
+        if bot_id == DEFAULT_BOT_ID:
+            if isinstance(raw_name, str) and raw_name.strip() and raw_name.strip() != "Default":
+                return raw_name.strip()
+            return "Minibot"
+        return str(raw_name or bot_id)
+
+    @staticmethod
+    def _auto_compact_threshold_tokens(max_context_tokens: int) -> int:
+        threshold = int(max_context_tokens * 0.8)
+        if threshold > 0:
+            return threshold
+        return max(max_context_tokens, 1)
+
     def __init__(self, *, workdir: Path | None = None) -> None:
         self._base_config = load_config(workdir=workdir)
         self._bot_store = BotStore(app_home=Path(self._base_config.app_home))
@@ -136,11 +152,13 @@ class AgentManager:
         chat_state = self._bot_chat_state(bot_id, data)
         return {
             "bot_id": bot_id,
-            "name": str(data.get("name") or ("Default" if bot_id == DEFAULT_BOT_ID else bot_id)),
+            "name": self._display_bot_name(bot_id, data),
             "enabled": self._bot_enabled(data),
             "base_url": cfg.llm.base_url,
             "model": cfg.llm.model,
             "chat_model_id": data.get("chat_model_id"),
+            "max_context_tokens": int(cfg.llm.max_context_tokens),
+            "auto_compact_threshold_tokens": self._auto_compact_threshold_tokens(int(cfg.llm.max_context_tokens)),
             "stream_enabled": bool(cfg.llm.stream_enabled),
             "api_key_masked": self._mask_api_key(cfg.llm.api_key),
             "tool_plugins": list(data.get("tool_plugins") or []),
@@ -682,7 +700,7 @@ class AgentManager:
         raw = self._optional_text(data.get("subagent_name"))
         if raw:
             return raw
-        return str(data.get("name") or ("Default" if bot_id == DEFAULT_BOT_ID else bot_id))
+        return self._display_bot_name(bot_id, data)
 
     def _effective_subagent_description(self, bot_id: str, data: dict[str, Any]) -> str:
         raw = self._optional_text(data.get("subagent_description"))
@@ -723,11 +741,12 @@ class AgentManager:
         serialized: list[dict[str, Any]] = []
         for raw in messages:
             item = dict(raw)
-            usage = cls._normalize_usage(item.get("usage"))
-            if usage is None:
-                item.pop("usage", None)
-            else:
-                item["usage"] = usage
+            for key in ("usage", "context_usage"):
+                usage = cls._normalize_usage(item.get(key))
+                if usage is None:
+                    item.pop(key, None)
+                else:
+                    item[key] = usage
             serialized.append(item)
         return serialized
 

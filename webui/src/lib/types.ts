@@ -29,7 +29,18 @@ export type StreamEvent = {
   note?: string;
 
   message?: string;
-  data?: Record<string, unknown>;
+  data?: {
+    usage?: Usage;
+    context_usage?: Usage;
+    max_context_tokens?: number;
+    auto_compact_threshold_tokens?: number;
+    context_compacted?: boolean;
+    total_tokens?: number;
+    threshold?: number;
+    error?: string;
+    raw?: string;
+    [key: string]: unknown;
+  };
 };
 
 export type SessionMeta = {
@@ -60,6 +71,7 @@ export type Message = {
   parent_user_message_id?: string | null;
   reasoning?: string | null;
   usage?: Usage | null;
+  context_usage?: Usage | null;
   tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
 };
 
@@ -110,6 +122,8 @@ export type BotConfig = {
   base_url: string | null;
   model: string | null;
   chat_model_id: string | null;
+  max_context_tokens: number;
+  auto_compact_threshold_tokens: number;
   stream_enabled: boolean;
   api_key_masked: string | null;
   tool_plugins: string[];

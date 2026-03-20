@@ -73,6 +73,45 @@ function usageParts(usage: Usage | null | undefined) {
   return { total, prompt, completion };
 }
 
+function normalizeUsage(raw: unknown): Usage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const usage = raw as Record<string, unknown>;
+  const normalized: Usage = {};
+  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      normalized[key] = value;
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+type ContextSnapshot = {
+  totalTokens: number;
+  compacted: boolean;
+};
+
+function contextSnapshotFromMessages(messages: Message[]): ContextSnapshot | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const contextUsage = usageParts(message.context_usage);
+    if (contextUsage?.total != null) {
+      return {
+        totalTokens: contextUsage.total,
+        compacted: true,
+      };
+    }
+    const usage = usageParts(message.usage);
+    if (usage?.total != null) {
+      return {
+        totalTokens: usage.total,
+        compacted: false,
+      };
+    }
+  }
+  return null;
+}
+
 async function copyText(text: string) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -306,11 +345,12 @@ function ToolInvocationPanel(props: {
 
 export default function ChatView(props: { botId: string; botName?: string }) {
   const { botId, botName } = props;
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [contextBySession, setContextBySession] = useState<Record<string, ContextSnapshot>>({});
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -335,6 +375,38 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     () => availableModels.find((item) => item.model_id === botConfig?.chat_model_id) ?? null,
     [availableModels, botConfig?.chat_model_id],
   );
+  const activeContextSnapshot = useMemo(() => {
+    if (!sessionId) return null;
+    return contextBySession[sessionId] ?? contextSnapshotFromMessages(messages);
+  }, [contextBySession, messages, sessionId]);
+  const sessionLocale = language === "en" ? "en-US" : "zh-CN";
+  const contextThresholdTokens = botConfig?.auto_compact_threshold_tokens ?? null;
+  const contextPercent =
+    activeContextSnapshot && contextThresholdTokens
+      ? Math.min(100, Math.round((activeContextSnapshot.totalTokens / contextThresholdTokens) * 100))
+      : null;
+  const contextRatio =
+    activeContextSnapshot && contextThresholdTokens ? activeContextSnapshot.totalTokens / contextThresholdTokens : null;
+  const contextTone =
+    contextRatio == null
+      ? "idle"
+      : activeContextSnapshot?.compacted
+        ? "compacted"
+        : contextRatio >= 1
+          ? "danger"
+          : contextRatio >= 0.82
+            ? "warning"
+            : "stable";
+  const contextStatusKey =
+    contextTone === "compacted"
+      ? "chat.context.compacted"
+      : contextTone === "danger"
+        ? "chat.context.compacting"
+        : contextTone === "warning"
+          ? "chat.context.warning"
+          : contextTone === "stable"
+            ? "chat.context.stable"
+            : "chat.context.empty";
 
   const latestRegeneratableAssistantId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -382,11 +454,22 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setReasoningOpenById({});
     setToolOpenById({});
     setMessages(sess.messages);
+    setContextBySession((prev) => {
+      const next = { ...prev };
+      const snapshot = contextSnapshotFromMessages(sess.messages);
+      if (snapshot) {
+        next[id] = snapshot;
+      } else {
+        delete next[id];
+      }
+      return next;
+    });
   }
 
   useEffect(() => {
     setSessionId(null);
     setMessages([]);
+    setContextBySession({});
     setStatus(null);
     setReasoningEffort("");
     setReasoningOpenById({});
@@ -534,6 +617,26 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "system" && typeof ev.message === "string" && ev.message !== "session_created") {
+      const targetSessionId = ev.session_id ?? sessionId;
+      const usage = normalizeUsage(ev.data?.usage);
+      const contextUsage = normalizeUsage(ev.data?.context_usage);
+      if (targetSessionId && contextUsage?.total_tokens != null) {
+        setContextBySession((prev) => ({
+          ...prev,
+          [targetSessionId]: {
+            totalTokens: contextUsage.total_tokens,
+            compacted: Boolean(ev.data?.context_compacted),
+          },
+        }));
+      } else if (targetSessionId && usage?.total_tokens != null) {
+        setContextBySession((prev) => ({
+          ...prev,
+          [targetSessionId]: {
+            totalTokens: usage.total_tokens,
+            compacted: false,
+          },
+        }));
+      }
       setStatus(ev.message);
     }
   }
@@ -591,6 +694,16 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(result.messages);
+      setContextBySession((prev) => {
+        const next = { ...prev };
+        const snapshot = contextSnapshotFromMessages(result.messages);
+        if (snapshot) {
+          next[sessionId] = snapshot;
+        } else {
+          delete next[sessionId];
+        }
+        return next;
+      });
       await refreshSessions(botId);
       setStatus(t("chat.status.deletedTurn"));
     } catch (err) {
@@ -609,6 +722,16 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(result.messages);
+      setContextBySession((prev) => {
+        const next = { ...prev };
+        const snapshot = contextSnapshotFromMessages(result.messages);
+        if (snapshot) {
+          next[sessionId] = snapshot;
+        } else {
+          delete next[sessionId];
+        }
+        return next;
+      });
       await refreshSessions(botId);
       setStatus(t("chat.status.regeneratedReply"));
     } catch (err) {
@@ -636,6 +759,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         setToolOpenById({});
         setMessages([]);
       }
+      setContextBySession((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       await refreshSessions(botId);
       setDeleteOpen(false);
       setPendingDeleteSessionId(null);
@@ -753,6 +881,41 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               </div>
               <div className="mt-1 text-xs text-zinc-500">
                 {t("chat.header.session")} <span className="font-mono">{sessionId ?? t("chat.header.none")}</span>
+              </div>
+            </div>
+
+            <div className="min-w-[220px] flex-1 self-center px-2">
+              <div className="flex items-center justify-between gap-3 text-[11px] text-zinc-500">
+                <span className="truncate font-semibold uppercase tracking-[0.18em]">{t("chat.context.label")}</span>
+                <span className="shrink-0">
+                  {contextPercent != null ? t("chat.context.percent", { percent: contextPercent }) : "--"}
+                </span>
+              </div>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                <div
+                  className={classNames(
+                    "h-full rounded-full transition-[width,background-color] duration-300",
+                    contextTone === "compacted"
+                      ? "bg-emerald-400"
+                      : contextTone === "danger"
+                        ? "bg-rose-400"
+                        : contextTone === "warning"
+                          ? "bg-amber-400"
+                          : "bg-sky-400",
+                  )}
+                  style={{ width: `${contextPercent ?? 0}%` }}
+                />
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-zinc-500">
+                <span className="truncate">{t(contextStatusKey)}</span>
+                <span className="shrink-0">
+                  {activeContextSnapshot
+                    ? new Intl.NumberFormat(sessionLocale).format(activeContextSnapshot.totalTokens)
+                    : "--"}
+                  {contextThresholdTokens
+                    ? ` / ${new Intl.NumberFormat(sessionLocale).format(contextThresholdTokens)}`
+                    : ""}
+                </span>
               </div>
             </div>
 
@@ -876,6 +1039,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                             wideAssistantShell && "w-full",
                           )}
                         >
+                          {message.is_compaction ? (
+                            <div className="mb-3 inline-flex rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
+                              {t("chat.context.compacted")}
+                            </div>
+                          ) : null}
                           {showReasoning && messageId ? (
                             <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-950/70">
                               <button

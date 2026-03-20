@@ -32,7 +32,12 @@ def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[s
     resp = client.get("/api/bots")
     assert resp.status_code == 200
     bots = resp.json()
-    assert any(b["bot_id"] == "default" for b in bots)
+    default_bot = next((b for b in bots if b["bot_id"] == "default"), None)
+    assert default_bot is not None
+    assert default_bot["name"] == "Minibot"
+
+    default_cfg = client.get("/api/bots/default/config").json()
+    assert default_cfg["name"] == "Minibot"
 
     created = client.post("/api/bots", json={"name": "Test Bot"}).json()
     bot_id = created["bot_id"]
@@ -41,6 +46,8 @@ def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[s
     cfg = client.get(f"/api/bots/{bot_id}/config").json()
     assert cfg["bot_id"] == bot_id
     assert cfg["name"] in {"Test Bot", bot_id}
+    assert cfg["max_context_tokens"] > 0
+    assert cfg["auto_compact_threshold_tokens"] == int(cfg["max_context_tokens"] * 0.8)
 
     tool_plugin_path = str((server_env["workdir"] / "plugins.py").resolve())
     update = {
@@ -73,6 +80,21 @@ def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[s
     deleted = client.delete(f"/api/bots/{bot_id}").json()
     assert deleted["deleted"] is True
     assert not bot_home.exists()
+
+
+def test_default_bot_legacy_name_is_normalized_to_minibot(server_env: dict[str, Path]) -> None:
+    from src.minibot.server.app import create_app
+
+    (server_env["home"] / "bot.json").write_text('{"name": "Default"}\n', encoding="utf-8")
+    client = TestClient(create_app(workdir=server_env["workdir"]))
+
+    bots = client.get("/api/bots").json()
+    default_bot = next((b for b in bots if b["bot_id"] == "default"), None)
+    assert default_bot is not None
+    assert default_bot["name"] == "Minibot"
+
+    cfg = client.get("/api/bots/default/config").json()
+    assert cfg["name"] == "Minibot"
 
 
 def test_skills_endpoint_uses_configured_skills_dirs(client: TestClient, server_env: dict[str, Path]) -> None:
@@ -143,6 +165,7 @@ def test_session_load_returns_structured_message_metadata(client: TestClient, se
                 "parent_user_message_id": "msg-user-1",
                 "reasoning": "step by step",
                 "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                "context_usage": {"total_tokens": 6},
             },
         ],
     )
@@ -154,6 +177,7 @@ def test_session_load_returns_structured_message_metadata(client: TestClient, se
     assert body["messages"][1]["parent_user_message_id"] == "msg-user-1"
     assert body["messages"][1]["reasoning"] == "step by step"
     assert body["messages"][1]["usage"] == {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+    assert body["messages"][1]["context_usage"] == {"prompt_tokens": None, "completion_tokens": None, "total_tokens": 6}
 
 
 def test_message_turn_delete_removes_full_turn(client: TestClient, server_env: dict[str, Path]) -> None:
