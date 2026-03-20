@@ -10,8 +10,9 @@ This file is a **permanent memory / onboarding note for coding agents** working 
 - **Release automation**: pushing a version tag `vX.Y.Z` triggers **PyPI publish + GitHub Release** via `.github/workflows/publish-pypi.yml`.
   - Do **not** rename/move `.github/workflows/publish-pypi.yml` unless you also update the PyPI Trusted Publisher config.
 - **WebUI build**: `webui/` (Vite) builds to `webui/dist/` and is copied into `src/minibot/server/static/` **before packaging**.
-  - After syncing a new WebUI build into `src/minibot/server/static/`, **delete old hashed files** in `src/minibot/server/static/assets/` that are not referenced by the current `index.html`.
-  - Use the explicit sync procedure below; do not rely on a single `cp -R webui/dist/. ...` step as the only sync mechanism.
+  - Use `bash scripts/sync_webui_static.sh` to sync `webui/dist/` into `src/minibot/server/static/`.
+  - The sync script is responsible for pruning stale hashed files in `src/minibot/server/static/assets/` so only files referenced by the current `index.html` remain.
+  - After building archives, use `python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz` to confirm the packaged WebUI files are actually present.
 
 ## Architecture Map
 
@@ -38,8 +39,9 @@ This file is a **permanent memory / onboarding note for coding agents** working 
 - Message action semantics in the current WebUI:
   - `Regenerate` only applies to the **latest assistant turn**.
   - `Delete` removes the matched assistant’s **full turn** (paired user + same-turn tool/assistant messages up to the next user message).
-- Copying `webui/dist/` into `src/minibot/server/static/` does **not** automatically prune old hashed files in `src/minibot/server/static/assets/`.
-  - Project rule: after each build sync, remove stale hashed files so `src/minibot/server/static/assets/` contains only the files referenced by the current `index.html`.
+- `src/minibot/server/static/` is treated as a build artifact directory for packaging.
+  - Do not rely on ad hoc copy commands; use `bash scripts/sync_webui_static.sh` so `index.html` and hashed assets stay in sync.
+  - Project rule: after each build sync, `src/minibot/server/static/assets/` must contain only the files referenced by the current `index.html`.
 
 ## Local Dev Commands
 
@@ -61,46 +63,28 @@ npm run dev
 
 ## Reliable WebUI Sync Procedure
 
-When you need to sync a freshly built WebUI into `src/minibot/server/static/`, use this exact flow:
+When you need to sync a freshly built WebUI into `src/minibot/server/static/`, use the repo script:
 
 ```bash
 cd webui
 npm run build
-mkdir -p ../src/minibot/server/static/assets
-cp dist/index.html ../src/minibot/server/static/index.html
-cp dist/assets/* ../src/minibot/server/static/assets/
-refs=$(grep -oE '/assets/[^" ]+' ../src/minibot/server/static/index.html | sed 's#^/assets/##')
-for file in ../src/minibot/server/static/assets/*; do
-  [ -e "$file" ] || continue
-  base=$(basename "$file")
-  keep=false
-  for ref in $refs; do
-    if [ "$base" = "$ref" ]; then
-      keep=true
-      break
-    fi
-  done
-  if [ "$keep" = false ]; then
-    rm "$file"
-  fi
-done
-ls -1 ../src/minibot/server/static/assets
-cat ../src/minibot/server/static/index.html
+cd ..
+bash scripts/sync_webui_static.sh
 ```
 
 Notes:
-- Copy `index.html` and `dist/assets/*` explicitly.
-- Then prune `src/minibot/server/static/assets/` by treating `index.html` as the source of truth.
-- Final verification rule: the filenames listed by `ls src/minibot/server/static/assets` must exactly match the hashed asset filenames referenced in `src/minibot/server/static/index.html`.
+- `scripts/sync_webui_static.sh` is the source of truth for the sync/prune flow.
+- The script verifies that the filenames in `src/minibot/server/static/assets/` exactly match the hashed asset filenames referenced in `src/minibot/server/static/index.html`.
+- When validating built archives, run `python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz`.
 
 ## CI / Release (How Publishing Works)
 
 - **CI**: `.github/workflows/ci.yml`
-  - Runs on `push` to `main` + PRs, builds WebUI, copies static assets, runs tests, builds wheel/sdist (sanity).
+  - Runs on `push` to `main` + PRs, builds WebUI, runs `bash scripts/sync_webui_static.sh`, runs tests, builds wheel/sdist, then verifies packaged static assets.
 - **One-click release**: `.github/workflows/publish-pypi.yml`
   - Triggers on `git push` tags `v*`.
   - Enforces: tag version == `pyproject.toml` version.
-  - Flow: build WebUI → copy `webui/dist/*` into `src/minibot/server/static/` → prune stale hashed files in `src/minibot/server/static/assets/` → tests → `python -m build` → publish to PyPI (Trusted Publishing; optional `PYPI_API_TOKEN`) → create GitHub Release + upload `dist/*`.
+  - Flow: build WebUI → run `bash scripts/sync_webui_static.sh` → tests → `python -m build` → run `python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz` → publish to PyPI (Trusted Publishing; optional `PYPI_API_TOKEN`) → create GitHub Release + upload `dist/*`.
 
 ## Session Context Logging (Project Rule)
 

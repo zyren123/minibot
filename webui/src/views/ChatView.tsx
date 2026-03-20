@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { AvailableModel, BotConfig, Message, SessionMeta, StreamEvent, Usage } from "../lib/types";
+import type {
+  AvailableModel,
+  BotConfig,
+  Message,
+  ReasoningEffort,
+  SessionMeta,
+  StreamEvent,
+  Usage,
+} from "../lib/types";
 import {
   cancelSession,
   createSession,
@@ -308,6 +316,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [status, setStatus] = useState<string | null>(null);
   const [botConfig, setBotConfig] = useState<BotConfig | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | "">("");
   const [modelSaving, setModelSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null);
@@ -379,6 +388,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setSessionId(null);
     setMessages([]);
     setStatus(null);
+    setReasoningEffort("");
     setReasoningOpenById({});
     setToolOpenById({});
     Promise.all([refreshSessions(botId), refreshBotState(botId)]).catch((err) => setStatus(errorMessage(err)));
@@ -539,7 +549,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setPrompt("");
 
     try {
-      for await (const ev of streamChat(botId, sid, nextPrompt)) {
+      for await (const ev of streamChat(botId, sid, nextPrompt, reasoningEffort || null)) {
         applyStreamEvent(ev);
       }
       await refreshSessions(botId);
@@ -747,10 +757,26 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             </div>
 
             <div className="flex min-w-[320px] flex-col gap-2">
-              <label className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
-                {t("chat.model.label")}
-              </label>
-              <div className="flex gap-2">
+              <div
+                className={classNames(
+                  "grid gap-1",
+                  streaming ? "sm:grid-cols-[minmax(0,1fr)_180px_auto]" : "sm:grid-cols-[minmax(0,1fr)_180px]",
+                )}
+              >
+                <label className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                  {t("chat.model.label")}
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
+                  {t("chat.reasoningEffort.label")}
+                </label>
+                {streaming ? <span aria-hidden="true" /> : null}
+              </div>
+              <div
+                className={classNames(
+                  "grid gap-2",
+                  streaming ? "sm:grid-cols-[minmax(0,1fr)_180px_auto]" : "sm:grid-cols-[minmax(0,1fr)_180px]",
+                )}
+              >
                 <select
                   value={botConfig?.chat_model_id ?? ""}
                   onChange={(e) => void onSelectModel(e.target.value)}
@@ -763,6 +789,17 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                       {item.provider_name} / {item.label}
                     </option>
                   ))}
+                </select>
+                <select
+                  value={reasoningEffort}
+                  onChange={(e) => setReasoningEffort(e.target.value as ReasoningEffort | "")}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                  disabled={streaming}
+                >
+                  <option value="">{t("chat.reasoningEffort.auto")}</option>
+                  <option value="low">{t("chat.reasoningEffort.low")}</option>
+                  <option value="medium">{t("chat.reasoningEffort.medium")}</option>
+                  <option value="high">{t("chat.reasoningEffort.high")}</option>
                 </select>
                 {streaming ? (
                   <button
@@ -782,6 +819,13 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                     })
                   : t("chat.model.usingFallback", { model: botConfig?.model ?? "" })}
               </div>
+              {reasoningEffort ? (
+                <div className="text-xs text-zinc-500">
+                  {t("chat.reasoningEffort.current", {
+                    effort: t(`chat.reasoningEffort.${reasoningEffort}`),
+                  })}
+                </div>
+              ) : null}
             </div>
           </div>
 

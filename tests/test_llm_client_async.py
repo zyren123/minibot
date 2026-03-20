@@ -71,6 +71,22 @@ async def test_create_message_async_uses_async_client(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_message_async_maps_reasoning_effort_for_openrouter(monkeypatch):
+    records = _install_fake_openai_clients(monkeypatch)
+    client = LLMClient(base_url="https://openrouter.ai/api/v1", api_key="test", model="test-model")
+
+    result = await client.create_message_async(
+        messages=[{"role": "user", "content": "hello"}],
+        system="system prompt",
+        reasoning_effort="high",
+    )
+
+    assert result == {"kind": "async"}
+    assert records["async_create_kwargs"]["reasoning"] == {"effort": "high"}
+    assert "reasoning_effort" not in records["async_create_kwargs"]
+
+
+@pytest.mark.asyncio
 async def test_create_message_stream_async_sets_stream_flag(monkeypatch):
     records = _install_fake_openai_clients(monkeypatch)
     client = LLMClient(base_url="http://localhost:8000/v1", api_key="test", model="test-model")
@@ -94,6 +110,51 @@ async def test_create_message_stream_async_sets_stream_flag(monkeypatch):
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+
+
+@pytest.mark.asyncio
+async def test_create_message_async_retries_without_reasoning_effort_when_unsupported(monkeypatch):
+    records: dict[str, object] = {"calls": []}
+
+    class FakeSyncCompletions:
+        def create(self, **kwargs):
+            return kwargs
+
+    class FakeAsyncCompletions:
+        async def create(self, **kwargs):
+            calls = records["calls"]
+            assert isinstance(calls, list)
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ValueError("Unsupported parameter: reasoning_effort")
+            return {"kind": "async"}
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeSyncCompletions())
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeAsyncCompletions())
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("src.minibot.core.client.OpenAI", FakeOpenAI)
+    monkeypatch.setattr("src.minibot.core.client.AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = LLMClient(base_url="https://example.invalid/v1", api_key="test", model="test-model")
+    result = await client.create_message_async(
+        messages=[{"role": "user", "content": "hello"}],
+        system="system prompt",
+        reasoning_effort="medium",
+    )
+
+    assert result == {"kind": "async"}
+    calls = records["calls"]
+    assert isinstance(calls, list)
+    assert calls[0]["reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in calls[1]
 
 
 @pytest.mark.asyncio

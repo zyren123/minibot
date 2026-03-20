@@ -10,6 +10,7 @@ import type {
   MCPServerInfo,
   Message,
   ProviderRecord,
+  ReasoningEffort,
   RegisteredModel,
   RegeneratedMessageResult,
   SessionData,
@@ -196,11 +197,20 @@ export async function cancelSession(botId: string, sessionId: string): Promise<{
   );
 }
 
-export async function* streamChat(botId: string, sessionId: string | null, prompt: string): AsyncGenerator<StreamEvent> {
+export async function* streamChat(
+  botId: string,
+  sessionId: string | null,
+  prompt: string,
+  reasoningEffort?: ReasoningEffort | null,
+): AsyncGenerator<StreamEvent> {
   const resp = await fetch(`/api/bots/${encodeURIComponent(botId)}/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, prompt }),
+    body: JSON.stringify({
+      session_id: sessionId,
+      prompt,
+      reasoning_effort: reasoningEffort || null,
+    }),
   });
   if (!resp.ok) throw new Error(await resp.text());
   if (!resp.body) return;

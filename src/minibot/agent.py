@@ -6,6 +6,7 @@ import asyncio
 from contextlib import nullcontext
 from contextlib import suppress
 from datetime import datetime
+import json
 import uuid
 from typing import Any, Literal
 
@@ -473,6 +474,31 @@ You are now live. Await instructions and begin the ReAct loop."""
         return getattr(value, name, default)
 
     @classmethod
+    def _nested_container_values(cls, value: Any) -> list[Any]:
+        nested: list[Any] = []
+        for key in (
+            "delta",
+            "message",
+            "content",
+            "contents",
+            "output",
+            "outputs",
+            "items",
+            "parts",
+            "response",
+            "responses",
+            "result",
+            "results",
+            "candidate",
+            "candidates",
+            "choices",
+        ):
+            item = cls._field(value, key)
+            if item is not None:
+                nested.append(item)
+        return nested
+
+    @classmethod
     def _extract_stream_text(cls, value: Any) -> str:
         if value is None:
             return ""
@@ -487,24 +513,39 @@ You are now live. Await instructions and begin the ReAct loop."""
                 item_type = str(cls._field(item, "type", "") or "").lower()
                 if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
                     continue
+                if item_type in {"tool_call", "function_call", "tool_use"}:
+                    continue
                 text = cls._field(item, "text")
                 if text is not None:
                     parts.append(cls._extract_stream_text(text))
                     continue
+                output_text = cls._field(item, "output_text")
+                if output_text is not None:
+                    parts.append(cls._extract_stream_text(output_text))
+                    continue
                 content = cls._field(item, "content")
                 if content is not None:
                     parts.append(cls._extract_stream_text(content))
+                    continue
+                for nested in cls._nested_container_values(item):
+                    parts.append(cls._extract_stream_text(nested))
             return "".join(parts)
         item_type = str(cls._field(value, "type", "") or "").lower()
         if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
             return ""
+        if item_type in {"tool_call", "function_call", "tool_use"}:
+            return ""
         text = cls._field(value, "text")
         if text is not None:
             return cls._extract_stream_text(text)
+        output_text = cls._field(value, "output_text")
+        if output_text is not None:
+            return cls._extract_stream_text(output_text)
         content = cls._field(value, "content")
         if content is not None:
             return cls._extract_stream_text(content)
-        return ""
+        parts = [cls._extract_stream_text(nested) for nested in cls._nested_container_values(value)]
+        return "".join(parts)
 
     @classmethod
     def _extract_reasoning_text(cls, value: Any) -> str:
@@ -524,6 +565,10 @@ You are now live. Await instructions and begin the ReAct loop."""
                     if text:
                         parts.append(text)
                         continue
+                    output_text = cls._extract_stream_text(cls._field(item, "output_text"))
+                    if output_text:
+                        parts.append(output_text)
+                        continue
                     content = cls._extract_stream_text(cls._field(item, "content"))
                     if content:
                         parts.append(content)
@@ -532,6 +577,8 @@ You are now live. Await instructions and begin the ReAct loop."""
                     nested = cls._field(item, key)
                     if nested is not None:
                         parts.append(cls._extract_reasoning_text(nested))
+                for nested in cls._nested_container_values(item):
+                    parts.append(cls._extract_reasoning_text(nested))
             return "".join(parts)
         parts: list[str] = []
         for key in ("reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"):
@@ -545,11 +592,118 @@ You are now live. Await instructions and begin the ReAct loop."""
             text = cls._extract_stream_text(cls._field(value, "text"))
             if text:
                 return text
+            output_text = cls._extract_stream_text(cls._field(value, "output_text"))
+            if output_text:
+                return output_text
             return cls._extract_stream_text(cls._field(value, "content"))
         content = cls._field(value, "content")
         if isinstance(content, list):
             return cls._extract_reasoning_text(content)
+        nested_parts = [cls._extract_reasoning_text(nested) for nested in cls._nested_container_values(value)]
+        joined = "".join(nested_parts)
+        if joined:
+            return joined
         return ""
+
+    @classmethod
+    def _first_choice(cls, value: Any) -> Any:
+        choices = cls._field(value, "choices", []) or []
+        if isinstance(choices, list) and choices:
+            return choices[0]
+        return None
+
+    @classmethod
+    def _stream_payload(cls, chunk: Any) -> tuple[Any, str | None]:
+        choice = cls._first_choice(chunk)
+        if choice is not None:
+            delta = cls._field(choice, "delta")
+            finish_reason = cls._field(choice, "finish_reason")
+            if delta is not None:
+                return delta, str(finish_reason) if finish_reason else None
+            return choice, str(finish_reason) if finish_reason else None
+        finish_reason = cls._field(chunk, "finish_reason")
+        if finish_reason is None:
+            finish_reason = cls._field(chunk, "status")
+        return chunk, str(finish_reason) if finish_reason else None
+
+    @classmethod
+    def _normalize_tool_call_entry(cls, value: Any, *, index: int = 0) -> dict[str, Any] | None:
+        function = cls._field(value, "function")
+        item_type = str(cls._field(value, "type", "") or "").lower()
+        if function is None and item_type not in {"function_call", "tool_call", "tool_use", "function"}:
+            return None
+
+        name = cls._field(function, "name") if function is not None else None
+        if name is None:
+            name = cls._field(value, "name") or cls._field(value, "tool_name")
+
+        arguments = cls._field(function, "arguments") if function is not None else None
+        if arguments is None:
+            arguments = cls._field(value, "arguments")
+        if arguments is None:
+            arguments = cls._field(value, "input")
+        if isinstance(arguments, (dict, list)):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+
+        return {
+            "index": index,
+            "id": cls._field(value, "id"),
+            "type": "function",
+            "function": {
+                "name": str(name or ""),
+                "arguments": str(arguments or ""),
+            },
+        }
+
+    @classmethod
+    def _extract_stream_tool_call_deltas(cls, value: Any) -> list[dict[str, Any]]:
+        direct = cls._field(value, "tool_calls")
+        if isinstance(direct, list) and direct:
+            return list(direct)
+
+        if isinstance(value, list):
+            entries: list[dict[str, Any]] = []
+            for index, item in enumerate(value):
+                normalized = cls._normalize_tool_call_entry(item, index=index)
+                if normalized is not None:
+                    entries.append(normalized)
+            if entries:
+                return entries
+            for item in value:
+                nested = cls._extract_stream_tool_call_deltas(item)
+                if nested:
+                    return nested
+            return []
+
+        normalized = cls._normalize_tool_call_entry(value)
+        if normalized is not None:
+            return [normalized]
+
+        for nested in cls._nested_container_values(value):
+            tool_calls = cls._extract_stream_tool_call_deltas(nested)
+            if tool_calls:
+                return tool_calls
+        return []
+
+    @classmethod
+    def _extract_tool_calls(cls, value: Any) -> list[Any]:
+        direct = cls._field(value, "tool_calls")
+        if isinstance(direct, list) and direct:
+            return list(direct)
+        normalized = cls._extract_stream_tool_call_deltas(value)
+        if not normalized:
+            return []
+        return [
+            {
+                "id": str(item.get("id") or f"normalized-tool-{index}"),
+                "type": str(item.get("type") or "function"),
+                "function": {
+                    "name": str(cls._field(item.get("function"), "name", "") or ""),
+                    "arguments": str(cls._field(item.get("function"), "arguments", "") or ""),
+                },
+            }
+            for index, item in enumerate(normalized, start=1)
+        ]
 
     @staticmethod
     def _new_message_id() -> str:
@@ -675,6 +829,7 @@ You are now live. Await instructions and begin the ReAct loop."""
         assistant_message_id: str,
         parent_user_message_id: str | None,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -703,6 +858,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                     system=system,
                     tools=tools,
                     max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
                 )
             else:
                 self._drain_interrupt_queue(interrupt_queue)
@@ -712,6 +868,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                         system=system,
                         tools=tools,
                         max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
                     )
                 )
                 interrupt_task = asyncio.create_task(interrupt_queue.get())
@@ -768,11 +925,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                 except StopAsyncIteration:
                     break
 
-                choices = self._field(chunk, "choices", []) or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = self._field(choice, "delta")
+                delta, chunk_finish = self._stream_payload(chunk)
 
                 if delta is not None:
                     reasoning_text = self._extract_reasoning_text(delta)
@@ -796,7 +949,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                             }
                         )
 
-                    chunk_text = self._extract_stream_text(self._field(delta, "content"))
+                    chunk_text = self._extract_stream_text(delta)
                     if chunk_text:
                         text_parts.append(chunk_text)
                         if not assistant_started:
@@ -832,15 +985,14 @@ You are now live. Await instructions and begin the ReAct loop."""
                             else:
                                 stream_assistant_write(chunk_text)
 
-                    tool_call_deltas = self._field(delta, "tool_calls", []) or []
+                    tool_call_deltas = self._extract_stream_tool_call_deltas(delta)
                     for tool_call_delta in tool_call_deltas:
                         self._merge_stream_tool_call_delta(tool_call_map, tool_call_delta)
 
-                chunk_finish = self._field(choice, "finish_reason")
                 if chunk_finish:
                     finish_reason = str(chunk_finish)
 
-                usage = self._normalize_usage(getattr(chunk, "usage", None)) or usage
+                usage = self._normalize_usage(self._field(chunk, "usage")) or usage
         finally:
             if thinking_open:
                 with suppress(Exception):
@@ -877,6 +1029,7 @@ You are now live. Await instructions and begin the ReAct loop."""
         tools: list[dict] | None,
         max_tokens: int,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
+        reasoning_effort: str | None = None,
     ) -> Any:
         if interrupt_queue is None:
             return await self.client.create_message_async(
@@ -884,6 +1037,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                 system=system,
                 tools=tools,
                 max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
             )
 
         self._drain_interrupt_queue(interrupt_queue)
@@ -893,6 +1047,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                 system=system,
                 tools=tools,
                 max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
             )
         )
         interrupt_task = asyncio.create_task(interrupt_queue.get())
@@ -920,6 +1075,7 @@ You are now live. Await instructions and begin the ReAct loop."""
         messages: list[dict],
         *,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
+        reasoning_effort: str | None = None,
     ) -> list[dict]:
         """Run the main agent loop."""
         while True:
@@ -945,6 +1101,7 @@ You are now live. Await instructions and begin the ReAct loop."""
                         assistant_message_id=assistant_message_id,
                         parent_user_message_id=parent_user_message_id,
                         interrupt_queue=interrupt_queue,
+                        reasoning_effort=reasoning_effort,
                     )
                     content = stream_result["content"]
                     reasoning = stream_result.get("reasoning", "")
@@ -980,16 +1137,21 @@ You are now live. Await instructions and begin the ReAct loop."""
                         tools=tools,
                         max_tokens=self.config.llm.max_tokens,
                         interrupt_queue=interrupt_queue,
+                        reasoning_effort=reasoning_effort,
                     )
 
-                choice = response.choices[0]
-                assistant_message = choice.message
-                finish_reason = choice.finish_reason
-                content = self._extract_stream_text(self._field(assistant_message, "content"))
-                reasoning = self._extract_reasoning_text(assistant_message)
-                tool_calls = assistant_message.tool_calls or []
+                choice = self._first_choice(response)
+                assistant_message = self._field(choice, "message") if choice is not None else None
+                payload = assistant_message if assistant_message is not None else response
+                finish_reason_raw = self._field(choice, "finish_reason") if choice is not None else None
+                if finish_reason_raw is None:
+                    finish_reason_raw = self._field(response, "finish_reason") or self._field(response, "status")
+                finish_reason = str(finish_reason_raw or "stop")
+                content = self._extract_stream_text(payload)
+                reasoning = self._extract_reasoning_text(payload)
+                tool_calls = self._extract_tool_calls(payload)
 
-                usage = self._normalize_usage(getattr(response, "usage", None))
+                usage = self._normalize_usage(self._field(response, "usage"))
 
             if usage:
                 await self._emit(
@@ -1045,7 +1207,13 @@ You are now live. Await instructions and begin the ReAct loop."""
                                 max_tokens=self.config.llm.max_tokens,
                                 interrupt_queue=interrupt_queue,
                             )
-                        summary = compaction_resp.choices[0].message.content or "Failed to summarize context."
+                        compaction_choice = self._first_choice(compaction_resp)
+                        compaction_payload = (
+                            self._field(compaction_choice, "message")
+                            if compaction_choice is not None
+                            else compaction_resp
+                        )
+                        summary = self._extract_stream_text(compaction_payload) or "Failed to summarize context."
                         
                         # Replace history with compaction message, keeping only the final assistant/tool calls logic intact.
                         compaction_msg = {

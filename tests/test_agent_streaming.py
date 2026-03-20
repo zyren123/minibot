@@ -142,6 +142,75 @@ async def test_run_loop_extracts_reasoning_and_usage_from_stream_chunks(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_run_loop_extracts_reasoning_from_top_level_output_chunks(tmp_path):
+    agent = _make_agent(tmp_path)
+    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=7, total_tokens=12)
+
+    class OutputChunkClient:
+        model = "test-model"
+
+        async def create_message_stream_async(self, **_kwargs):
+            return FakeStream(
+                [
+                    SimpleNamespace(
+                        output=[
+                            SimpleNamespace(type="reasoning", text="mapped "),
+                            SimpleNamespace(type="text", text="answer"),
+                        ]
+                    ),
+                    SimpleNamespace(
+                        output=[SimpleNamespace(type="reasoning", output_text="thinking")],
+                        finish_reason="stop",
+                        usage=usage,
+                    ),
+                ]
+            )
+
+        async def create_message_async(self, **_kwargs):
+            raise AssertionError("fallback should not be used")
+
+    agent.client = OutputChunkClient()
+    history = [{"role": "user", "content": "hello"}]
+
+    result = await agent.run_loop(history)
+
+    _assert_assistant_message(result[-1], "answer")
+    assert result[-1]["reasoning"] == "mapped thinking"
+    assert result[-1]["usage"] == {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}
+
+
+@pytest.mark.asyncio
+async def test_run_loop_extracts_reasoning_from_nonstandard_non_stream_response(tmp_path):
+    agent = _make_agent(tmp_path)
+    agent.set_stream_enabled(False)
+
+    class OutputResponseClient:
+        model = "test-model"
+
+        async def create_message_stream_async(self, **_kwargs):
+            raise AssertionError("streaming should be disabled")
+
+        async def create_message_async(self, **_kwargs):
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(type="reasoning", text="planned "),
+                    SimpleNamespace(type="text", text="reply"),
+                ],
+                finish_reason="stop",
+                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=4, total_tokens=13),
+            )
+
+    agent.client = OutputResponseClient()
+    history = [{"role": "user", "content": "hello"}]
+
+    result = await agent.run_loop(history)
+
+    _assert_assistant_message(result[-1], "reply")
+    assert result[-1]["reasoning"] == "planned "
+    assert result[-1]["usage"] == {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+
+
+@pytest.mark.asyncio
 async def test_run_loop_streaming_slow_chunks_are_not_cancelled_by_polling(tmp_path):
     agent = _make_agent(tmp_path)
 

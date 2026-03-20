@@ -47,6 +47,8 @@ export type Usage = {
   total_tokens?: number;
 };
 
+export type ReasoningEffort = "low" | "medium" | "high";
+
 export type Message = {
   role: "user" | "assistant" | "tool";
   content: string;

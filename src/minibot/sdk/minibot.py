@@ -214,7 +214,13 @@ class Minibot:
         except asyncio.QueueFull:
             return
 
-    async def chat(self, prompt: str, *, session_id: str | None = None) -> ChatResult:
+    async def chat(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ChatResult:
         """Non-streaming chat call. Use :meth:`stream` for incremental deltas."""
         if session_id is not None and session_id != self.session_id:
             self.set_session(session_id)
@@ -225,7 +231,11 @@ class Minibot:
         self.agent.set_stream_enabled(False)
 
         try:
-            result_messages, run_usage = await self._run_once(prompt, interrupt_queue=None)
+            result_messages, run_usage = await self._run_once(
+                prompt,
+                interrupt_queue=None,
+                reasoning_effort=reasoning_effort,
+            )
         finally:
             self.agent.set_stream_enabled(prev_stream)
             await self._event_router.set_queue(None)
@@ -252,16 +262,23 @@ class Minibot:
             usage=usage,
         )
 
-    def chat_sync(self, prompt: str, *, session_id: str | None = None) -> ChatResult:
+    def chat_sync(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ChatResult:
         if _has_running_loop():
             raise RuntimeError("chat_sync() cannot be used inside a running event loop; use 'await chat()'.")
-        return asyncio.run(self.chat(prompt, session_id=session_id))
+        return asyncio.run(self.chat(prompt, session_id=session_id, reasoning_effort=reasoning_effort))
 
     async def stream(
         self,
         prompt: str,
         *,
         session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming chat call yielding structured events."""
         if session_id is not None and session_id != self.session_id:
@@ -276,7 +293,11 @@ class Minibot:
         self._active_interrupt_queue = interrupt_queue
 
         run_task = asyncio.create_task(
-            self._run_once(prompt, interrupt_queue=interrupt_queue),
+            self._run_once(
+                prompt,
+                interrupt_queue=interrupt_queue,
+                reasoning_effort=reasoning_effort,
+            ),
             name=f"minibot-run-{self.session_id}",
         )
 
@@ -323,12 +344,13 @@ class Minibot:
         prompt: str,
         *,
         session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Iterator[StreamEvent]:
         if _has_running_loop():
             raise RuntimeError("stream_sync() cannot be used inside a running event loop; use 'async for e in stream()'.")
         loop = asyncio.new_event_loop()
         try:
-            agen = self.stream(prompt, session_id=session_id)
+            agen = self.stream(prompt, session_id=session_id, reasoning_effort=reasoning_effort)
             while True:
                 try:
                     event = loop.run_until_complete(agen.__anext__())
@@ -346,6 +368,7 @@ class Minibot:
         prompt: str,
         *,
         interrupt_queue: "asyncio.Queue[None] | None",
+        reasoning_effort: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
         user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
         self.messages.append(user_msg)
@@ -356,7 +379,11 @@ class Minibot:
         usage: dict[str, int] | None = None
 
         try:
-            await self.agent.run_loop(self.messages, interrupt_queue=interrupt_queue)
+            await self.agent.run_loop(
+                self.messages,
+                interrupt_queue=interrupt_queue,
+                reasoning_effort=reasoning_effort,
+            )
         except UserInterruptedError:
             raise
         except Exception as exc:

@@ -275,7 +275,11 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         lock = await manager.session_lock("default", session_id)
         async with lock:
             try:
-                result = await bot.chat(req.prompt, session_id=session_id)
+                result = await bot.chat(
+                    req.prompt,
+                    session_id=session_id,
+                    reasoning_effort=req.reasoning_effort,
+                )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {
@@ -295,7 +299,11 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         lock = await manager.session_lock(bot_id, session_id)
         async with lock:
             try:
-                result = await bot.chat(req.prompt, session_id=session_id)
+                result = await bot.chat(
+                    req.prompt,
+                    session_id=session_id,
+                    reasoning_effort=req.reasoning_effort,
+                )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {
@@ -328,7 +336,11 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         ),
                     )
                 try:
-                    async for event in bot.stream(req.prompt, session_id=session_id):
+                    async for event in bot.stream(
+                        req.prompt,
+                        session_id=session_id,
+                        reasoning_effort=req.reasoning_effort,
+                    ):
                         if await request.is_disconnected():
                             bot.cancel()
                             break
@@ -375,7 +387,11 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         ),
                     )
                 try:
-                    async for event in bot.stream(req.prompt, session_id=session_id):
+                    async for event in bot.stream(
+                        req.prompt,
+                        session_id=session_id,
+                        reasoning_effort=req.reasoning_effort,
+                    ):
                         if await request.is_disconnected():
                             bot.cancel()
                             break
