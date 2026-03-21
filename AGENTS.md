@@ -86,6 +86,16 @@ Notes:
   - Enforces: tag version == `pyproject.toml` version.
   - Flow: build WebUI → run `bash scripts/sync_webui_static.sh` → tests → `python -m build` → run `python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz` → publish to PyPI (Trusted Publishing; optional `PYPI_API_TOKEN`) → create GitHub Release + upload `dist/*`.
 
+## Cross-Platform Text I/O Rules
+
+- Treat all repo-owned text files as UTF-8. Always pass `encoding="utf-8"` when reading or writing `SKILL.md`, Markdown docs, YAML/JSON/TOML config, prompt templates, session files, and other project-managed text artifacts.
+- Do not use bare `open(...)`, `Path.read_text()`, or `Path.write_text()` for repo-owned text files. If a call site is intentionally using the platform default encoding, leave a short comment explaining why.
+- For arbitrary user files or third-party files, choose a decoding strategy explicitly. Prefer UTF-8 first, then apply a deliberate fallback only when the product behavior requires it.
+- When touching skills, config loading, prompts, sessions, or chat/server startup paths, add or update at least one regression test that would fail if the explicit encoding argument were removed.
+- During review, grep touched Python code for bare `open(`, `read_text()`, and `write_text()` and verify each text I/O call has an intentional encoding choice.
+- If a bug reproduces on Windows but not macOS/Linux, check text encoding, path normalization, and CRLF behavior early before assuming the issue is in the model or API layer.
+- Prefer ASCII punctuation in repo instructions and templates unless Unicode is necessary. This keeps logs and diagnostics readable even in terminals that are not configured for UTF-8.
+
 ## Session Context Logging (Project Rule)
 
 - Keep a running log under `.claude/tasks/context_session_YYYY-MM-DD.md`.

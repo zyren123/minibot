@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.minibot.skills.loader import SkillLoader
 
 
@@ -36,3 +38,24 @@ def test_disabled_skills_hide_builtin_entries(tmp_path: Path) -> None:
     names = set(loader.list_skills())
     assert "skill-installer" not in names
     assert "skill-creator" in names
+
+
+def test_loader_reads_skill_markdown_as_utf8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root, "utf8-skill", "utf8-skill", "Snowman: 雪人", "Body with emoji: 😀")
+
+    original_read_text = Path.read_text
+    encodings: list[str | None] = []
+
+    def tracking_read_text(self: Path, *args, **kwargs):
+        if self.name == "SKILL.md":
+            encodings.append(kwargs.get("encoding"))
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+
+    loader = SkillLoader(skills_root)
+
+    assert loader.skills["utf8-skill"]["description"] == "Snowman: 雪人"
+    assert encodings
+    assert all(encoding == "utf-8" for encoding in encodings)

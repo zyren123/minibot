@@ -106,7 +106,7 @@ def _load_yaml(path: Path, env_defaults: dict[str, str] | None = None) -> dict:
     """Load a YAML file and resolve environment variables."""
     if not path.exists():
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return _resolve_env_vars(data, env_defaults)
 

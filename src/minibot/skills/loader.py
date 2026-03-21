@@ -54,7 +54,7 @@ class SkillLoader:
 
     def parse_skill_md(self, path: Path) -> dict | None:
         """Parse a SKILL.md file into metadata and body."""
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
 
         # Match YAML frontmatter between --- markers
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", content, re.DOTALL)

@@ -1,4 +1,5 @@
 from pathlib import Path
+import builtins
 
 import pytest
 
@@ -204,3 +205,37 @@ teams:
 
     assert config.llm.stream_enabled is False
     assert config.teams.debug_teammate_output is True
+
+
+def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
+    app_home = tmp_path / "app-home"
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True)
+    target_path = app_home / "config" / "default.yaml"
+    _write(
+        target_path,
+        """
+skills_dir: custom-skills
+llm:
+  model: 模型😀
+""".strip(),
+    )
+
+    observed_encodings: list[str | None] = []
+    original_open = builtins.open
+
+    def tracking_open(file, mode="r", *args, **kwargs):
+        if Path(file) == target_path and "r" in mode:
+            observed_encodings.append(kwargs.get("encoding"))
+        return original_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    config = load_config(
+        workdir=project_root,
+        app_home=app_home,
+        project_root=project_root,
+    )
+
+    assert config.llm.model == "模型😀"
+    assert observed_encodings == ["utf-8"]
