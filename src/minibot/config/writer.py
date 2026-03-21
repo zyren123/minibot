@@ -50,3 +50,29 @@ def save_mcp_server_enabled(
             break
     data["servers"] = servers
     _save_raw(config_path, data)
+
+
+def update_mcp_server_config(
+    config_path: Path,
+    server_name: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Update one MCP server block in the config file and return the saved mapping."""
+    data = _load_raw(config_path)
+    servers = data.get("servers", [])
+
+    for server in servers:
+        if not isinstance(server, dict) or server.get("name") != server_name:
+            continue
+        for key in ("command", "url"):
+            if key in patch:
+                server[key] = patch.get(key)
+        if "args" in patch:
+            server["args"] = list(patch.get("args") or [])
+        if "enabled" in patch:
+            server["enabled"] = bool(patch.get("enabled"))
+        data["servers"] = servers
+        _save_raw(config_path, data)
+        return dict(server)
+
+    raise ValueError(f"Unknown MCP server: {server_name}")

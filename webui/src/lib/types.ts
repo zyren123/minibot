@@ -195,6 +195,14 @@ export type MCPServerInfo = {
   args: string[];
   url?: string | null;
   env_keys: string[];
+  connected: boolean;
+};
+
+export type UpdateMCPServerRequest = {
+  enabled_default?: boolean;
+  command?: string | null;
+  args?: string[];
+  url?: string | null;
 };
 
 export type ProviderRecord = {

@@ -173,6 +173,14 @@ class MCPServerInfo(BaseModel):
     args: list[str] = Field(default_factory=list)
     url: str | None = None
     env_keys: list[str] = Field(default_factory=list)
+    connected: bool = False
+
+
+class MCPServerUpdateRequest(BaseModel):
+    enabled_default: bool | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    url: str | None = None
 
 
 class ProviderResponse(BaseModel):

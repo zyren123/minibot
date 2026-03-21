@@ -7,6 +7,7 @@ import pytest
 
 from src.minibot.config.schema import MCPConfig, MCPServerConfig
 from src.minibot.mcp.manager import MCPManager
+from src.minibot.mcp.transport import StdioTransport
 
 
 def _make_manager(servers: list[MCPServerConfig] | None = None) -> MCPManager:
@@ -44,3 +45,12 @@ async def test_disconnect_server_no_op_when_not_connected():
     mgr = _make_manager()
     await mgr.disconnect_server("ctx7")  # should not raise
     assert mgr.is_connected("ctx7") is False
+
+
+def test_stdio_transport_resolves_windows_npx_command() -> None:
+    transport = StdioTransport(command="npx", args=["-y"], cwd=Path("."))
+    with patch("src.minibot.mcp.transport.os.name", "nt"), patch(
+        "src.minibot.mcp.transport.shutil.which",
+        side_effect=lambda cmd: "C:\\Program Files\\nodejs\\npx.cmd" if cmd == "npx.cmd" else None,
+    ):
+        assert transport._resolve_command() == "C:\\Program Files\\nodejs\\npx.cmd"

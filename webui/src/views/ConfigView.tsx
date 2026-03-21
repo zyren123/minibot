@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import {
+  connectMcpServer,
   createProvider,
   createProviderModels,
   deleteProviderModels,
+  disconnectMcpServer,
   fetchProviderModels,
   getBotConfig,
   listDashboard,
@@ -11,6 +13,7 @@ import {
   listSkills,
   listSubagentCandidates,
   updateBotConfig,
+  updateMcpServer,
   updateModel,
   updateProvider,
 } from "../lib/api";
@@ -22,6 +25,7 @@ import type {
   ProviderRecord,
   SkillInfo,
   SubagentCandidate,
+  UpdateMCPServerRequest,
 } from "../lib/types";
 import { useI18n } from "../lib/i18n";
 import SkillsView from "./SkillsView";
@@ -30,7 +34,7 @@ function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type DashboardTab = "bots" | "providers" | "skills";
+type DashboardTab = "bots" | "providers" | "skills" | "mcp";
 
 type BotDraft = {
   name: string;
@@ -57,6 +61,17 @@ type ProviderDraft = {
   enabled: boolean;
   apiKeyMasked: string;
   apiKeyDraft: string;
+};
+
+type McpDraft = {
+  name: string;
+  transport: string;
+  enabled_default: boolean;
+  command: string;
+  argsText: string;
+  url: string;
+  env_keys: string[];
+  connected: boolean;
 };
 
 function SectionCard(props: { title: string; subtitle?: string; children: ReactNode; right?: ReactNode }) {
@@ -160,6 +175,34 @@ function providerComparable(draft: ProviderDraft | null) {
   });
 }
 
+function mcpDraftFromServer(server: MCPServerInfo): McpDraft {
+  return {
+    name: server.name,
+    transport: server.transport,
+    enabled_default: server.enabled_default,
+    command: server.command ?? "",
+    argsText: (server.args ?? []).join("\n"),
+    url: server.url ?? "",
+    env_keys: server.env_keys ?? [],
+    connected: server.connected,
+  };
+}
+
+function mcpComparable(draft: McpDraft | null) {
+  if (!draft) return "";
+  return JSON.stringify({
+    name: draft.name,
+    transport: draft.transport,
+    enabled_default: draft.enabled_default,
+    command: draft.command.trim(),
+    argsText: draft.argsText
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+    url: draft.url.trim(),
+  });
+}
+
 function emptyBotDraft(cfg: BotConfig): BotDraft {
   return {
     name: cfg.name ?? "",
@@ -217,6 +260,11 @@ export default function ConfigView(props: {
   const [providerDraft, setProviderDraft] = useState<ProviderDraft | null>(null);
   const [providerBaseline, setProviderBaseline] = useState("");
   const [savingProvider, setSavingProvider] = useState(false);
+  const [selectedMcpServerName, setSelectedMcpServerName] = useState<string | null>(null);
+  const [mcpDraft, setMcpDraft] = useState<McpDraft | null>(null);
+  const [mcpBaseline, setMcpBaseline] = useState("");
+  const [savingMcp, setSavingMcp] = useState(false);
+  const [togglingMcpConnection, setTogglingMcpConnection] = useState<string | null>(null);
 
   const [manualModelName, setManualModelName] = useState("");
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -249,6 +297,11 @@ export default function ConfigView(props: {
   const selectedProvider = useMemo(
     () => dashboard?.providers.find((item) => item.provider_id === selectedProviderId) ?? null,
     [dashboard, selectedProviderId],
+  );
+
+  const selectedMcpServer = useMemo(
+    () => mcpServers.find((item) => item.name === selectedMcpServerName) ?? null,
+    [mcpServers, selectedMcpServerName],
   );
 
   const providerModels = useMemo(
@@ -293,6 +346,7 @@ export default function ConfigView(props: {
   const activeModels = dashboard?.available_models ?? [];
   const botDirty = draftComparable(botDraft) !== botBaseline;
   const providerDirty = providerComparable(providerDraft) !== providerBaseline;
+  const mcpDirty = mcpComparable(mcpDraft) !== mcpBaseline;
   const allVisibleFetchedSelected =
     selectableFilteredFetchedNames.length > 0 &&
     selectableFilteredFetchedNames.every((item) => selectedFetchedModels.includes(item));
@@ -322,16 +376,24 @@ export default function ConfigView(props: {
     setSkills(await listSkills());
   }
 
+  async function refreshMcpServers(preferredName?: string | null) {
+    const next = await listMcpServers();
+    setMcpServers(next);
+    const candidateName = preferredName ?? selectedMcpServerName;
+    if (candidateName && next.some((item) => item.name === candidateName)) {
+      setSelectedMcpServerName(candidateName);
+      return;
+    }
+    setSelectedMcpServerName(next[0]?.name ?? null);
+  }
+
   async function handleSkillsChanged() {
     await refreshSkills();
     await refreshBot(botId);
   }
 
   useEffect(() => {
-    Promise.all([refreshSkills(), listMcpServers()])
-      .then(([, serverList]) => {
-        setMcpServers(serverList);
-      })
+    Promise.all([refreshSkills(), refreshMcpServers(null)])
       .catch((err) => setStatus(String(err)));
   }, []);
 
@@ -373,6 +435,23 @@ export default function ConfigView(props: {
   }, [providerModels]);
 
   useEffect(() => {
+    if (!selectedMcpServerName) {
+      setMcpDraft(null);
+      setMcpBaseline("");
+      return;
+    }
+    const selected = mcpServers.find((item) => item.name === selectedMcpServerName) ?? null;
+    if (!selected) {
+      setMcpDraft(null);
+      setMcpBaseline("");
+      return;
+    }
+    const draft = mcpDraftFromServer(selected);
+    setMcpDraft(draft);
+    setMcpBaseline(mcpComparable(draft));
+  }, [mcpServers, selectedMcpServerName]);
+
+  useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       setDeleteModelsOpen(false);
@@ -389,6 +468,10 @@ export default function ConfigView(props: {
 
   function setProviderField<K extends keyof ProviderDraft>(key: K, value: ProviderDraft[K]) {
     setProviderDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  function setMcpField<K extends keyof McpDraft>(key: K, value: McpDraft[K]) {
+    setMcpDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
   function toggleSkill(skillName: string) {
@@ -483,6 +566,54 @@ export default function ConfigView(props: {
       setStatus(String(err));
     } finally {
       setSavingProvider(false);
+    }
+  }
+
+  async function onSaveMcpServer() {
+    if (!mcpDraft) return;
+    setSavingMcp(true);
+    setStatus(null);
+    try {
+      const payload: UpdateMCPServerRequest = {
+        enabled_default: mcpDraft.enabled_default,
+      };
+      if (mcpDraft.transport === "stdio") {
+        payload.command = mcpDraft.command.trim() || null;
+        payload.args = mcpDraft.argsText
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+      } else if (mcpDraft.transport === "sse") {
+        payload.url = mcpDraft.url.trim() || null;
+      }
+      await updateMcpServer(mcpDraft.name, payload);
+      await refreshMcpServers(mcpDraft.name);
+      await refreshBot(botId);
+      setStatus(t("config.status.mcpSaved"));
+    } catch (err) {
+      setStatus(String(err));
+    } finally {
+      setSavingMcp(false);
+    }
+  }
+
+  async function onToggleMcpConnection(server: MCPServerInfo) {
+    setTogglingMcpConnection(server.name);
+    setStatus(null);
+    try {
+      if (server.connected) {
+        await disconnectMcpServer(server.name);
+        setStatus(t("config.status.mcpDisconnected", { name: server.name }));
+      } else {
+        await connectMcpServer(server.name);
+        setStatus(t("config.status.mcpConnected", { name: server.name }));
+      }
+      await refreshMcpServers(server.name);
+      await refreshBot(botId);
+    } catch (err) {
+      setStatus(String(err));
+    } finally {
+      setTogglingMcpConnection(null);
     }
   }
 
@@ -635,12 +766,17 @@ export default function ConfigView(props: {
       value: skills.filter((item) => item.is_active).length,
       accent: "from-rose-500/25 to-rose-500/5",
     },
+    {
+      label: t("config.summary.mcp"),
+      value: mcpServers.filter((item) => item.enabled_default).length,
+      accent: "from-cyan-500/25 to-cyan-500/5",
+    },
   ];
 
   return (
     <div className="app-dashboard-shell h-full overflow-auto px-5 py-6">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           {summaryCards.map((item) => (
             <div
               key={item.label}
@@ -663,7 +799,7 @@ export default function ConfigView(props: {
           <div className="flex items-center gap-2">
             {status ? <div className="text-xs text-zinc-400">{status}</div> : null}
             <div className="rounded-2xl border border-zinc-800 bg-zinc-950/90 p-1">
-              {(["bots", "providers", "skills"] as DashboardTab[]).map((item) => (
+              {(["bots", "providers", "skills", "mcp"] as DashboardTab[]).map((item) => (
                 <button
                   key={item}
                   type="button"
@@ -677,7 +813,9 @@ export default function ConfigView(props: {
                     ? t("config.tab.bots")
                     : item === "providers"
                       ? t("config.tab.providers")
-                      : t("config.tab.skills")}
+                      : item === "skills"
+                        ? t("config.tab.skills")
+                        : t("config.tab.mcp")}
                 </button>
               ))}
             </div>
@@ -972,7 +1110,21 @@ export default function ConfigView(props: {
                       </div>
                     </SectionCard>
 
-                    <SectionCard title={t("config.section.mcp.title")} subtitle={t("config.section.mcp.subtitle")}>
+                    <SectionCard
+                      title={t("config.section.botMcp.title")}
+                      subtitle={t("config.section.botMcp.subtitle", {
+                        count: Object.keys(botDraft.mcpOverrides).length,
+                      })}
+                      right={
+                        <button
+                          type="button"
+                          className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800"
+                          onClick={() => setTab("mcp")}
+                        >
+                          {t("config.mcp.manage")}
+                        </button>
+                      }
+                    >
                       <div className="space-y-2">
                         {mcpServers.map((server) => (
                           <div
@@ -985,7 +1137,10 @@ export default function ConfigView(props: {
                                 <div className="text-[10px] text-zinc-500">{server.transport}</div>
                               </div>
                               <div className="mt-1 text-xs text-zinc-400">
-                                {t("config.mcp.default", { enabled: server.enabled_default ? "true" : "false" })}
+                                {t("config.mcp.botSummary", {
+                                  enabled: server.enabled_default ? t("common.enabled") : t("common.disabled"),
+                                  connected: server.connected ? t("config.mcp.connected") : t("config.mcp.disconnected"),
+                                })}
                               </div>
                             </div>
                             <select
@@ -1355,12 +1510,190 @@ export default function ConfigView(props: {
               )}
             </div>
           </div>
-        ) : (
+        ) : tab === "skills" ? (
           <SkillsView
             skills={skills}
             onSkillsChanged={handleSkillsChanged}
             onStatus={setStatus}
           />
+        ) : (
+          <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+            <div className="flex flex-col gap-4">
+              <SectionCard
+                title={t("config.section.mcpRegistry.title")}
+                subtitle={t("config.section.mcpRegistry.subtitle")}
+              >
+                <div className="space-y-3">
+                  {mcpServers.map((server) => (
+                    <button
+                      key={server.name}
+                      type="button"
+                      className={classNames(
+                        "w-full rounded-3xl border px-4 py-3 text-left transition",
+                        server.name === selectedMcpServerName
+                          ? "border-zinc-600 bg-zinc-900"
+                          : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                      )}
+                      onClick={() => setSelectedMcpServerName(server.name)}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-zinc-100">{server.name}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-zinc-500">
+                            <span>{server.transport}</span>
+                            <span>{server.connected ? t("config.mcp.connected") : t("config.mcp.disconnected")}</span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className={classNames(
+                            "rounded-2xl px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50",
+                            server.connected
+                              ? "bg-red-500/15 text-red-200 hover:bg-red-500/25"
+                              : "bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25",
+                          )}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void onToggleMcpConnection(server);
+                          }}
+                          disabled={togglingMcpConnection === server.name}
+                        >
+                          {togglingMcpConnection === server.name
+                            ? t("common.loading")
+                            : server.connected
+                              ? t("config.mcp.disconnect")
+                              : t("config.mcp.connect")}
+                        </button>
+                      </div>
+                    </button>
+                  ))}
+                  {mcpServers.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">
+                      {t("config.mcp.empty")}
+                    </div>
+                  ) : null}
+                </div>
+              </SectionCard>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-4">
+              {selectedMcpServer && mcpDraft ? (
+                <>
+                  <SectionCard
+                    title={selectedMcpServer.name}
+                    subtitle={t("config.section.mcpDetail.subtitle")}
+                    right={
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={classNames(
+                            "rounded-2xl px-4 py-2 text-sm font-semibold transition disabled:opacity-50",
+                            selectedMcpServer.connected
+                              ? "bg-red-500/15 text-red-100 hover:bg-red-500/25"
+                              : "bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/25",
+                          )}
+                          onClick={() => void onToggleMcpConnection(selectedMcpServer)}
+                          disabled={togglingMcpConnection === selectedMcpServer.name}
+                        >
+                          {togglingMcpConnection === selectedMcpServer.name
+                            ? t("common.loading")
+                            : selectedMcpServer.connected
+                              ? t("config.mcp.disconnect")
+                              : t("config.mcp.connect")}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                          onClick={() => void onSaveMcpServer()}
+                          disabled={!mcpDirty || savingMcp}
+                        >
+                          {savingMcp ? t("config.mcp.saving") : t("config.mcp.save")}
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                        <div className="text-sm font-semibold text-zinc-200">{t("config.mcp.status")}</div>
+                        <div className="mt-2 text-xs text-zinc-500">
+                          {mcpDraft.connected ? t("config.mcp.connected") : t("config.mcp.disconnected")}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                        <div>
+                          <div className="text-sm font-semibold text-zinc-200">{t("config.mcp.defaultEnabled")}</div>
+                          <div className="text-xs text-zinc-500">{t("config.mcp.defaultEnabled.subtitle")}</div>
+                        </div>
+                        <ToggleButton
+                          enabled={mcpDraft.enabled_default}
+                          onClick={() => setMcpField("enabled_default", !mcpDraft.enabled_default)}
+                        />
+                      </div>
+                      {mcpDraft.transport === "stdio" ? (
+                        <>
+                          <div className="grid gap-2 md:col-span-2">
+                            <label className="text-sm font-semibold text-zinc-200">{t("config.mcp.command")}</label>
+                            <input
+                              value={mcpDraft.command}
+                              onChange={(e) => setMcpField("command", e.target.value)}
+                              placeholder={t("config.mcp.command.placeholder")}
+                              className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                            />
+                          </div>
+                          <div className="grid gap-2 md:col-span-2">
+                            <label className="text-sm font-semibold text-zinc-200">{t("config.mcp.args")}</label>
+                            <textarea
+                              value={mcpDraft.argsText}
+                              onChange={(e) => setMcpField("argsText", e.target.value)}
+                              placeholder={t("config.mcp.args.placeholder")}
+                              className="min-h-[120px] rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="grid gap-2 md:col-span-2">
+                          <label className="text-sm font-semibold text-zinc-200">{t("config.mcp.url")}</label>
+                          <input
+                            value={mcpDraft.url}
+                            onChange={(e) => setMcpField("url", e.target.value)}
+                            placeholder="https://example.invalid/mcp"
+                            className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </SectionCard>
+
+                  <SectionCard
+                    title={t("config.mcp.envKeys")}
+                    subtitle={t("config.mcp.envKeys.subtitle")}
+                  >
+                    {mcpDraft.env_keys.length > 0 ? (
+                      <div className="flex flex-wrap gap-2">
+                        {mcpDraft.env_keys.map((key) => (
+                          <span
+                            key={key}
+                            className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 font-mono text-xs text-zinc-300"
+                          >
+                            {key}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-zinc-500">{t("config.mcp.envKeys.empty")}</div>
+                    )}
+                  </SectionCard>
+                </>
+              ) : (
+                <SectionCard
+                  title={t("config.section.mcpDetail.title")}
+                  subtitle={t("config.section.mcpDetail.emptySubtitle")}
+                >
+                  <div className="text-sm text-zinc-500">{t("config.section.mcpDetail.empty")}</div>
+                </SectionCard>
+              )}
+            </div>
+          </div>
         )}
       </div>
 

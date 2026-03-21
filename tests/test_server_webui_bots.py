@@ -204,6 +204,156 @@ def test_skill_delete_rejects_non_user_scope(client: TestClient, server_env: dic
     assert "Only user skills can be deleted" in deleted.text
 
 
+def test_mcp_servers_endpoint_includes_connected_state(
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.minibot.mcp.manager import MCPManager
+    from src.minibot.server.app import create_app
+
+    (server_env["home"] / "config").mkdir(parents=True, exist_ok=True)
+    (server_env["home"] / "config" / "mcp_servers.yaml").write_text(
+        (
+            "enabled: true\n"
+            "servers:\n"
+            "  - name: duck\n"
+            "    transport: stdio\n"
+            "    command: duck-cmd\n"
+            "    args: [\"serve\"]\n"
+            "    enabled: true\n"
+            "  - name: remote\n"
+            "    transport: sse\n"
+            "    url: https://example.invalid/mcp\n"
+            "    enabled: false\n"
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_connect_all(self: MCPManager) -> dict[str, Exception | None]:
+        for server in self.config.servers:
+            if server.enabled:
+                self._clients[server.name] = object()
+        return {server.name: None for server in self.config.servers}
+
+    monkeypatch.setattr(MCPManager, "connect_all", fake_connect_all)
+
+    client = TestClient(create_app(workdir=server_env["workdir"]))
+    resp = client.get("/api/mcp/servers")
+    assert resp.status_code == 200, resp.text
+
+    body = {item["name"]: item for item in resp.json()}
+    assert body["duck"]["connected"] is True
+    assert body["duck"]["enabled_default"] is True
+    assert body["remote"]["connected"] is False
+    assert body["remote"]["enabled_default"] is False
+
+
+def test_put_mcp_server_updates_stdio_config_and_runtime_state(
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.minibot.mcp.manager import MCPManager
+    from src.minibot.server.app import create_app
+
+    config_dir = server_env["home"] / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "mcp_servers.yaml"
+    config_path.write_text(
+        (
+            "enabled: true\n"
+            "servers:\n"
+            "  - name: duck\n"
+            "    transport: stdio\n"
+            "    command: duck-cmd\n"
+            "    args: [\"serve\"]\n"
+            "    enabled: true\n"
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_connect_all(self: MCPManager) -> dict[str, Exception | None]:
+        for server in self.config.servers:
+            if server.enabled:
+                self._clients[server.name] = object()
+        return {server.name: None for server in self.config.servers}
+
+    async def fake_connect_server(self: MCPManager, name: str) -> Exception | None:
+        self._clients[name] = object()
+        return None
+
+    async def fake_disconnect_server(self: MCPManager, name: str) -> None:
+        self._clients.pop(name, None)
+
+    monkeypatch.setattr(MCPManager, "connect_all", fake_connect_all)
+    monkeypatch.setattr(MCPManager, "connect_server", fake_connect_server)
+    monkeypatch.setattr(MCPManager, "disconnect_server", fake_disconnect_server)
+
+    client = TestClient(create_app(workdir=server_env["workdir"]))
+    resp = client.put(
+        "/api/mcp/servers/duck",
+        json={"command": "new-duck", "args": ["--stdio"], "enabled_default": False},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["command"] == "new-duck"
+    assert body["args"] == ["--stdio"]
+    assert body["enabled_default"] is False
+    assert body["connected"] is False
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert "command: new-duck" in saved
+    assert "--stdio" in saved
+    assert "enabled: false" in saved
+
+
+def test_put_mcp_server_updates_sse_url(
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.minibot.mcp.manager import MCPManager
+    from src.minibot.server.app import create_app
+
+    config_dir = server_env["home"] / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "mcp_servers.yaml"
+    config_path.write_text(
+        (
+            "enabled: true\n"
+            "servers:\n"
+            "  - name: remote\n"
+            "    transport: sse\n"
+            "    url: https://old.example.invalid/mcp\n"
+            "    enabled: false\n"
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_connect_all(self: MCPManager) -> dict[str, Exception | None]:
+        return {}
+
+    async def fake_connect_server(self: MCPManager, name: str) -> Exception | None:
+        self._clients[name] = object()
+        return None
+
+    monkeypatch.setattr(MCPManager, "connect_all", fake_connect_all)
+    monkeypatch.setattr(MCPManager, "connect_server", fake_connect_server)
+
+    client = TestClient(create_app(workdir=server_env["workdir"]))
+    resp = client.put(
+        "/api/mcp/servers/remote",
+        json={"url": "https://new.example.invalid/mcp", "enabled_default": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["url"] == "https://new.example.invalid/mcp"
+    assert body["enabled_default"] is True
+    assert body["connected"] is True
+
+    saved = config_path.read_text(encoding="utf-8")
+    assert "https://new.example.invalid/mcp" in saved
+    assert "enabled: true" in saved
+
+
 def test_sessions_are_isolated_and_deletable(client: TestClient) -> None:
     bot_id = client.post("/api/bots", json={"name": "Sessions Bot"}).json()["bot_id"]
 

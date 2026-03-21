@@ -24,6 +24,7 @@ from .models import (
     DashboardResponse,
     FetchedModelResponse,
     MCPServerInfo,
+    MCPServerUpdateRequest,
     MessageDeleteResponse,
     MessageRegenerateRequest,
     MessageRegenerateResponse,
@@ -127,7 +128,28 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/mcp/servers", response_model=list[MCPServerInfo])
     async def list_mcp_servers() -> Any:
-        return manager.mcp_servers_snapshot()
+        return await manager.mcp_servers_snapshot()
+
+    @app.put("/api/mcp/servers/{name}", response_model=MCPServerInfo)
+    async def update_mcp_server(name: str, req: MCPServerUpdateRequest) -> Any:
+        try:
+            return await manager.update_mcp_server(name, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/mcp/servers/{name}/connect", response_model=MCPServerInfo)
+    async def connect_mcp_server(name: str) -> Any:
+        try:
+            return await manager.connect_mcp_server(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/mcp/servers/{name}/disconnect", response_model=MCPServerInfo)
+    async def disconnect_mcp_server(name: str) -> Any:
+        try:
+            return await manager.disconnect_mcp_server(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/models/available", response_model=list[AvailableModelResponse])
     async def list_available_models() -> Any:

@@ -19,6 +19,7 @@ import type {
   SkillInfo,
   SubagentCandidate,
   StreamEvent,
+  UpdateMCPServerRequest,
 } from "./types";
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -147,6 +148,18 @@ export async function deleteSkill(scope: string, folderName: string): Promise<Sk
 
 export async function listMcpServers(): Promise<MCPServerInfo[]> {
   return apiGet<MCPServerInfo[]>("/api/mcp/servers");
+}
+
+export async function updateMcpServer(name: string, body: UpdateMCPServerRequest): Promise<MCPServerInfo> {
+  return apiPut<MCPServerInfo>(`/api/mcp/servers/${encodeURIComponent(name)}`, body);
+}
+
+export async function connectMcpServer(name: string): Promise<MCPServerInfo> {
+  return apiPost<MCPServerInfo>(`/api/mcp/servers/${encodeURIComponent(name)}/connect`, {});
+}
+
+export async function disconnectMcpServer(name: string): Promise<MCPServerInfo> {
+  return apiPost<MCPServerInfo>(`/api/mcp/servers/${encodeURIComponent(name)}/disconnect`, {});
 }
 
 export async function listSessions(botId: string): Promise<SessionMeta[]> {

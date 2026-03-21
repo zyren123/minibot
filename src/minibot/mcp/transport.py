@@ -2,8 +2,10 @@
 
 import asyncio
 import json
-from abc import ABC, abstractmethod
+import os
 from pathlib import Path
+import shutil
+from abc import ABC, abstractmethod
 from typing import Any
 
 import httpx
@@ -59,19 +61,42 @@ class StdioTransport(MCPTransport):
         self._pending: dict[int, asyncio.Future] = {}
         self._read_task: asyncio.Task | None = None
 
+    def _resolve_command(self) -> str:
+        """Resolve a command into an executable path that works on the current OS."""
+        command = (self.command or "").strip()
+        if not command:
+            raise FileNotFoundError("MCP stdio command is not configured")
+
+        if os.name != "nt":
+            return command
+
+        path = Path(command)
+        if path.is_absolute() or str(path.parent) not in ("", "."):
+            return command
+
+        for suffix in (".cmd", ".exe", ".bat", ".ps1"):
+            resolved = shutil.which(f"{command}{suffix}")
+            if resolved:
+                return resolved
+
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+
+        return command
+
     @property
     def is_connected(self) -> bool:
         return self._process is not None and self._process.returncode is None
 
     async def connect(self) -> None:
         """Start the MCP server process."""
-        import os
-
         env = dict(os.environ)
         env.update(self.env)
+        executable = self._resolve_command()
 
         self._process = await asyncio.create_subprocess_exec(
-            self.command,
+            executable,
             *self.args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

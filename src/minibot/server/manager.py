@@ -12,6 +12,8 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from ..config import Config, load_config
+from ..config.writer import update_mcp_server_config
+from ..mcp.manager import MCPManager
 from ..sdk import Minibot
 from ..session.manager import SessionManager
 from ..skills.loader import SkillLoader
@@ -46,12 +48,14 @@ class AgentManager:
         self._base_config = load_config(workdir=workdir)
         self._bot_store = BotStore(app_home=Path(self._base_config.app_home))
         self._dashboard_store = DashboardStore(app_home=Path(self._base_config.app_home))
+        self._mcp_config_path = (Path(self._base_config.app_home) / "config" / "mcp_servers.yaml").resolve()
         self.user_skills_dir = Path(self._base_config.skills_dir).resolve()
         self.project_skills_dir = (Path(self._base_config.project_root) / "skills").resolve()
 
         self._bots: dict[tuple[str, str], Minibot] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._mcp_connected: set[tuple[str, str]] = set()
+        self._admin_mcp_manager: MCPManager | None = None
         self._sessions: dict[str, SessionManager] = {}
         self._global_lock = asyncio.Lock()
 
@@ -487,7 +491,17 @@ class AgentManager:
                 "folder_name": folder_name,
             }
 
-    def mcp_servers_snapshot(self) -> list[dict[str, Any]]:
+    async def _ensure_admin_mcp_manager(self) -> MCPManager:
+        async with self._global_lock:
+            if self._admin_mcp_manager is not None:
+                return self._admin_mcp_manager
+            manager = MCPManager(copy.deepcopy(self._base_config.mcp), self._base_config.workdir)
+            await manager.connect_all()
+            self._admin_mcp_manager = manager
+            return manager
+
+    async def mcp_servers_snapshot(self) -> list[dict[str, Any]]:
+        manager = await self._ensure_admin_mcp_manager()
         servers: list[dict[str, Any]] = []
         for s in self._base_config.mcp.servers:
             servers.append(
@@ -499,10 +513,108 @@ class AgentManager:
                     "args": list(s.args or []),
                     "url": s.url,
                     "env_keys": sorted(list((s.env or {}).keys())),
+                    "connected": manager.is_connected(s.name),
                 }
             )
         servers.sort(key=lambda d: d["name"])
         return servers
+
+    async def update_mcp_server(self, server_name: str, patch: dict[str, Any]) -> dict[str, Any]:
+        manager = await self._ensure_admin_mcp_manager()
+        async with self._global_lock:
+            cfg = next((item for item in self._base_config.mcp.servers if item.name == server_name), None)
+            if cfg is None:
+                raise ValueError(f"Unknown MCP server: {server_name}")
+
+            update_payload: dict[str, Any] = {}
+            if "enabled_default" in patch and patch.get("enabled_default") is not None:
+                update_payload["enabled"] = bool(patch.get("enabled_default"))
+            if cfg.transport == "stdio":
+                if "command" in patch:
+                    command = self._optional_text(patch.get("command"))
+                    update_payload["command"] = command
+                if "args" in patch:
+                    raw_args = patch.get("args") or []
+                    update_payload["args"] = [str(item).strip() for item in raw_args if str(item).strip()]
+            elif cfg.transport == "sse":
+                if "url" in patch:
+                    url = self._optional_text(patch.get("url"))
+                    update_payload["url"] = url
+            else:
+                if "command" in patch:
+                    update_payload["command"] = self._optional_text(patch.get("command"))
+                if "args" in patch:
+                    raw_args = patch.get("args") or []
+                    update_payload["args"] = [str(item).strip() for item in raw_args if str(item).strip()]
+                if "url" in patch:
+                    update_payload["url"] = self._optional_text(patch.get("url"))
+
+            persisted = update_mcp_server_config(self._mcp_config_path, server_name, update_payload)
+
+            cfg.enabled = bool(persisted.get("enabled", cfg.enabled))
+            cfg.command = persisted.get("command")
+            cfg.url = persisted.get("url")
+            cfg.args = list(persisted.get("args") or [])
+
+            runtime_cfg = next((item for item in manager.config.servers if item.name == server_name), None)
+            if runtime_cfg is None:
+                raise ValueError(f"Unknown MCP server: {server_name}")
+            runtime_cfg.enabled = cfg.enabled
+            runtime_cfg.command = cfg.command
+            runtime_cfg.url = cfg.url
+            runtime_cfg.args = list(cfg.args or [])
+
+            if manager.is_connected(server_name):
+                await manager.disconnect_server(server_name)
+            if self._base_config.mcp.enabled and cfg.enabled:
+                await manager.connect_server(server_name)
+
+            for bot_id in self._bot_store.all_bot_ids():
+                self._clear_bot_cache(bot_id)
+
+        snapshot = await self.mcp_servers_snapshot()
+        for server in snapshot:
+            if server["name"] == server_name:
+                return server
+        raise ValueError(f"Unknown MCP server: {server_name}")
+
+    async def connect_mcp_server(self, server_name: str) -> dict[str, Any]:
+        manager = await self._ensure_admin_mcp_manager()
+        async with self._global_lock:
+            cfg = next((item for item in self._base_config.mcp.servers if item.name == server_name), None)
+            if cfg is None:
+                raise ValueError(f"Unknown MCP server: {server_name}")
+            runtime_cfg = next((item for item in manager.config.servers if item.name == server_name), None)
+            if runtime_cfg is None:
+                raise ValueError(f"Unknown MCP server: {server_name}")
+            runtime_cfg.command = cfg.command
+            runtime_cfg.url = cfg.url
+            runtime_cfg.args = list(cfg.args or [])
+            err = await manager.connect_server(server_name)
+            if err is not None:
+                raise ValueError(str(err))
+            for bot_id in self._bot_store.all_bot_ids():
+                self._clear_bot_cache(bot_id)
+        snapshot = await self.mcp_servers_snapshot()
+        for server in snapshot:
+            if server["name"] == server_name:
+                return server
+        raise ValueError(f"Unknown MCP server: {server_name}")
+
+    async def disconnect_mcp_server(self, server_name: str) -> dict[str, Any]:
+        manager = await self._ensure_admin_mcp_manager()
+        async with self._global_lock:
+            cfg = next((item for item in self._base_config.mcp.servers if item.name == server_name), None)
+            if cfg is None:
+                raise ValueError(f"Unknown MCP server: {server_name}")
+            await manager.disconnect_server(server_name)
+            for bot_id in self._bot_store.all_bot_ids():
+                self._clear_bot_cache(bot_id)
+        snapshot = await self.mcp_servers_snapshot()
+        for server in snapshot:
+            if server["name"] == server_name:
+                return server
+        raise ValueError(f"Unknown MCP server: {server_name}")
 
     def _skill_records(self) -> list[dict[str, Any]]:
         loader = SkillLoader([Path(p) for p in self.skills_dirs])
