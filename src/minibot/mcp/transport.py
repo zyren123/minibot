@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import ntpath
 import os
 from pathlib import Path
 import shutil
@@ -70,8 +71,7 @@ class StdioTransport(MCPTransport):
         if os.name != "nt":
             return command
 
-        path = Path(command)
-        if path.is_absolute() or str(path.parent) not in ("", "."):
+        if ntpath.isabs(command) or "\\" in command or "/" in command:
             return command
 
         for suffix in (".cmd", ".exe", ".bat", ".ps1"):
