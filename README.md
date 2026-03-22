@@ -166,6 +166,19 @@ npm install
 npm run dev
 ```
 
+### 飞书平台接入（WebSocket）
+
+1. 在飞书开放平台创建企业自建应用，并开启机器人能力。
+2. 为应用订阅 `im.message.receive_v1` 事件，并授予发送消息所需权限。
+3. 启动 `minibot-web`，打开 WebUI 的 `Platforms` 标签页。
+4. 新建一个 `Feishu` 平台连接，填写 `App ID`、`App Secret`，并绑定到目标 Bot。
+5. 如果删除了该 Bot，平台连接会自动改绑到默认 `Minibot`，并从新会话继续处理后续消息。
+
+当前限制：
+- 仅支持飞书私聊文本消息。
+- 使用长连接 WebSocket 模式，不依赖公网 webhook。
+- 回复以最终文本消息返回，不做流式 token 推送或消息卡片。
+
 ### SDK 使用（Python）
 
 非流式：

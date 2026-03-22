@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -25,6 +26,9 @@ from .models import (
     FetchedModelResponse,
     MCPServerInfo,
     MCPServerUpdateRequest,
+    PlatformConnectionCreateRequest,
+    PlatformConnectionResponse,
+    PlatformConnectionUpdateRequest,
     MessageDeleteResponse,
     MessageRegenerateRequest,
     MessageRegenerateResponse,
@@ -56,8 +60,17 @@ def _resolve_static_dir(server_dir: Path) -> Path | None:
 
 
 def create_app(*, workdir: str | Path | None = None) -> FastAPI:
-    app = FastAPI(title="Minibot Server", version="0.1.0")
     manager = AgentManager(workdir=Path(workdir).resolve() if workdir is not None else None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await manager.start_platform_runtimes()
+        try:
+            yield
+        finally:
+            await manager.stop_platform_runtimes()
+
+    app = FastAPI(title="Minibot Server", version="0.1.0", lifespan=lifespan)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -75,6 +88,40 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/dashboard", response_model=DashboardResponse)
     async def get_dashboard() -> Any:
         return manager.dashboard_snapshot()
+
+    @app.get("/api/platforms", response_model=list[PlatformConnectionResponse])
+    async def list_platforms() -> Any:
+        return manager.list_platforms()
+
+    @app.post("/api/platforms", response_model=PlatformConnectionResponse)
+    async def create_platform(req: PlatformConnectionCreateRequest) -> Any:
+        try:
+            return await manager.create_platform(req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/platforms/{platform_id}", response_model=PlatformConnectionResponse)
+    async def get_platform(platform_id: str) -> Any:
+        try:
+            return manager.platform_snapshot(platform_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Platform not found") from exc
+
+    @app.put("/api/platforms/{platform_id}", response_model=PlatformConnectionResponse)
+    async def update_platform(platform_id: str, req: PlatformConnectionUpdateRequest) -> Any:
+        try:
+            return await manager.update_platform(platform_id, req.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Platform not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/platforms/{platform_id}")
+    async def delete_platform(platform_id: str) -> dict[str, bool]:
+        deleted = await manager.delete_platform(platform_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Platform not found")
+        return {"deleted": True}
 
     @app.get("/api/bots", response_model=list[BotMetaResponse])
     async def list_bots() -> list[dict[str, Any]]:

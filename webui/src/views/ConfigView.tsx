@@ -28,13 +28,14 @@ import type {
   UpdateMCPServerRequest,
 } from "../lib/types";
 import { useI18n } from "../lib/i18n";
+import PlatformsView from "./PlatformsView";
 import SkillsView from "./SkillsView";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type DashboardTab = "bots" | "providers" | "skills" | "mcp";
+type DashboardTab = "bots" | "providers" | "platforms" | "skills" | "mcp";
 
 type BotDraft = {
   name: string;
@@ -762,6 +763,11 @@ export default function ConfigView(props: {
     { label: t("config.summary.models"), value: dashboard?.models.length ?? 0, accent: "from-emerald-500/25 to-emerald-500/5" },
     { label: t("config.summary.bots"), value: dashboard?.bots.length ?? 0, accent: "from-amber-500/25 to-amber-500/5" },
     {
+      label: t("config.summary.platforms"),
+      value: dashboard?.platforms.length ?? 0,
+      accent: "from-violet-500/25 to-violet-500/5",
+    },
+    {
       label: t("config.summary.skills"),
       value: skills.filter((item) => item.is_active).length,
       accent: "from-rose-500/25 to-rose-500/5",
@@ -776,7 +782,7 @@ export default function ConfigView(props: {
   return (
     <div className="app-dashboard-shell h-full overflow-auto px-5 py-6">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <div className="grid gap-4 md:grid-cols-5">
+        <div className="grid gap-4 md:grid-cols-6">
           {summaryCards.map((item) => (
             <div
               key={item.label}
@@ -799,7 +805,7 @@ export default function ConfigView(props: {
           <div className="flex items-center gap-2">
             {status ? <div className="text-xs text-zinc-400">{status}</div> : null}
             <div className="rounded-2xl border border-zinc-800 bg-zinc-950/90 p-1">
-              {(["bots", "providers", "skills", "mcp"] as DashboardTab[]).map((item) => (
+              {(["bots", "providers", "platforms", "skills", "mcp"] as DashboardTab[]).map((item) => (
                 <button
                   key={item}
                   type="button"
@@ -813,6 +819,8 @@ export default function ConfigView(props: {
                     ? t("config.tab.bots")
                     : item === "providers"
                       ? t("config.tab.providers")
+                      : item === "platforms"
+                        ? t("config.tab.platforms")
                       : item === "skills"
                         ? t("config.tab.skills")
                         : t("config.tab.mcp")}
@@ -1510,6 +1518,13 @@ export default function ConfigView(props: {
               )}
             </div>
           </div>
+        ) : tab === "platforms" ? (
+          <PlatformsView
+            platforms={dashboard?.platforms ?? []}
+            bots={dashboard?.bots ?? []}
+            onPlatformsChanged={() => refreshDashboard(selectedProviderId)}
+            onStatus={setStatus}
+          />
         ) : tab === "skills" ? (
           <SkillsView
             skills={skills}

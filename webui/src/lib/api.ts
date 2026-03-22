@@ -10,6 +10,7 @@ import type {
   FetchedModel,
   MCPServerInfo,
   Message,
+  PlatformConnection,
   ProviderRecord,
   ReasoningEffort,
   RegisteredModel,
@@ -75,6 +76,40 @@ export async function updateBotConfig(
 
 export async function listDashboard(): Promise<DashboardData> {
   return apiGet<DashboardData>("/api/dashboard");
+}
+
+export async function listPlatforms(): Promise<PlatformConnection[]> {
+  return apiGet<PlatformConnection[]>("/api/platforms");
+}
+
+export async function createPlatform(body: {
+  name: string;
+  kind?: "feishu" | "telegram" | "whatsapp";
+  enabled?: boolean;
+  bound_bot_id: string;
+  app_id?: string;
+  app_secret?: string;
+}): Promise<PlatformConnection> {
+  return apiPost<PlatformConnection>("/api/platforms", body);
+}
+
+export async function updatePlatform(
+  platformId: string,
+  body: {
+    name?: string | null;
+    enabled?: boolean | null;
+    bound_bot_id?: string | null;
+    app_id?: string | null;
+    app_secret?: string | null;
+  },
+): Promise<PlatformConnection> {
+  return apiPut<PlatformConnection>(`/api/platforms/${encodeURIComponent(platformId)}`, body);
+}
+
+export async function deletePlatform(platformId: string): Promise<{ deleted: boolean }> {
+  const resp = await fetch(`/api/platforms/${encodeURIComponent(platformId)}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as { deleted: boolean };
 }
 
 export async function listAvailableModels(): Promise<AvailableModel[]> {

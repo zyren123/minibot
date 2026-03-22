@@ -238,6 +238,44 @@ class ModelDeleteResponse(BaseModel):
     deleted_count: int = 0
 
 
+PlatformKind = Literal["feishu", "telegram", "whatsapp"]
+
+
+class PlatformConnectionResponse(BaseModel):
+    platform_id: str
+    name: str
+    kind: PlatformKind = "feishu"
+    enabled: bool = True
+    bound_bot_id: str
+    bound_bot_name: str
+    mode: Literal["websocket"] = "websocket"
+    scope: Literal["private"] = "private"
+    app_id: str = ""
+    app_secret_masked: str | None = None
+    connected: bool = False
+    last_error: str | None = None
+    last_event_at: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class PlatformConnectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    kind: PlatformKind = "feishu"
+    enabled: bool = True
+    bound_bot_id: str = "default"
+    app_id: str | None = None
+    app_secret: str | None = None
+
+
+class PlatformConnectionUpdateRequest(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
+    bound_bot_id: str | None = None
+    app_id: str | None = None
+    app_secret: str | None = None
+
+
 class AvailableModelResponse(BaseModel):
     model_id: str
     provider_id: str
@@ -256,6 +294,7 @@ class DashboardResponse(BaseModel):
     providers: list[ProviderResponse] = Field(default_factory=list)
     models: list[ModelResponse] = Field(default_factory=list)
     bots: list[BotMetaResponse] = Field(default_factory=list)
+    platforms: list[PlatformConnectionResponse] = Field(default_factory=list)
     available_models: list[AvailableModelResponse] = Field(default_factory=list)
 
 

@@ -250,6 +250,7 @@ export type DashboardData = {
   providers: ProviderRecord[];
   models: RegisteredModel[];
   bots: BotMeta[];
+  platforms: PlatformConnection[];
   available_models: AvailableModel[];
 };
 
@@ -259,4 +260,22 @@ export type SubagentCandidate = {
   subagent_name: string;
   subagent_description: string;
   enabled: boolean;
+};
+
+export type PlatformConnection = {
+  platform_id: string;
+  name: string;
+  kind: "feishu" | "telegram" | "whatsapp";
+  enabled: boolean;
+  bound_bot_id: string;
+  bound_bot_name: string;
+  mode: "websocket";
+  scope: "private";
+  app_id: string;
+  app_secret_masked: string | null;
+  connected: boolean;
+  last_error: string | null;
+  last_event_at: string | null;
+  created_at: string;
+  updated_at: string;
 };

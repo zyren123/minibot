@@ -21,7 +21,17 @@ from ..subagents.registry import AgentType
 
 from .bots import BotStore, DEFAULT_BOT_ID
 from .dashboard_store import DashboardStore
+from .platform_runtime import FeishuPlatformRuntime
+from .platforms import (
+    ConversationMapStore,
+    PlatformStore,
+    SUPPORTED_PLATFORM_KINDS,
+    platform_kind_label,
+)
 from .plugins import load_tools_from_plugin
+
+
+_STATE_UNSET = object()
 
 
 class AgentManager:
@@ -46,9 +56,11 @@ class AgentManager:
 
     def __init__(self, *, workdir: Path | None = None) -> None:
         self._base_config = load_config(workdir=workdir)
-        self._bot_store = BotStore(app_home=Path(self._base_config.app_home))
-        self._dashboard_store = DashboardStore(app_home=Path(self._base_config.app_home))
-        self._mcp_config_path = (Path(self._base_config.app_home) / "config" / "mcp_servers.yaml").resolve()
+        self.app_home = Path(self._base_config.app_home).resolve()
+        self._bot_store = BotStore(app_home=self.app_home)
+        self._dashboard_store = DashboardStore(app_home=self.app_home)
+        self._platform_store = PlatformStore(app_home=self.app_home)
+        self._mcp_config_path = (self.app_home / "config" / "mcp_servers.yaml").resolve()
         self.user_skills_dir = Path(self._base_config.skills_dir).resolve()
         self.project_skills_dir = (Path(self._base_config.project_root) / "skills").resolve()
 
@@ -57,6 +69,9 @@ class AgentManager:
         self._mcp_connected: set[tuple[str, str]] = set()
         self._admin_mcp_manager: MCPManager | None = None
         self._sessions: dict[str, SessionManager] = {}
+        self._platform_runtimes: dict[str, Any] = {}
+        self._platform_runtime_state: dict[str, dict[str, Any]] = {}
+        self._platforms_started = False
         self._global_lock = asyncio.Lock()
 
         default_dirs = [str(self.project_skills_dir), str(self.user_skills_dir)]
@@ -103,6 +118,7 @@ class AgentManager:
             "providers": snapshot["providers"],
             "models": snapshot["models"],
             "bots": self.list_bots(),
+            "platforms": self.list_platforms(),
             "available_models": self.active_models_snapshot(),
         }
 
@@ -148,15 +164,23 @@ class AgentManager:
             }
 
     async def delete_bot(self, bot_id: str) -> bool:
+        rebound_platform_ids: list[str] = []
         async with self._global_lock:
             referencing = set(self._bots_referencing(bot_id))
+            rebound_platform_ids = self._platform_store.rebind_bot(
+                source_bot_id=bot_id,
+                target_bot_id=DEFAULT_BOT_ID,
+            )
             deleted = self._bot_store.delete_bot(bot_id)
             if deleted:
                 self._clear_bot_cache(bot_id)
                 for owner_bot_id in referencing:
                     self._clear_bot_cache(owner_bot_id)
                 self._sessions.pop(bot_id, None)
-            return deleted
+        for platform_id in rebound_platform_ids:
+            ConversationMapStore(app_home=self.app_home, platform_id=platform_id).clear()
+            await self._sync_platform_runtime(platform_id)
+        return deleted
 
     def bot_config_snapshot(self, bot_id: str) -> dict[str, Any]:
         cfg, data = self._build_bot_config(bot_id)
@@ -279,11 +303,134 @@ class AgentManager:
             enabled=bool(patch.get("enabled", True)),
         )
 
+    def list_platforms(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in self._platform_store.list_platforms():
+            runtime_state = self._platform_runtime_state_for(str(item["platform_id"]))
+            bound_bot_id = str(item.get("bound_bot_id") or DEFAULT_BOT_ID)
+            if not self.bot_exists(bound_bot_id):
+                bound_bot_id = DEFAULT_BOT_ID
+            bound_bot_name = self._display_bot_name(bound_bot_id, self._bot_store.read_bot_json(bound_bot_id))
+            out.append(
+                {
+                    **item,
+                    "bound_bot_id": bound_bot_id,
+                    "bound_bot_name": bound_bot_name,
+                    "connected": bool(runtime_state["connected"]),
+                    "last_error": runtime_state["last_error"],
+                    "last_event_at": runtime_state["last_event_at"],
+                }
+            )
+        return out
+
+    def platform_snapshot(self, platform_id: str) -> dict[str, Any]:
+        for item in self.list_platforms():
+            if item["platform_id"] == platform_id:
+                return item
+        raise KeyError(platform_id)
+
+    async def create_platform(self, patch: dict[str, Any]) -> dict[str, Any]:
+        async with self._global_lock:
+            name = self._optional_text(patch.get("name"))
+            if not name:
+                raise ValueError("Platform name is required")
+            kind = str(patch.get("kind") or "").strip().lower()
+            if kind not in SUPPORTED_PLATFORM_KINDS:
+                raise ValueError(f"Unsupported platform kind: {kind or 'unknown'}")
+            bound_bot_id = str(patch.get("bound_bot_id") or DEFAULT_BOT_ID).strip() or DEFAULT_BOT_ID
+            if not self.bot_exists(bound_bot_id):
+                raise ValueError("Bound bot not found")
+            app_id = self._optional_text(patch.get("app_id"))
+            if kind == "feishu" and not app_id:
+                raise ValueError("Feishu app_id is required")
+            app_secret = self._optional_text(patch.get("app_secret"))
+            if kind == "feishu" and not app_secret:
+                raise ValueError("Feishu app_secret is required")
+
+            created = self._platform_store.create_platform(
+                name=name,
+                kind=kind,
+                enabled=bool(patch.get("enabled", True)),
+                bound_bot_id=bound_bot_id,
+                app_id=app_id or "",
+                app_secret=app_secret or "",
+            )
+
+        await self._sync_platform_runtime(str(created["platform_id"]))
+        return self.platform_snapshot(str(created["platform_id"]))
+
+    async def update_platform(self, platform_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        bound_bot_changed = False
+        store_patch: dict[str, Any] = {}
+
+        async with self._global_lock:
+            existing = self._platform_store.platform_for_update(platform_id)
+
+            if "name" in patch:
+                name = self._optional_text(patch.get("name"))
+                if not name:
+                    raise ValueError("Platform name is required")
+                store_patch["name"] = name
+
+            if "enabled" in patch and patch.get("enabled") is not None:
+                store_patch["enabled"] = bool(patch.get("enabled"))
+
+            if "bound_bot_id" in patch:
+                bound_bot_id = str(patch.get("bound_bot_id") or DEFAULT_BOT_ID).strip() or DEFAULT_BOT_ID
+                if not self.bot_exists(bound_bot_id):
+                    raise ValueError("Bound bot not found")
+                store_patch["bound_bot_id"] = bound_bot_id
+                bound_bot_changed = bound_bot_id != str(existing.get("bound_bot_id") or DEFAULT_BOT_ID)
+
+            if "app_id" in patch:
+                app_id = self._optional_text(patch.get("app_id"))
+                if not app_id:
+                    raise ValueError("Feishu app_id is required")
+                store_patch["app_id"] = app_id
+
+            if "app_secret" in patch:
+                app_secret = self._optional_text(patch.get("app_secret"))
+                if app_secret is None:
+                    raise ValueError("Feishu app_secret is required")
+                store_patch["app_secret"] = app_secret
+
+            if store_patch:
+                self._platform_store.update_platform(platform_id, store_patch)
+
+        if bound_bot_changed:
+            ConversationMapStore(app_home=self.app_home, platform_id=platform_id).clear()
+
+        await self._sync_platform_runtime(platform_id)
+        return self.platform_snapshot(platform_id)
+
+    async def delete_platform(self, platform_id: str) -> bool:
+        await self._stop_platform_runtime(platform_id, clear_state=True)
+        async with self._global_lock:
+            deleted = self._platform_store.delete_platform(platform_id)
+            if deleted:
+                ConversationMapStore(app_home=self.app_home, platform_id=platform_id).delete_storage()
+                self._platform_runtime_state.pop(platform_id, None)
+            return deleted
+
     def update_provider(self, provider_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         updated = self._dashboard_store.update_provider(provider_id, patch)
         for bot_id in self._bot_ids_using_provider(provider_id):
             self._clear_bot_cache(bot_id)
         return updated
+
+    async def start_platform_runtimes(self) -> None:
+        async with self._global_lock:
+            self._platforms_started = True
+            platform_ids = self._platform_store.all_platform_ids()
+        for platform_id in platform_ids:
+            await self._sync_platform_runtime(platform_id)
+
+    async def stop_platform_runtimes(self) -> None:
+        async with self._global_lock:
+            self._platforms_started = False
+            platform_ids = list(self._platform_runtimes.keys())
+        for platform_id in platform_ids:
+            await self._stop_platform_runtime(platform_id, clear_state=False)
 
     async def fetch_provider_models(self, provider_id: str) -> list[dict[str, Any]]:
         provider = self._dashboard_store.provider_credentials(provider_id)
@@ -1140,6 +1287,77 @@ class AgentManager:
     @staticmethod
     def _bot_enabled(data: dict[str, Any]) -> bool:
         return bool(data.get("enabled", True))
+
+    def bot_exists(self, bot_id: str) -> bool:
+        return bot_id in self._bot_store.all_bot_ids()
+
+    def set_platform_runtime_state(
+        self,
+        platform_id: str,
+        *,
+        connected: Any = _STATE_UNSET,
+        last_error: Any = _STATE_UNSET,
+        last_event_at: Any = _STATE_UNSET,
+    ) -> None:
+        state = self._platform_runtime_state_for(platform_id)
+        if connected is not _STATE_UNSET:
+            state["connected"] = bool(connected)
+        if last_error is not _STATE_UNSET:
+            state["last_error"] = last_error
+        if last_event_at is not _STATE_UNSET:
+            state["last_event_at"] = last_event_at
+
+    def _platform_runtime_state_for(self, platform_id: str) -> dict[str, Any]:
+        state = self._platform_runtime_state.get(platform_id)
+        if state is None:
+            state = {"connected": False, "last_error": None, "last_event_at": None}
+            self._platform_runtime_state[platform_id] = state
+        return state
+
+    def _build_platform_runtime(self, platform: dict[str, Any]) -> Any:
+        kind = str(platform.get("kind") or "").strip().lower()
+        if kind == "feishu":
+            return FeishuPlatformRuntime(manager=self, platform=platform)
+        raise NotImplementedError(f"{platform_kind_label(kind)} runtime is not implemented yet.")
+
+    async def _sync_platform_runtime(self, platform_id: str) -> None:
+        await self._stop_platform_runtime(platform_id, clear_state=False)
+
+        async with self._global_lock:
+            if not self._platforms_started:
+                return
+            try:
+                platform = self._platform_store.platform_for_update(platform_id)
+            except KeyError:
+                self._platform_runtime_state.pop(platform_id, None)
+                return
+
+        if not bool(platform.get("enabled", True)):
+            self.set_platform_runtime_state(platform_id, connected=False)
+            return
+
+        try:
+            runtime = self._build_platform_runtime(platform)
+        except Exception as exc:
+            self.set_platform_runtime_state(platform_id, connected=False, last_error=str(exc))
+            return
+
+        async with self._global_lock:
+            if not self._platforms_started:
+                return
+            self._platform_runtimes[platform_id] = runtime
+
+        await runtime.start()
+
+    async def _stop_platform_runtime(self, platform_id: str, *, clear_state: bool) -> None:
+        async with self._global_lock:
+            runtime = self._platform_runtimes.pop(platform_id, None)
+        if runtime is not None:
+            await runtime.stop()
+        if clear_state:
+            self._platform_runtime_state.pop(platform_id, None)
+        else:
+            self.set_platform_runtime_state(platform_id, connected=False)
 
     @staticmethod
     def _mask_api_key(value: str | None) -> str | None:
