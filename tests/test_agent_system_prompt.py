@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 
 from src.minibot.agent import Agent
 from src.minibot.config.schema import (
@@ -65,10 +66,11 @@ def test_system_prompt_includes_production_operating_contract(tmp_path):
 def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(tmp_path):
     app_home = tmp_path / ".minibot"
     memory_dir = app_home / "memory"
+    today = datetime.now().strftime("%Y-%m-%d")
     memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "long_term.md").write_text("- Prefer concise updates\n", encoding="utf-8")
-    (memory_dir / "daily" / "2026-03-24.md").parent.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "daily" / "2026-03-24.md").write_text("- Continue prompt overhaul\n", encoding="utf-8")
+    (memory_dir / "LONG_TERM.md").write_text("- Prefer concise updates\n", encoding="utf-8")
+    (memory_dir / "daily" / f"{today}.md").parent.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "daily" / f"{today}.md").write_text("- Continue prompt overhaul\n", encoding="utf-8")
 
     extra = "# Soul\n\nStay sharp."
     agent = _make_agent(

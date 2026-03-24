@@ -86,6 +86,12 @@ Notes:
   - Enforces: tag version == `pyproject.toml` version.
   - Flow: build WebUI → run `bash scripts/sync_webui_static.sh` → tests → `python -m build` → run `python scripts/verify_package_static.py dist/*.whl dist/*.tar.gz` → publish to PyPI (Trusted Publishing; optional `PYPI_API_TOKEN`) → create GitHub Release + upload `dist/*`.
 
+## Cross-Platform Test Stability
+
+- Linux CI is case-sensitive even when macOS local dev is not. When tests create files that production code later reads, use the **exact** filename casing from the implementation. Recent failure example: memory long-term storage uses `LONG_TERM.md`, so a test that wrote `long_term.md` passed locally on macOS but failed in GitHub Actions.
+- Do not hard-code "today" filenames in tests for daily/session/memory files unless the test explicitly freezes time. Prefer deriving the date at runtime (for example `datetime.now().strftime("%Y-%m-%d")`) or passing an explicit date through the product API.
+- If a filesystem-related test passes locally but fails in GitHub Actions, check filename case, date assumptions, and other OS-sensitive path behaviors before suspecting the agent/prompt/business logic.
+
 ## Cross-Platform Text I/O Rules
 
 - Treat all repo-owned text files as UTF-8. Always pass `encoding="utf-8"` when reading or writing `SKILL.md`, Markdown docs, YAML/JSON/TOML config, prompt templates, session files, and other project-managed text artifacts.
