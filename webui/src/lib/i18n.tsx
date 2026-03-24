@@ -161,6 +161,8 @@ const messages: Record<Language, TranslationTable> = {
     "chat.message.regenerate": "重新生成",
     "chat.message.delete": "删除",
     "chat.message.tokens": "Tokens {count}",
+    "chat.history.loadOlder":
+      ({ count }) => `加载更早消息（还有 ${count} 轮）`,
     "chat.empty.blocked": "请先解决上方的 Bot 或模型问题，再发送消息。",
     "chat.empty.ready": "从发送一条消息开始。",
     "chat.input.blocked": "此 Bot 当前不可聊天。",
@@ -551,6 +553,8 @@ const messages: Record<Language, TranslationTable> = {
     "chat.message.regenerate": "Regenerate",
     "chat.message.delete": "Delete",
     "chat.message.tokens": "Tokens {count}",
+    "chat.history.loadOlder":
+      ({ count }) => `Load older messages (${count} hidden turn${Number(count) === 1 ? "" : "s"})`,
     "chat.empty.blocked": "Resolve the bot or model issue above before sending a message.",
     "chat.empty.ready": "Start by sending a message.",
     "chat.input.blocked": "Chat is unavailable for this bot.",

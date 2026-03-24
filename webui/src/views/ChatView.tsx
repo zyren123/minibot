@@ -29,6 +29,14 @@ import {
   updateBotConfig,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import {
+  countHiddenTurnsBeforeIndex,
+  expandHistoryWindowStart,
+  findHistoryWindowStart,
+} from "./chatHistoryWindow";
+
+const INITIAL_VISIBLE_HISTORY_TURNS = 24;
+const HISTORY_TURN_BATCH = 24;
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -475,6 +483,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [visibleHistoryStartIndex, setVisibleHistoryStartIndex] = useState(0);
   const [contextBySession, setContextBySession] = useState<Record<string, ContextSnapshot>>({});
   const [prompt, setPrompt] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -568,6 +577,18 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }, [messages]);
 
   const toolRenderState = useMemo(() => buildToolRenderState(messages), [messages]);
+  const hiddenHistoryTurnCount = useMemo(
+    () => countHiddenTurnsBeforeIndex(messages, visibleHistoryStartIndex),
+    [messages, visibleHistoryStartIndex],
+  );
+  const visibleMessageEntries = useMemo(
+    () =>
+      messages.slice(visibleHistoryStartIndex).map((message, offset) => ({
+        message,
+        index: visibleHistoryStartIndex + offset,
+      })),
+    [messages, visibleHistoryStartIndex],
+  );
 
   const chatBusy = streaming || submittingAnswer;
   const chatBlocked = Boolean(botConfig && (!botConfig.enabled || !botConfig.chat_ready));
@@ -636,6 +657,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setToolOpenById({});
     clearTodoState();
     setMessages(sess.messages);
+    setVisibleHistoryStartIndex(findHistoryWindowStart(sess.messages, INITIAL_VISIBLE_HISTORY_TURNS));
     syncContextSnapshot(id, sess.messages);
     setPendingQuestion(derivePendingQuestionFromPrompt(question));
     if (!question) {
@@ -654,6 +676,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setPendingAnswerDraft("");
     setPendingCustomOpen(false);
     setMessages([]);
+    setVisibleHistoryStartIndex(0);
     setSessionId(result.session_id);
     setMobileSessionsOpen(false);
     await refreshSessions(botId);
@@ -667,6 +690,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     markSessionStateDirty();
     setSessionId(null);
     setMessages([]);
+    setVisibleHistoryStartIndex(0);
     setContextBySession({});
     setStatus(null);
     setReasoningEffort("");
@@ -1068,6 +1092,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(result.messages);
+      setVisibleHistoryStartIndex(findHistoryWindowStart(result.messages, INITIAL_VISIBLE_HISTORY_TURNS));
       syncContextSnapshot(sessionId, result.messages);
       await refreshSessions(botId);
       setStatus(t("chat.status.deletedTurn"));
@@ -1092,6 +1117,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(optimisticMessages);
+      setVisibleHistoryStartIndex(findHistoryWindowStart(optimisticMessages, INITIAL_VISIBLE_HISTORY_TURNS));
       syncContextSnapshot(sessionId, optimisticMessages);
       for await (const ev of streamRegenerateSessionMessage(botId, sessionId, messageId, reasoningEffort || null)) {
         if (ev.type === "system" && ev.message === "Generation interrupted.") {
@@ -1112,6 +1138,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       } catch {
         markSessionStateDirty();
         setMessages(previousMessages);
+        setVisibleHistoryStartIndex(findHistoryWindowStart(previousMessages, INITIAL_VISIBLE_HISTORY_TURNS));
         syncContextSnapshot(sessionId, previousMessages);
       }
       await refreshSessions(botId).catch(() => null);
@@ -1140,6 +1167,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         setToolOpenById({});
         clearTodoState();
         setMessages([]);
+        setVisibleHistoryStartIndex(0);
       }
       setContextBySession((prev) => {
         const next = { ...prev };
@@ -1175,6 +1203,12 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
   function toggleToolInvocation(toolKey: string) {
     setToolOpenById((prev) => ({ ...prev, [toolKey]: !prev[toolKey] }));
+  }
+
+  function onLoadOlderMessages() {
+    setVisibleHistoryStartIndex((current) =>
+      expandHistoryWindowStart(messages, current, HISTORY_TURN_BATCH),
+    );
   }
 
   const sessionListContent = (
@@ -1594,9 +1628,21 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
         <div ref={scrollRef} className="flex-1 overflow-auto px-4 py-6 sm:px-6">
           <div className="mx-auto flex max-w-4xl flex-col gap-4">
-            {messages.map((message, idx) => {
+            {hiddenHistoryTurnCount > 0 ? (
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  className="rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-2 text-xs font-semibold text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-100"
+                  onClick={onLoadOlderMessages}
+                >
+                  {t("chat.history.loadOlder", { count: hiddenHistoryTurnCount })}
+                </button>
+              </div>
+            ) : null}
+
+            {visibleMessageEntries.map(({ message, index: messageIndex }) => {
               if (message.role === "assistant") {
-                const assistantInvocations = toolRenderState.assistantInvocationsByIndex.get(idx) ?? [];
+                const assistantInvocations = toolRenderState.assistantInvocationsByIndex.get(messageIndex) ?? [];
                 const usage = usageParts(message.usage);
                 const messageId = message.message_id ?? null;
                 const inlinePendingQuestion =
@@ -1618,7 +1664,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 const wideAssistantShell = showReasoning || assistantInvocations.length > 0;
 
                 return (
-                  <div key={message.message_id ?? `assistant-${idx}`} className="flex w-full justify-start">
+                  <div key={message.message_id ?? `assistant-${messageIndex}`} className="flex w-full justify-start">
                     <div
                       className={classNames(
                         "flex max-w-[85%] min-w-0 flex-col gap-3",
@@ -1748,11 +1794,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               }
 
               if (message.role === "tool") {
-                if (toolRenderState.linkedToolMessageIndexes.has(idx)) {
+                if (toolRenderState.linkedToolMessageIndexes.has(messageIndex)) {
                   return null;
                 }
 
-                const invocation = toolRenderState.orphanInvocationsByIndex.get(idx);
+                const invocation = toolRenderState.orphanInvocationsByIndex.get(messageIndex);
                 if (!invocation) {
                   return null;
                 }
@@ -1771,7 +1817,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               }
 
               return (
-                <div key={message.message_id ?? `user-${idx}`} className="flex justify-end">
+                <div key={message.message_id ?? `user-${messageIndex}`} className="flex justify-end">
                   <div className="max-w-[85%] rounded-3xl bg-zinc-100 px-4 py-3 text-sm leading-relaxed text-zinc-900 shadow-[0_12px_40px_rgba(0,0,0,0.18)]">
                     <pre className="whitespace-pre-wrap font-sans">{message.content}</pre>
                   </div>
