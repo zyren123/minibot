@@ -55,6 +55,7 @@ def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[s
         "base_url": "http://example.test",
         "model": "gpt-test",
         "stream_enabled": True,
+        "teams_enabled": False,
         "tool_plugins": [tool_plugin_path],
         "skills_disabled": ["some-skill"],
         "mcp_overrides": {"example": True},
@@ -68,6 +69,7 @@ def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[s
     assert cfg2["base_url"] == "http://example.test"
     assert cfg2["model"] == "gpt-test"
     assert cfg2["stream_enabled"] is True
+    assert cfg2["teams_enabled"] is False
     assert cfg2["tool_plugins"] and cfg2["tool_plugins"][0].endswith("plugins.py")
     assert cfg2["skills_disabled"] == ["some-skill"]
     assert cfg2["mcp_overrides"] == {"example": True}
@@ -95,6 +97,32 @@ def test_default_bot_legacy_name_is_normalized_to_minibot(server_env: dict[str, 
 
     cfg = client.get("/api/bots/default/config").json()
     assert cfg["name"] == "Minibot"
+
+
+@pytest.mark.asyncio
+async def test_build_bot_config_applies_persisted_teams_enabled_and_global_upper_bound(
+    server_env: dict[str, Path],
+) -> None:
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    created = await manager.create_bot(name="Team Toggle Bot")
+    bot_id = created["bot_id"]
+
+    assert manager.bot_config_snapshot(bot_id)["teams_enabled"] is True
+
+    await manager.update_bot_config(bot_id, {"teams_enabled": False})
+    assert manager.bot_config_snapshot(bot_id)["teams_enabled"] is False
+
+    cfg, _data = manager._build_bot_config(bot_id)
+    assert cfg.teams.enabled is False
+
+    manager._base_config.teams.enabled = False
+    await manager.update_bot_config(bot_id, {"teams_enabled": True})
+
+    cfg2, _data2 = manager._build_bot_config(bot_id)
+    assert manager.bot_config_snapshot(bot_id)["teams_enabled"] is True
+    assert cfg2.teams.enabled is False
 
 
 def test_skills_endpoint_uses_configured_skills_dirs(client: TestClient, server_env: dict[str, Path]) -> None:
@@ -834,6 +862,148 @@ def test_stream_endpoint_forwards_todo_snapshot_events(
     assert "event: todo_snapshot" in stream.text
     assert '"title": "Current plan"' in stream.text
     assert '"status": "active"' in stream.text
+
+
+def test_stream_endpoint_forwards_ask_user_question_events(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Ask Bot"}).json()["bot_id"]
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+
+        class FakeBot:
+            async def stream(
+                self,
+                prompt: str,
+                *,
+                session_id: str | None = None,
+                reasoning_effort: str | None = None,
+            ):
+                yield {
+                    "type": "ask_user_question",
+                    "question_id": "ask-call-1",
+                    "prompt": "Which task?",
+                    "options": [{"label": "Shipping", "value": "shipping"}],
+                    "allow_free_text": True,
+                    "required": True,
+                }
+                yield {
+                    "type": "assistant_end",
+                    "message_id": "msg-assistant-2",
+                    "content": "done",
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    stream = client.post(
+        f"/api/bots/{bot_id}/stream",
+        json={"session_id": "sess-stream", "prompt": "hello stream"},
+    )
+    assert stream.status_code == 200, stream.text
+    assert "event: ask_user_question" in stream.text
+    assert '"question_id": "ask-call-1"' in stream.text
+    assert '"prompt": "Which task?"' in stream.text
+
+
+def test_pending_question_snapshot_and_answer_submission_endpoints(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Answer Bot"}).json()["bot_id"]
+    seen: dict[str, object] = {}
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+        assert requested_session_id == "sess-answer"
+
+        class FakeBot:
+            def pending_question(self):
+                return {
+                    "question_id": "ask-call-1",
+                    "message_id": "msg-assistant-1",
+                    "prompt": "Which queue?",
+                    "options": [
+                        {"label": "Shipping", "value": "shipping"},
+                        {"label": "Billing", "value": "billing"},
+                    ],
+                    "allow_free_text": True,
+                    "required": True,
+                }
+
+            async def submit_user_answer(
+                self,
+                *,
+                question_id: str,
+                answer_text: str,
+                selected_option_value: str | None = None,
+            ):
+                seen["answer"] = {
+                    "question_id": question_id,
+                    "answer_text": answer_text,
+                    "selected_option_value": selected_option_value,
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    pending = client.get(f"/api/bots/{bot_id}/sessions/sess-answer/pending-question")
+    assert pending.status_code == 200, pending.text
+    assert pending.json()["question_id"] == "ask-call-1"
+    assert pending.json()["message_id"] == "msg-assistant-1"
+    assert pending.json()["options"][1]["value"] == "billing"
+
+    submitted = client.post(
+        f"/api/bots/{bot_id}/sessions/sess-answer/answer",
+        json={
+            "question_id": "ask-call-1",
+            "answer_text": "Shipping",
+            "selected_option_value": "shipping",
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json() == {"status": "ok"}
+    assert seen["answer"] == {
+        "question_id": "ask-call-1",
+        "answer_text": "Shipping",
+        "selected_option_value": "shipping",
+    }
+
+
+def test_pending_question_endpoint_returns_null_when_idle(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Idle Bot"}).json()["bot_id"]
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+        assert requested_session_id == "sess-idle"
+
+        class FakeBot:
+            def pending_question(self):
+                return None
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    pending = client.get(f"/api/bots/{bot_id}/sessions/sess-idle/pending-question")
+    assert pending.status_code == 200, pending.text
+    assert pending.json() is None
 
 
 def test_provider_models_can_be_deleted_in_batch(client: TestClient) -> None:

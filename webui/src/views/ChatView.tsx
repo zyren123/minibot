@@ -6,6 +6,7 @@ import type {
   AvailableModel,
   BotConfig,
   Message,
+  PendingQuestion,
   ReasoningEffort,
   SessionMeta,
   StreamEvent,
@@ -18,9 +19,11 @@ import {
   deleteSession,
   deleteSessionMessage,
   getBotConfig,
+  getPendingQuestion,
   listAvailableModels,
   listSessions,
   loadSession,
+  submitPendingQuestionAnswer,
   streamRegenerateSessionMessage,
   streamChat,
   updateBotConfig,
@@ -116,6 +119,47 @@ function removeAssistantTurn(messages: Message[], messageId: string, preserveUse
   return [...messages.slice(0, turnStart), ...messages.slice(bounds.turnEnd)];
 }
 
+function cleanPendingChoiceLabel(value: string) {
+  return value.replace(/\s+/g, " ").trim().replace(/[，,；;]+$/, "");
+}
+
+function derivePendingQuestionFromPrompt(question: PendingQuestion | null) {
+  if (!question) return null;
+  if (question.options.length > 0) return question;
+
+  const text = question.prompt.trim();
+  if (!text) return question;
+
+  const matches = Array.from(text.matchAll(/(^|[\s\n])(\d+)[.)、．]\s*/g));
+  if (matches.length < 2) return question;
+
+  const points = matches.map((match) => {
+    const start = match.index ?? 0;
+    const marker = match[0] ?? "";
+    return { start, contentStart: start + marker.length };
+  });
+  const intro = text.slice(0, points[0].start).trimEnd();
+  if (!intro || !(intro.endsWith(":") || intro.endsWith("：") || intro.includes("\n"))) {
+    return question;
+  }
+
+  const options = points
+    .map((point, index) => {
+      const end = index + 1 < points.length ? points[index + 1].start : text.length;
+      const label = cleanPendingChoiceLabel(text.slice(point.contentStart, end));
+      return label ? { label, value: label } : null;
+    })
+    .filter((option): option is { label: string; value: string } => Boolean(option && option.label.length <= 180));
+
+  if (options.length < 2) return question;
+
+  return {
+    ...question,
+    prompt: intro.endsWith(":") || intro.endsWith("：") ? intro.slice(0, -1).trimEnd() : intro,
+    options,
+  };
+}
+
 function usageParts(usage: Usage | null | undefined) {
   const total = usage?.total_tokens ?? null;
   const prompt = usage?.prompt_tokens ?? null;
@@ -144,17 +188,16 @@ type ContextSnapshot = {
 
 function normalizeTodoSnapshot(raw: StreamEvent["todo"] | undefined): TodoSnapshot | null {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.items)) return null;
-  const items = raw.items
-    .map((item, index) => {
-      if (!item || typeof item !== "object") return null;
-      const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : `todo-${index + 1}`;
-      const label = typeof item.label === "string" ? item.label.trim() : "";
-      const status = item.status;
-      if (!label || (status !== "pending" && status !== "active" && status !== "done")) return null;
-      const detail = typeof item.detail === "string" && item.detail.trim() ? item.detail.trim() : undefined;
-      return { id, label, status, detail };
-    })
-    .filter((item): item is TodoSnapshot["items"][number] => Boolean(item));
+  const items: TodoSnapshot["items"] = [];
+  raw.items.forEach((item, index) => {
+    if (!item || typeof item !== "object") return;
+    const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : `todo-${index + 1}`;
+    const label = typeof item.label === "string" ? item.label.trim() : "";
+    const status = item.status;
+    if (!label || (status !== "pending" && status !== "active" && status !== "done")) return;
+    const detail = typeof item.detail === "string" && item.detail.trim() ? item.detail.trim() : undefined;
+    items.push(detail ? { id, label, status, detail } : { id, label, status });
+  });
   const completed =
     typeof raw.completed === "number" && Number.isFinite(raw.completed)
       ? raw.completed
@@ -305,13 +348,14 @@ function buildToolRenderState(messages: Message[]): ToolRenderState {
       const toolName = toolCall.function?.name?.trim() || "";
       const result = toolCallId ? toolResultsByCallId.get(toolCallId) : undefined;
       if (result) linkedToolMessageIndexes.add(result.index);
+      const status: ToolInvocationStatus = result ? (result.message.is_error ? "error" : "done") : "running";
       return {
         key: toolCallId ?? `${message.message_id ?? `assistant-${index}`}-tool-${toolIndex}`,
         toolCallId,
         name: toolName,
         argumentsText: formatToolArguments(toolCall.function?.arguments),
         outputText: result?.message.content ?? "",
-        status: result ? (result.message.is_error ? "error" : "done") : "running",
+        status,
       };
     });
 
@@ -448,8 +492,14 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [mobileTodoOpen, setMobileTodoOpen] = useState(false);
   const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+  const [pendingAnswerDraft, setPendingAnswerDraft] = useState("");
+  const [pendingCustomOpen, setPendingCustomOpen] = useState(false);
+  const [submittingAnswer, setSubmittingAnswer] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionStateVersionRef = useRef(0);
 
   const sortedSessions = useMemo(
     () => [...sessions].sort((a, b) => b.modified_at.localeCompare(a.modified_at)),
@@ -519,14 +569,23 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
   const toolRenderState = useMemo(() => buildToolRenderState(messages), [messages]);
 
-  const chatBusy = streaming;
+  const chatBusy = streaming || submittingAnswer;
   const chatBlocked = Boolean(botConfig && (!botConfig.enabled || !botConfig.chat_ready));
   const blockedReason =
     botConfig?.chat_disabled_reason ?? (botConfig?.enabled === false ? t("chat.fallbackDisabledReason") : null);
+  const awaitingUserAnswer = Boolean(pendingQuestion);
+  const pendingQuestionMessageId = pendingQuestion?.message_id ?? null;
+  const showPendingQuestionFallback = Boolean(
+    pendingQuestion && (!pendingQuestionMessageId || !messages.some((item) => item.role === "assistant" && item.message_id === pendingQuestionMessageId)),
+  );
 
   function clearTodoState() {
     setTodoSnapshot(null);
     setMobileTodoOpen(false);
+  }
+
+  function markSessionStateDirty() {
+    sessionStateVersionRef.current += 1;
   }
 
   function syncContextSnapshot(targetSessionId: string, nextMessages: Message[]) {
@@ -568,20 +627,32 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     return created.session_id;
   }
 
-  async function selectSession(id: string) {
-    const sess = await loadSession(botId, id);
+  async function selectSession(id: string, options?: { force?: boolean }) {
+    const expectedVersion = sessionStateVersionRef.current;
+    const [sess, question] = await Promise.all([loadSession(botId, id), getPendingQuestion(botId, id)]);
+    if (sessionIdRef.current !== id) return;
+    if (!options?.force && sessionStateVersionRef.current !== expectedVersion) return;
     setReasoningOpenById({});
     setToolOpenById({});
     clearTodoState();
     setMessages(sess.messages);
     syncContextSnapshot(id, sess.messages);
+    setPendingQuestion(derivePendingQuestionFromPrompt(question));
+    if (!question) {
+      setPendingAnswerDraft("");
+      setPendingCustomOpen(false);
+    }
   }
 
   async function startNewSession() {
     const result = await createSession(botId);
+    markSessionStateDirty();
     setReasoningOpenById({});
     setToolOpenById({});
     clearTodoState();
+    setPendingQuestion(null);
+    setPendingAnswerDraft("");
+    setPendingCustomOpen(false);
     setMessages([]);
     setSessionId(result.session_id);
     setMobileSessionsOpen(false);
@@ -589,6 +660,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    markSessionStateDirty();
     setSessionId(null);
     setMessages([]);
     setContextBySession({});
@@ -598,6 +674,9 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setReasoningOpenById({});
     setToolOpenById({});
     clearTodoState();
+    setPendingQuestion(null);
+    setPendingAnswerDraft("");
+    setPendingCustomOpen(false);
     setMobileSessionsOpen(false);
     Promise.all([refreshSessions(botId), refreshBotState(botId)]).catch((err) => setStatus(errorMessage(err)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -633,6 +712,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "assistant_start") {
+      markSessionStateDirty();
       setMessages((prev) =>
         updateAssistantMessage(
           prev,
@@ -655,6 +735,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "assistant_reasoning_delta") {
+      markSessionStateDirty();
       setMessages((prev) =>
         updateAssistantMessage(
           prev,
@@ -678,6 +759,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "assistant_delta") {
+      markSessionStateDirty();
       setMessages((prev) =>
         updateAssistantMessage(
           prev,
@@ -701,6 +783,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "assistant_end") {
+      markSessionStateDirty();
       setMessages((prev) =>
         updateAssistantMessage(
           prev,
@@ -728,11 +811,62 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       return;
     }
 
+    if (ev.type === "ask_user_question") {
+      const nextQuestion = derivePendingQuestionFromPrompt({
+        question_id: ev.question_id ?? "",
+        message_id: ev.message_id ?? null,
+        prompt: ev.prompt ?? "",
+        options: ev.options ?? [],
+        allow_free_text: Boolean(ev.allow_free_text),
+        required: Boolean(ev.required),
+      });
+      markSessionStateDirty();
+      setPendingQuestion(nextQuestion);
+      setPendingAnswerDraft("");
+      setPendingCustomOpen(false);
+      setMessages((prev) =>
+        updateAssistantMessage(
+          prev,
+          ev.message_id,
+          (current) => ({
+            ...current,
+            message_id: ev.message_id ?? current.message_id ?? null,
+            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
+            content: current.content?.trim() ? current.content : nextQuestion?.prompt ?? ev.prompt ?? current.content,
+          }),
+          () => ({
+            role: "assistant",
+            content: nextQuestion?.prompt ?? ev.prompt ?? "",
+            message_id: ev.message_id ?? null,
+            parent_user_message_id: ev.parent_user_message_id ?? null,
+            reasoning: "",
+          }),
+        ),
+      );
+      return;
+    }
+
+    if (ev.type === "ask_user_answer_received") {
+      markSessionStateDirty();
+      setPendingQuestion(null);
+      setPendingAnswerDraft("");
+      setPendingCustomOpen(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: ev.answer_text ?? "",
+        },
+      ]);
+      return;
+    }
+
     if (ev.type === "tool_call") {
       return;
     }
 
     if (ev.type === "tool_result") {
+      markSessionStateDirty();
       setMessages((prev) => [
         ...prev,
         {
@@ -750,19 +884,21 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       const targetSessionId = ev.session_id ?? sessionId;
       const usage = normalizeUsage(ev.data?.usage);
       const contextUsage = normalizeUsage(ev.data?.context_usage);
-      if (targetSessionId && contextUsage?.total_tokens != null) {
+      const contextTokens = contextUsage?.total_tokens;
+      const usageTokens = usage?.total_tokens;
+      if (targetSessionId && contextTokens != null) {
         setContextBySession((prev) => ({
           ...prev,
           [targetSessionId]: {
-            totalTokens: contextUsage.total_tokens,
+            totalTokens: contextTokens,
             compacted: Boolean(ev.data?.context_compacted),
           },
         }));
-      } else if (targetSessionId && usage?.total_tokens != null) {
+      } else if (targetSessionId && usageTokens != null) {
         setContextBySession((prev) => ({
           ...prev,
           [targetSessionId]: {
-            totalTokens: usage.total_tokens,
+            totalTokens: usageTokens,
             compacted: false,
           },
         }));
@@ -771,14 +907,102 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
   }
 
+  function renderPendingQuestionCard(question: PendingQuestion) {
+    const hasPresetOptions = question.options.length > 0;
+    const showCustomComposer = question.allow_free_text && (!hasPresetOptions || pendingCustomOpen);
+
+    return (
+      <div className="rounded-[26px] border border-zinc-800 bg-[linear-gradient(180deg,rgba(22,22,22,0.98),rgba(12,12,12,0.98))] shadow-[0_14px_42px_rgba(0,0,0,0.24)]">
+        <div className="px-4 py-4 sm:px-5">
+          <div className="min-w-0">
+            <div className="inline-flex items-center gap-2 rounded-full border border-amber-200/10 bg-amber-100/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-amber-100/75">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.45)]" />
+              {t("chat.askUser.title")}
+            </div>
+            <div className="mt-3 max-w-2xl text-sm font-semibold leading-6 text-zinc-50">{question.prompt}</div>
+          </div>
+          {hasPresetOptions ? (
+            <div className="mt-4 grid gap-2 lg:grid-cols-2">
+              {question.options.map((option, index) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="group rounded-[18px] border border-zinc-800 bg-zinc-950 px-3.5 py-3 text-left transition hover:border-amber-200/20 hover:bg-zinc-900 disabled:opacity-50"
+                  onClick={() => void onSubmitPendingAnswer(option)}
+                  disabled={submittingAnswer}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-amber-200/12 bg-amber-100/5 text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-100/70">
+                      {(index + 1).toString().padStart(2, "0")}
+                    </div>
+                    <div className="min-w-0 flex-1 text-sm font-medium leading-6 text-zinc-100">{option.label}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {question.allow_free_text && hasPresetOptions && !pendingCustomOpen ? (
+            <div className="mt-3 flex items-center">
+              <button
+                type="button"
+                className="rounded-full border border-dashed border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition hover:border-amber-200/25 hover:text-zinc-100 disabled:opacity-50"
+                onClick={() => setPendingCustomOpen(true)}
+                disabled={submittingAnswer}
+              >
+                {t("chat.askUser.custom")}
+              </button>
+            </div>
+          ) : null}
+          {showCustomComposer ? (
+            <div className={hasPresetOptions ? "mt-3 rounded-[20px] border border-zinc-800 bg-zinc-950/90 p-3" : "mt-4 rounded-[20px] border border-zinc-800 bg-zinc-950/90 p-3"}>
+              <div className="flex flex-col gap-2.5 sm:flex-row sm:items-end">
+                <textarea
+                  value={pendingAnswerDraft}
+                  onChange={(e) => setPendingAnswerDraft(e.target.value)}
+                  placeholder={t("chat.askUser.customPlaceholder")}
+                  className="min-h-[72px] w-full resize-y rounded-[18px] border border-zinc-800 bg-zinc-950 px-3.5 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-200/15 disabled:opacity-60"
+                  disabled={submittingAnswer}
+                />
+                <div className="flex gap-2">
+                  {hasPresetOptions ? (
+                    <button
+                      type="button"
+                      className="rounded-[18px] border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm font-semibold text-zinc-200 hover:bg-zinc-900 disabled:opacity-50"
+                      onClick={() => {
+                        setPendingCustomOpen(false);
+                        setPendingAnswerDraft("");
+                      }}
+                      disabled={submittingAnswer}
+                    >
+                      {t("chat.askUser.cancel")}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="rounded-[18px] bg-amber-200 px-3.5 py-2.5 text-sm font-semibold text-zinc-950 hover:bg-amber-100 disabled:opacity-50"
+                    onClick={() => void onSubmitPendingAnswer()}
+                    disabled={submittingAnswer || !pendingAnswerDraft.trim()}
+                  >
+                    {t("chat.askUser.submit")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   async function onSend() {
-    if (!prompt.trim() || chatBusy || chatBlocked) return;
+    if (!prompt.trim() || chatBusy || chatBlocked || awaitingUserAnswer) return;
     setStatus(null);
     setStreaming(true);
     clearTodoState();
 
     const nextPrompt = prompt.trim();
     const sid = await ensureSession();
+    markSessionStateDirty();
     setMessages((prev) => [...prev, { role: "user", content: nextPrompt }]);
     setPrompt("");
 
@@ -787,13 +1011,32 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         applyStreamEvent(ev);
       }
       await refreshSessions(botId);
-      await selectSession(sid);
+      await selectSession(sid, { force: true });
       await refreshBotState(botId);
     } catch (err) {
       setStatus(errorMessage(err));
       await refreshBotState(botId).catch(() => null);
     } finally {
       setStreaming(false);
+    }
+  }
+
+  async function onSubmitPendingAnswer(option?: { label: string; value: string }) {
+    if (!sessionId || !pendingQuestion || submittingAnswer) return;
+    const answerText = option ? option.label : pendingAnswerDraft.trim();
+    if (!answerText) return;
+    setSubmittingAnswer(true);
+    setStatus(null);
+    try {
+      await submitPendingQuestionAnswer(botId, sessionId, {
+        question_id: pendingQuestion.question_id,
+        answer_text: answerText,
+        selected_option_value: option?.value ?? null,
+      });
+    } catch (err) {
+      setStatus(errorMessage(err));
+    } finally {
+      setSubmittingAnswer(false);
     }
   }
 
@@ -845,6 +1088,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     clearTodoState();
     try {
       let interrupted = false;
+      markSessionStateDirty();
       setReasoningOpenById({});
       setToolOpenById({});
       setMessages(optimisticMessages);
@@ -856,7 +1100,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         applyStreamEvent(ev);
       }
       await refreshSessions(botId);
-      await selectSession(sessionId);
+      await selectSession(sessionId, { force: true });
       await refreshBotState(botId);
       if (!interrupted) {
         setStatus(t("chat.status.regeneratedReply"));
@@ -864,8 +1108,9 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     } catch (err) {
       setStatus(errorMessage(err));
       try {
-        await selectSession(sessionId);
+        await selectSession(sessionId, { force: true });
       } catch {
+        markSessionStateDirty();
         setMessages(previousMessages);
         syncContextSnapshot(sessionId, previousMessages);
       }
@@ -1353,14 +1598,16 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               if (message.role === "assistant") {
                 const assistantInvocations = toolRenderState.assistantInvocationsByIndex.get(idx) ?? [];
                 const usage = usageParts(message.usage);
+                const messageId = message.message_id ?? null;
+                const inlinePendingQuestion =
+                  pendingQuestion && messageId && pendingQuestion.message_id === messageId ? pendingQuestion : null;
                 const showAssistantCard = hasVisibleAssistantContent(message) || Boolean(usage);
-                if (!showAssistantCard && assistantInvocations.length === 0) {
+                if (!showAssistantCard && assistantInvocations.length === 0 && !inlinePendingQuestion) {
                   return null;
                 }
 
                 const reasoningText = message.reasoning?.trim() ?? "";
                 const showReasoning = Boolean(reasoningText && message.message_id);
-                const messageId = message.message_id ?? null;
                 const actionBusy = Boolean(messageId && messageActionId === messageId);
                 const canRegenerate = Boolean(
                   messageId && latestRegeneratableAssistantId === messageId && !chatBusy,
@@ -1443,24 +1690,28 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                               {t("chat.message.copy")}
                             </button>
                             {canRegenerate ? (
-                              <button
-                                type="button"
-                                className="rounded-full border border-zinc-800 px-3 py-1 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-40"
-                                onClick={() => void onRegenerateMessage(messageId)}
-                                disabled={actionBusy}
-                              >
-                                {t("chat.message.regenerate")}
-                              </button>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-zinc-800 px-3 py-1 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-40"
+                                  onClick={() => {
+                                    if (messageId) void onRegenerateMessage(messageId);
+                                  }}
+                                  disabled={actionBusy}
+                                >
+                                  {t("chat.message.regenerate")}
+                                </button>
                             ) : null}
                             {canDelete ? (
-                              <button
-                                type="button"
-                                className="rounded-full border border-zinc-800 px-3 py-1 text-zinc-300 hover:border-red-500/40 hover:text-red-200 disabled:opacity-40"
-                                onClick={() => void onDeleteMessage(messageId)}
-                                disabled={actionBusy}
-                              >
-                                {t("chat.message.delete")}
-                              </button>
+                                <button
+                                  type="button"
+                                  className="rounded-full border border-zinc-800 px-3 py-1 text-zinc-300 hover:border-red-500/40 hover:text-red-200 disabled:opacity-40"
+                                  onClick={() => {
+                                    if (messageId) void onDeleteMessage(messageId);
+                                  }}
+                                  disabled={actionBusy}
+                                >
+                                  {t("chat.message.delete")}
+                                </button>
                             ) : null}
                             {usage ? (
                               <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -1480,6 +1731,8 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                           </div>
                         </div>
                       ) : null}
+
+                      {inlinePendingQuestion ? renderPendingQuestionCard(inlinePendingQuestion) : null}
 
                       {assistantInvocations.map((invocation) => (
                         <ToolInvocationPanel
@@ -1535,14 +1788,18 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         </div>
 
         <div className="border-t border-zinc-800 bg-zinc-950/95 px-5 py-4">
+          {pendingQuestion && showPendingQuestionFallback ? (
+            <div className="mx-auto mb-3 max-w-3xl">{renderPendingQuestionCard(pendingQuestion)}</div>
+          ) : null}
+
           <div className="mx-auto flex max-w-4xl items-end gap-3">
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder={chatBlocked ? t("chat.input.blocked") : t("chat.input.ready")}
+              placeholder={chatBlocked ? t("chat.input.blocked") : awaitingUserAnswer ? t("chat.input.answerPending") : t("chat.input.ready")}
               className="min-h-[48px] w-full resize-none rounded-3xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600 disabled:opacity-60"
               rows={1}
-              disabled={chatBusy || chatBlocked}
+              disabled={chatBusy || chatBlocked || awaitingUserAnswer}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -1554,7 +1811,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               type="button"
               className="rounded-3xl bg-zinc-100 px-5 py-3 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
               onClick={() => void onSend()}
-              disabled={chatBusy || chatBlocked || !prompt.trim()}
+              disabled={chatBusy || chatBlocked || awaitingUserAnswer || !prompt.trim()}
             >
               {t("chat.input.send")}
             </button>

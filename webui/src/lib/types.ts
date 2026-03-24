@@ -3,6 +3,8 @@ export type StreamEventType =
   | "assistant_reasoning_delta"
   | "assistant_delta"
   | "assistant_end"
+  | "ask_user_question"
+  | "ask_user_answer_received"
   | "todo_snapshot"
   | "tool_call"
   | "tool_result"
@@ -40,6 +42,13 @@ export type StreamEvent = {
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   todo?: TodoSnapshot;
+  question_id?: string;
+  prompt?: string;
+  options?: Array<{ label: string; value: string }>;
+  allow_free_text?: boolean;
+  required?: boolean;
+  answer_text?: string;
+  selected_option_value?: string | null;
 
   tool_call_id?: string;
   tool_name?: string;
@@ -112,6 +121,15 @@ export type RegeneratedMessageResult = {
   regenerated_from_message_id: string;
 };
 
+export type PendingQuestion = {
+  question_id: string;
+  message_id?: string | null;
+  prompt: string;
+  options: Array<{ label: string; value: string }>;
+  allow_free_text: boolean;
+  required: boolean;
+};
+
 export type Config = {
   base_url: string | null;
   model: string | null;
@@ -149,6 +167,7 @@ export type BotConfig = {
   max_context_tokens: number;
   auto_compact_threshold_tokens: number;
   stream_enabled: boolean;
+  teams_enabled: boolean;
   api_key_masked: string | null;
   tool_plugins: string[];
   skills_disabled: string[];

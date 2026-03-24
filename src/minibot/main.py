@@ -18,6 +18,9 @@ from .ui.cmd_mcp import handle_mcp_cmd
 from .ui.cmd_model import handle_model_cmd
 from .ui.cmd_skills import handle_skills_cmd, load_skills_disabled
 from .ui.cmd_session import handle_session_cmd
+from .ui.cmd_team import handle_team_cmd
+from .ui.ask_user import ask_user_question_cli
+from .server.bots import BotStore, DEFAULT_BOT_ID
 
 
 SLASH_COMMANDS: dict[str, str] = {
@@ -29,6 +32,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/agent": "Subagent management: /agent [list|info|enable|disable|create|delete]",
     "/mcp": "MCP server management: /mcp [list]",
     "/model": "Model management: /model [config]",
+    "/team": "Team tools: /team [status|on|off]",
     "/session": "Session management: /session [list|new|load|delete|info]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
@@ -187,6 +191,11 @@ async def repl(agent: Agent) -> None:
             lines.append(line)
         return "\n".join(lines).strip()
 
+    async def _ask_user_handler(question: dict[str, object]) -> dict[str, object]:
+        return await ask_user_question_cli(question, prompt_fn=_prompt)
+
+    agent.ask_user_handler = _ask_user_handler
+
     try:
         while True:
             try:
@@ -290,6 +299,14 @@ async def repl(agent: Agent) -> None:
                         cmd_args, app_home, _model_prompt,
                     )
                     continue
+                if cmd == "/team":
+                    cmd_args = user_input.strip()[len("/team"):].strip()
+                    await handle_team_cmd(
+                        cmd_args,
+                        agent,
+                        global_enabled=bool(getattr(agent, "team_tools_global_enabled", True)),
+                    )
+                    continue
                 if cmd == "/session":
                     cmd_args = user_input.strip()[len("/session"):].strip()
                     action = await handle_session_cmd(
@@ -348,7 +365,12 @@ def main() -> None:
     project_root = resolve_project_root(workdir)
     _setup_readline(app_home / "history" / "history")
     config = load_config(workdir=workdir, app_home=app_home, project_root=project_root)
+    global_teams_enabled = bool(config.teams.enabled)
+    bot_store = BotStore(app_home=app_home)
+    default_bot = bot_store.read_bot_json(DEFAULT_BOT_ID)
+    config.teams.enabled = global_teams_enabled and bool(default_bot.get("teams_enabled", True))
     agent = Agent(config, disabled_skills=load_skills_disabled(app_home))
+    agent.team_tools_global_enabled = global_teams_enabled  # type: ignore[attr-defined]
 
     asyncio.run(repl(agent))
 

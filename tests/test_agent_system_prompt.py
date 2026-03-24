@@ -63,6 +63,16 @@ def test_system_prompt_includes_production_operating_contract(tmp_path):
     assert "Do not claim success until the relevant checks have actually passed." in prompt
 
 
+def test_system_prompt_instructs_structured_ask_user_questions(tmp_path):
+    agent = _make_agent(tmp_path)
+
+    prompt = agent.system_prompt
+
+    assert "When using `askuserquestion`, ask exactly one focused question." in prompt
+    assert "Prefer 3-6 concise `options` whenever the user can plausibly choose from a small set of answers." in prompt
+    assert "Only omit `options` when the answer is genuinely open-ended free text." in prompt
+
+
 def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(tmp_path):
     app_home = tmp_path / ".minibot"
     memory_dir = app_home / "memory"

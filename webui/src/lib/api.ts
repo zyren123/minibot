@@ -10,6 +10,7 @@ import type {
   FetchedModel,
   MCPServerInfo,
   Message,
+  PendingQuestion,
   PlatformConnection,
   ProviderRecord,
   ReasoningEffort,
@@ -220,6 +221,27 @@ export async function loadSession(
 ): Promise<SessionData> {
   return apiGet<SessionData>(
     `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export async function getPendingQuestion(botId: string, sessionId: string): Promise<PendingQuestion | null> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/pending-question`,
+  );
+  if (resp.status === 204) return null;
+  if (!resp.ok) throw new Error(await resp.text());
+  const payload = (await resp.json()) as PendingQuestion | null;
+  return payload;
+}
+
+export async function submitPendingQuestionAnswer(
+  botId: string,
+  sessionId: string,
+  body: { question_id: string; answer_text: string; selected_option_value?: string | null },
+): Promise<{ status: string }> {
+  return apiPost<{ status: string }>(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/answer`,
+    body,
   );
 }
 

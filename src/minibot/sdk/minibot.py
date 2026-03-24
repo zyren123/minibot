@@ -101,6 +101,8 @@ class Minibot:
         )
 
         self._active_interrupt_queue: "asyncio.Queue[None] | None" = None
+        self._pending_question: dict[str, Any] | None = None
+        self._pending_question_future: "asyncio.Future[dict[str, Any]] | None" = None
 
         self.agent = Agent(
             config=self.config,
@@ -111,6 +113,7 @@ class Minibot:
             disabled_skills=disabled_skills,
             allow_subagent_delegation=allow_subagent_delegation,
             allow_team_tools=allow_team_tools,
+            ask_user_handler=self._wait_for_user_answer,
         )
 
         if tools:
@@ -207,12 +210,54 @@ class Minibot:
     def cancel(self) -> None:
         """Best-effort cancel of the active generation (if any)."""
         q = self._active_interrupt_queue
-        if q is None:
-            return
+        if q is not None:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+        pending = self._pending_question_future
+        if pending is not None and not pending.done():
+            pending.set_exception(UserInterruptedError("Interrupted while waiting for user answer"))
+
+    async def _wait_for_user_answer(self, question: dict[str, Any]) -> dict[str, Any]:
+        if self._pending_question_future is not None and not self._pending_question_future.done():
+            raise RuntimeError("Another askuserquestion interaction is already pending")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending_question = dict(question)
+        self._pending_question_future = future
         try:
-            q.put_nowait(None)
-        except asyncio.QueueFull:
-            return
+            return await future
+        finally:
+            self._pending_question = None
+            self._pending_question_future = None
+
+    def pending_question(self) -> dict[str, Any] | None:
+        if self._pending_question is None:
+            return None
+        return dict(self._pending_question)
+
+    async def submit_user_answer(
+        self,
+        *,
+        question_id: str,
+        answer_text: str,
+        selected_option_value: str | None = None,
+    ) -> None:
+        pending = self._pending_question
+        future = self._pending_question_future
+        if pending is None or future is None:
+            raise ValueError("No askuserquestion interaction is pending")
+        if str(pending.get("question_id") or "") != str(question_id):
+            raise ValueError("Pending question id does not match")
+        if future.done():
+            raise ValueError("Pending question is already resolved")
+        future.set_result(
+            {
+                "answer_text": answer_text,
+                "selected_option_value": selected_option_value,
+            }
+        )
 
     async def chat(
         self,

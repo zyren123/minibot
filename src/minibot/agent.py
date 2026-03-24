@@ -14,7 +14,9 @@ from .config import Config, get_config
 from .core.client import LLMClient
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
+from .tools.builtin.ask_user import normalize_ask_user_prompt_and_options
 from .tools.builtin import (
+    AskUserQuestionTool,
     BashTool,
     ReadFileTool,
     WriteFileTool,
@@ -56,6 +58,15 @@ from .utils.output import (
 )
 
 AgentRole = Literal["solo", "lead", "teammate"]
+_TEAM_TOOL_NAMES = (
+    "TeamCreate",
+    "TeamMembers",
+    "TeamTask",
+    "TeamMessage",
+    "TeamBroadcast",
+    "TeamWait",
+    "TeamShutdown",
+)
 
 
 class UserInterruptedError(Exception):
@@ -101,6 +112,7 @@ class Agent:
         member_id: str | None = None,
         allow_subagent_delegation: bool = True,
         allow_team_tools: bool = True,
+        ask_user_handler: Any = None,
     ):
         if role not in {"solo", "lead", "teammate"}:
             raise ValueError(f"Unknown role: {role}")
@@ -116,6 +128,7 @@ class Agent:
         self.member_id = member_id
         self.allow_subagent_delegation = bool(allow_subagent_delegation) and role != "teammate"
         self.allow_team_tools = bool(allow_team_tools)
+        self.ask_user_handler = ask_user_handler
         self.quiet_teammates = self.config.teams.quiet_teammates
         self.debug_teammate_output = self.config.teams.debug_teammate_output
         teammate_quiet = role == "teammate" and self.quiet_teammates and not self.debug_teammate_output
@@ -284,6 +297,7 @@ class Agent:
 
     def _register_tools(self) -> None:
         """Register all available tools."""
+        self.tool_registry.register(AskUserQuestionTool())
         self.tool_registry.register(BashTool(self.workdir, self.config.tools.timeout))
         self.tool_registry.register(ReadFileTool(self.workdir))
         self.tool_registry.register(WriteFileTool(self.workdir))
@@ -299,32 +313,62 @@ class Agent:
             self.tool_registry.register(MemoryReadTool(self.memory_manager))
             self.tool_registry.register(MemoryWriteTool(self.memory_manager))
 
-        if self.allow_team_tools and self.config.teams.enabled and self.team_runtime is not None:
-            self.tool_registry.register(TeamMembersTool(self.team_runtime))
-            self.tool_registry.register(
-                TeamTaskTool(self.team_runtime)
-            )
-            self.tool_registry.register(
-                TeamMessageTool(self.team_runtime)
-            )
-            self.tool_registry.register(
-                TeamBroadcastTool(self.team_runtime)
-            )
+        self._register_team_tools()
 
-            if self.role in {"solo", "lead"}:
-                self.tool_registry.register(
-                    TeamCreateTool(
-                        self.team_runtime,
-                        default_members=self.config.teams.default_members,
-                    )
+    def _unregister_team_tools(self) -> None:
+        for name in _TEAM_TOOL_NAMES:
+            self.tool_registry.unregister(name)
+
+    def _register_team_tools(self) -> None:
+        if not (self.allow_team_tools and self.config.teams.enabled and self.team_runtime is not None):
+            return
+
+        self.team_runtime.set_agent_factory(self._create_teammate_agent)
+        self.tool_registry.register(TeamMembersTool(self.team_runtime))
+        self.tool_registry.register(TeamTaskTool(self.team_runtime))
+        self.tool_registry.register(TeamMessageTool(self.team_runtime))
+        self.tool_registry.register(TeamBroadcastTool(self.team_runtime))
+
+        if self.role in {"solo", "lead"}:
+            self.tool_registry.register(
+                TeamCreateTool(
+                    self.team_runtime,
+                    default_members=self.config.teams.default_members,
                 )
-                self.tool_registry.register(
-                    TeamWaitTool(
-                        self.team_runtime,
-                        default_timeout_sec=self.config.teams.wait_timeout_sec,
-                    )
+            )
+            self.tool_registry.register(
+                TeamWaitTool(
+                    self.team_runtime,
+                    default_timeout_sec=self.config.teams.wait_timeout_sec,
                 )
-                self.tool_registry.register(TeamShutdownTool(self.team_runtime))
+            )
+            self.tool_registry.register(TeamShutdownTool(self.team_runtime))
+
+    async def set_team_tools_enabled(self, *, enabled: bool) -> None:
+        self._unregister_team_tools()
+        self.config.teams.enabled = bool(enabled)
+
+        if not self.config.teams.enabled:
+            if self.role in {"solo", "lead"} and self._owns_team_runtime and self.team_runtime is not None:
+                try:
+                    await self.team_runtime.cleanup_team(actor_role="lead")
+                except Exception:
+                    pass
+                self.team_runtime = None
+                self._owns_team_runtime = False
+            self.refresh_system_prompt()
+            return
+
+        if self.role in {"solo", "lead"} and self.team_runtime is None:
+            self.team_runtime = TeamRuntime(
+                config=self.config.teams,
+                workdir=self.workdir,
+                hook_manager=self.hook_manager,
+            )
+            self._owns_team_runtime = True
+
+        self._register_team_tools()
+        self.refresh_system_prompt()
 
     async def connect_mcp_servers(self) -> dict[str, Exception | None]:
         """Connect to all configured MCP servers."""
@@ -402,6 +446,14 @@ Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines).
 - Keep updates concise and unblock other teammates quickly."""
         return ""
 
+    def _build_ask_user_prompt_section(self) -> str:
+        """Describe how to use askuserquestion effectively."""
+        return """## Ask-User Tool Policy
+- When using `askuserquestion`, ask exactly one focused question.
+- Prefer 3-6 concise `options` whenever the user can plausibly choose from a small set of answers.
+- Only omit `options` when the answer is genuinely open-ended free text.
+- Do not combine category selection, examples, and follow-up detail requests in the same `prompt`. Ask the next question after the user answers."""
+
     def _build_system_prompt(self) -> str:
         """Build the default production-grade system prompt."""
         capability_lines = [
@@ -451,6 +503,7 @@ If instructions conflict, satisfy the highest-priority valid instruction and exp
 - Use `TodoWrite` for non-trivial multi-step work so progress stays explicit.
 - Verify meaningful claims with commands, tests, or direct inspection when available.
 - If a tool or command fails, diagnose the failure, adjust once if appropriate, and surface a concrete blocker instead of looping.""",
+            self._build_ask_user_prompt_section(),
             """## Planning and Execution
 - For substantial tasks, break the work into coherent steps before making changes.
 - Work incrementally and keep interfaces stable unless the task requires changing them.
@@ -476,6 +529,67 @@ You are now live. Await instructions and begin the loop.""",
             prompt = f"{prompt}\n\n{self.extra_system_prompt}\n"
 
         return prompt
+
+    @staticmethod
+    def _is_ask_user_tool(name: str) -> bool:
+        return name.strip().lower() == "askuserquestion"
+
+    @staticmethod
+    def _normalize_ask_user_payload(raw: dict[str, Any], *, question_id: str) -> dict[str, Any]:
+        prompt = str(raw.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("askuserquestion requires a non-empty prompt")
+
+        prompt, options = normalize_ask_user_prompt_and_options(prompt, raw.get("options") or [])
+
+        return {
+            "question_id": question_id,
+            "prompt": prompt,
+            "options": options,
+            "allow_free_text": bool(raw.get("allow_free_text", True)),
+            "required": bool(raw.get("required", True)),
+        }
+
+    @staticmethod
+    def _normalize_ask_user_answer(
+        answer: Any,
+        *,
+        question: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(answer, dict):
+            raise ValueError("askuserquestion handler must return a dict")
+
+        answer_text = str(answer.get("answer_text") or "").strip()
+        raw_selected = answer.get("selected_option_value")
+        selected_option_value = (
+            str(raw_selected).strip()
+            if raw_selected is not None and str(raw_selected).strip()
+            else None
+        )
+        option_values = {str(item.get("value")) for item in question.get("options") or []}
+
+        if selected_option_value is not None and selected_option_value not in option_values:
+            raise ValueError("askuserquestion selected option is invalid")
+        if not question.get("allow_free_text", True) and selected_option_value is None:
+            raise ValueError("askuserquestion requires choosing one of the provided options")
+        if question.get("required", True) and not answer_text and selected_option_value is None:
+            raise ValueError("askuserquestion requires a non-empty answer")
+        if selected_option_value is not None and not answer_text:
+            for item in question.get("options") or []:
+                if item.get("value") == selected_option_value:
+                    answer_text = str(item.get("label") or selected_option_value)
+                    break
+
+        return {
+            "answer_text": answer_text,
+            "selected_option_value": selected_option_value,
+        }
+
+    async def _resolve_ask_user_answer(self, question: dict[str, Any]) -> dict[str, Any]:
+        if self.ask_user_handler is None:
+            raise RuntimeError("askuserquestion requires an interactive frontend")
+        answer = await self.ask_user_handler(question)
+        return self._normalize_ask_user_answer(answer, question=question)
 
     async def _execute_tool_with_hooks(
         self,
@@ -1394,6 +1508,34 @@ You are now live. Await instructions and begin the loop.""",
                 messages.append(assistant_msg)
                 return messages
 
+            generic_tool_calls = [
+                tc for tc in tool_calls if not self._is_ask_user_tool(self._tool_call_name(tc))
+            ]
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": content,
+                "message_id": assistant_message_id,
+                "parent_user_message_id": parent_user_message_id,
+            }
+            if reasoning:
+                assistant_msg["reasoning"] = reasoning
+            if usage:
+                assistant_msg["usage"] = usage
+            if compaction_context_usage:
+                assistant_msg["context_usage"] = dict(compaction_context_usage)
+            if generic_tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": self._tool_call_id(tc) or f"tool-call-{i}",
+                        "type": "function",
+                        "function": {
+                            "name": self._tool_call_name(tc),
+                            "arguments": self._tool_call_arguments(tc),
+                        },
+                    }
+                    for i, tc in enumerate(generic_tool_calls, start=1)
+                ]
+            assistant_msg_appended = False
             tool_results: list[dict[str, str]] = []
             for i, tc in enumerate(tool_calls, start=1):
                 tc_id = self._tool_call_id(tc) or f"tool-call-{i}"
@@ -1457,6 +1599,59 @@ You are now live. Await instructions and begin the loop.""",
                         print()
                         print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({args_preview})")
 
+                if self._is_ask_user_tool(tc_name):
+                    output = await self._execute_tool_with_hooks(tc_name, tc_input)
+                    if parse_note:
+                        output = f"Warning: {parse_note}\n{output}"
+                    raw_payload = json.loads(output)
+                    question = self._normalize_ask_user_payload(raw_payload, question_id=tc_id)
+                    question["message_id"] = assistant_message_id
+
+                    if not assistant_msg_appended:
+                        assistant_msg["content"] = question["prompt"] if not content.strip() else content
+                        assistant_msg["interaction_type"] = "askuserquestion"
+                        assistant_msg["question_id"] = question["question_id"]
+                        assistant_msg["question_prompt"] = question["prompt"]
+                        assistant_msg["question_options"] = list(question["options"])
+                        assistant_msg["question_allow_free_text"] = question["allow_free_text"]
+                        assistant_msg["question_required"] = question["required"]
+                        assistant_msg["question_pending"] = True
+                        messages.append(assistant_msg)
+                        assistant_msg_appended = True
+
+                    await self._emit(
+                        {
+                            "type": "ask_user_question",
+                            "message_id": assistant_message_id,
+                            "parent_user_message_id": parent_user_message_id,
+                            "question_id": question["question_id"],
+                            "prompt": question["prompt"],
+                            "options": list(question["options"]),
+                            "allow_free_text": question["allow_free_text"],
+                            "required": question["required"],
+                        }
+                    )
+                    answer = await self._resolve_ask_user_answer(question)
+                    assistant_msg["question_pending"] = False
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": answer["answer_text"],
+                            "message_id": self._new_message_id(),
+                            "answer_to_question_id": question["question_id"],
+                            "selected_option_value": answer["selected_option_value"],
+                        }
+                    )
+                    await self._emit(
+                        {
+                            "type": "ask_user_answer_received",
+                            "question_id": question["question_id"],
+                            "answer_text": answer["answer_text"],
+                            "selected_option_value": answer["selected_option_value"],
+                        }
+                    )
+                    continue
+
                 if tc_name == "Task":
                     output = await self._execute_tool_with_hooks(tc_name, tc_input)
                 else:
@@ -1486,31 +1681,8 @@ You are now live. Await instructions and begin the loop.""",
                     print_tool_output(self._tool_output_name(tc_name), output)
                 tool_results.append({"tool_call_id": tc_id, "output": output})
 
-            assistant_msg = {
-                "role": "assistant",
-                "content": content,
-                "message_id": assistant_message_id,
-                "parent_user_message_id": parent_user_message_id,
-            }
-            if reasoning:
-                assistant_msg["reasoning"] = reasoning
-            if usage:
-                assistant_msg["usage"] = usage
-            if compaction_context_usage:
-                assistant_msg["context_usage"] = dict(compaction_context_usage)
-            if tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": self._tool_call_id(tc) or f"tool-call-{i}",
-                        "type": "function",
-                        "function": {
-                            "name": self._tool_call_name(tc),
-                            "arguments": self._tool_call_arguments(tc),
-                        },
-                    }
-                    for i, tc in enumerate(tool_calls, start=1)
-                ]
-            messages.append(assistant_msg)
+            if not assistant_msg_appended:
+                messages.append(assistant_msg)
 
             for result in tool_results:
                 messages.append(
