@@ -196,6 +196,7 @@ class AgentManager:
             "max_context_tokens": int(cfg.llm.max_context_tokens),
             "auto_compact_threshold_tokens": self._auto_compact_threshold_tokens(int(cfg.llm.max_context_tokens)),
             "stream_enabled": bool(cfg.llm.stream_enabled),
+            "teams_enabled": bool(data.get("teams_enabled", True)),
             "api_key_masked": self._mask_api_key(cfg.llm.api_key),
             "tool_plugins": list(data.get("tool_plugins") or []),
             "skills_disabled": list(data.get("skills_disabled") or []),
@@ -243,6 +244,9 @@ class AgentManager:
                     owner_bot_id=bot_id,
                     raw=patch.get("attached_subagent_bot_ids"),
                 )
+
+            if "teams_enabled" in patch and patch.get("teams_enabled") is not None:
+                bot_patch["teams_enabled"] = bool(patch.get("teams_enabled"))
 
             if "tool_plugins" in patch:
                 raw = patch.get("tool_plugins") or []
@@ -516,6 +520,30 @@ class AgentManager:
         if not session_mgr.exists(session_id):
             raise ValueError("Session not found")
         return self._serialize_messages(session_mgr.load(session_id))
+
+    async def pending_question_snapshot(self, bot_id: str, session_id: str) -> dict[str, Any] | None:
+        bot = await self.get_bot(bot_id, session_id)
+        if not hasattr(bot, "pending_question"):
+            raise ValueError("Bot does not support askuserquestion state")
+        question = bot.pending_question()
+        if not isinstance(question, dict) or not question:
+            return None
+        return dict(question)
+
+    async def submit_user_answer(self, bot_id: str, session_id: str, payload: dict[str, Any]) -> None:
+        bot = await self.get_bot(bot_id, session_id)
+        if not hasattr(bot, "submit_user_answer"):
+            raise ValueError("Bot does not support askuserquestion answers")
+        await bot.submit_user_answer(
+            question_id=str(payload.get("question_id") or ""),
+            answer_text=str(payload.get("answer_text") or ""),
+            selected_option_value=(
+                str(payload.get("selected_option_value")).strip()
+                if payload.get("selected_option_value") is not None
+                and str(payload.get("selected_option_value")).strip()
+                else None
+            ),
+        )
 
     async def delete_message_turn(self, bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
         session_mgr = self.sessions_for(bot_id)
@@ -940,6 +968,8 @@ class AgentManager:
                 if value is None:
                     continue
                 server.enabled = bool(value)
+
+        cfg.teams.enabled = bool(cfg.teams.enabled) and bool(data.get("teams_enabled", True))
 
         return cfg, data
 

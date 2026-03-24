@@ -30,6 +30,7 @@ from .models import (
     PlatformConnectionResponse,
     PlatformConnectionUpdateRequest,
     MessageDeleteResponse,
+    PendingQuestionResponse,
     MessageRegenerateRequest,
     MessageRegenerateResponse,
     SessionMessagesResponse,
@@ -44,6 +45,7 @@ from .models import (
     ProviderResponse,
     ProviderUpdateRequest,
     SkillInfo,
+    SubmitUserAnswerRequest,
     SubagentCandidateResponse,
 )
 
@@ -292,6 +294,25 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         if not manager.sessions_for(bot_id).exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"session_id": session_id, "messages": manager.session_messages(bot_id, session_id)}
+
+    @app.get("/api/bots/{bot_id}/sessions/{session_id}/pending-question", response_model=PendingQuestionResponse | None)
+    async def get_bot_pending_question(bot_id: str, session_id: str) -> Any:
+        try:
+            return await manager.pending_question_snapshot(bot_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/bots/{bot_id}/sessions/{session_id}/answer")
+    async def submit_bot_session_answer(
+        bot_id: str,
+        session_id: str,
+        req: SubmitUserAnswerRequest,
+    ) -> dict[str, str]:
+        try:
+            await manager.submit_user_answer(bot_id, session_id, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok"}
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:

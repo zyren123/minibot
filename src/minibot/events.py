@@ -15,6 +15,8 @@ EventType = Literal[
     "assistant_reasoning_delta",
     "assistant_delta",
     "assistant_end",
+    "ask_user_question",
+    "ask_user_answer_received",
     "todo_snapshot",
     "tool_call",
     "tool_result",
@@ -39,6 +41,15 @@ class StreamEvent(TypedDict, total=False):
     tool_calls: list[dict[str, Any]]
     usage: dict[str, int]
     todo: dict[str, Any]
+
+    # Ask-user interactions
+    question_id: str
+    prompt: str
+    options: list[dict[str, str]]
+    allow_free_text: bool
+    required: bool
+    answer_text: str
+    selected_option_value: str | None
 
     # Tool execution
     tool_call_id: str

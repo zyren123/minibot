@@ -44,6 +44,7 @@ type BotDraft = {
   fallbackModel: string;
   chatModelId: string;
   streamEnabled: boolean;
+  teamsEnabled: boolean;
   apiKeyMasked: string;
   apiKeyDraft: string;
   toolPlugins: string[];
@@ -212,6 +213,7 @@ function emptyBotDraft(cfg: BotConfig): BotDraft {
     fallbackModel: cfg.model ?? "",
     chatModelId: cfg.chat_model_id ?? "",
     streamEnabled: cfg.stream_enabled,
+    teamsEnabled: cfg.teams_enabled,
     apiKeyMasked: cfg.api_key_masked ?? "",
     apiKeyDraft: "",
     toolPlugins: cfg.tool_plugins ?? [],
@@ -509,12 +511,13 @@ export default function ConfigView(props: {
     setStatus(null);
     try {
       await updateBotConfig(botId, {
-        name: botDraft.name.trim() || null,
+        name: botDraft.name.trim() || undefined,
         enabled: botDraft.enabled,
         base_url: botDraft.baseUrl.trim() || null,
         model: botDraft.fallbackModel.trim() || null,
         chat_model_id: botDraft.chatModelId || null,
         stream_enabled: botDraft.streamEnabled,
+        teams_enabled: botDraft.teamsEnabled,
         tool_plugins: botDraft.toolPlugins,
         skills_disabled: botDraft.skillsDisabled,
         mcp_overrides: botDraft.mcpOverrides,
@@ -938,6 +941,16 @@ export default function ConfigView(props: {
                       <ToggleButton
                         enabled={botDraft.streamEnabled}
                         onClick={() => setBotField("streamEnabled", !botDraft.streamEnabled)}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-200">{t("config.bot.teamTools")}</div>
+                        <div className="text-xs text-zinc-500">{t("config.bot.teamTools.subtitle")}</div>
+                      </div>
+                      <ToggleButton
+                        enabled={botDraft.teamsEnabled}
+                        onClick={() => setBotField("teamsEnabled", !botDraft.teamsEnabled)}
                       />
                     </div>
                   </div>
