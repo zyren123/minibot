@@ -52,6 +52,65 @@ def test_delete_session(store: SessionStore) -> None:
     assert store.delete("del-me") is False
 
 
+def test_runtime_sidecar_round_trip(store: SessionStore) -> None:
+    store.create("sess-1")
+    payload = {
+        "version": 1,
+        "state": "awaiting_user_answer",
+        "assistant_message_id": "msg-assistant-1",
+        "pending_question": {"question_id": "ask-1", "prompt": "Which task?"},
+    }
+
+    store.save_runtime_state("sess-1", payload)
+
+    assert store.load_runtime_state("sess-1") == payload
+
+
+def test_update_message_rewrites_matching_message(store: SessionStore) -> None:
+    store.create("sess-1")
+    store.append("sess-1", {"role": "assistant", "message_id": "msg-a", "content": "hel"})
+
+    store.update_message("sess-1", "msg-a", lambda item: {**item, "content": "hello"})
+
+    assert store.load("sess-1")[0]["content"] == "hello"
+
+
+def test_update_message_preserves_records_before_last_compaction(store: SessionStore) -> None:
+    store.create("sess-1")
+    store.append("sess-1", {"role": "user", "message_id": "msg-user-1", "content": "before compact"})
+    store.append(
+        "sess-1",
+        {
+            "role": "assistant",
+            "message_id": "msg-compact",
+            "content": "**[SYSTEM: Context Compacted]**",
+            "is_compaction": True,
+        },
+    )
+    store.append("sess-1", {"role": "assistant", "message_id": "msg-a", "content": "hel"})
+
+    store.update_message("sess-1", "msg-a", lambda item: {**item, "content": "hello"})
+
+    path = store._find_path("sess-1")
+    assert path is not None
+    raw_messages = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert raw_messages[0]["message_id"] == "msg-user-1"
+    assert raw_messages[1]["message_id"] == "msg-compact"
+    assert raw_messages[2]["content"] == "hello"
+    assert store.load("sess-1") == raw_messages[1:]
+
+
+def test_delete_session_also_removes_runtime_sidecar(store: SessionStore) -> None:
+    store.create("sess-1")
+    store.save_runtime_state("sess-1", {"version": 1, "state": "streaming"})
+    runtime_path = store.runtime_state_path("sess-1")
+    assert runtime_path is not None
+    assert runtime_path.exists()
+
+    assert store.delete("sess-1") is True
+    assert not runtime_path.exists()
+
+
 def test_session_meta_preview(store: SessionStore) -> None:
     sid = "prev"
     store.create(sid)

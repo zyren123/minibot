@@ -23,7 +23,7 @@ import {
   listAvailableModels,
   listSessions,
   loadSession,
-  submitPendingQuestionAnswer,
+  submitPendingQuestionAnswerStream,
   streamRegenerateSessionMessage,
   streamChat,
   updateBotConfig,
@@ -745,12 +745,14 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             ...current,
             message_id: ev.message_id ?? current.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
+            completion_state: current.completion_state ?? "complete",
           }),
           () => ({
             role: "assistant",
             content: "",
             message_id: ev.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? null,
+            completion_state: "complete",
             reasoning: "",
           }),
         ),
@@ -768,6 +770,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             ...current,
             message_id: ev.message_id ?? current.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
+            completion_state: current.completion_state ?? "complete",
             reasoning: `${current.reasoning ?? ""}${ev.reasoning_text ?? ""}`,
           }),
           () => ({
@@ -775,6 +778,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             content: "",
             message_id: ev.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? null,
+            completion_state: "complete",
             reasoning: ev.reasoning_text ?? "",
           }),
         ),
@@ -792,6 +796,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             ...current,
             message_id: ev.message_id ?? current.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
+            completion_state: current.completion_state ?? "complete",
             content: `${current.content ?? ""}${ev.delta_text ?? ""}`,
           }),
           () => ({
@@ -799,6 +804,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             content: ev.delta_text ?? "",
             message_id: ev.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? null,
+            completion_state: "complete",
             reasoning: "",
           }),
         ),
@@ -816,6 +822,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             ...current,
             message_id: ev.message_id ?? current.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
+            completion_state: "complete",
             content: typeof ev.content === "string" ? ev.content : current.content,
             reasoning: typeof ev.reasoning === "string" ? ev.reasoning : current.reasoning,
             usage: ev.usage ?? current.usage ?? null,
@@ -826,6 +833,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             content: ev.content ?? "",
             message_id: ev.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? null,
+            completion_state: "complete",
             reasoning: ev.reasoning ?? "",
             usage: ev.usage ?? null,
             tool_calls: normalizeStreamToolCalls(ev.tool_calls),
@@ -836,6 +844,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
 
     if (ev.type === "ask_user_question") {
+      const usage = normalizeUsage(ev.usage);
+      const contextUsage = normalizeUsage(ev.context_usage);
+      const contextTokens = contextUsage?.total_tokens;
+      const usageTokens = usage?.total_tokens;
+      const targetSessionId = ev.session_id ?? sessionId;
       const nextQuestion = derivePendingQuestionFromPrompt({
         question_id: ev.question_id ?? "",
         message_id: ev.message_id ?? null,
@@ -857,6 +870,8 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             message_id: ev.message_id ?? current.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
             content: current.content?.trim() ? current.content : nextQuestion?.prompt ?? ev.prompt ?? current.content,
+            usage: usage ?? current.usage ?? null,
+            context_usage: contextUsage ?? current.context_usage ?? null,
           }),
           () => ({
             role: "assistant",
@@ -864,9 +879,28 @@ export default function ChatView(props: { botId: string; botName?: string }) {
             message_id: ev.message_id ?? null,
             parent_user_message_id: ev.parent_user_message_id ?? null,
             reasoning: "",
+            usage,
+            context_usage: contextUsage,
           }),
         ),
       );
+      if (targetSessionId && contextTokens != null) {
+        setContextBySession((prev) => ({
+          ...prev,
+          [targetSessionId]: {
+            totalTokens: contextTokens,
+            compacted: Boolean(ev.context_compacted),
+          },
+        }));
+      } else if (targetSessionId && usageTokens != null) {
+        setContextBySession((prev) => ({
+          ...prev,
+          [targetSessionId]: {
+            totalTokens: usageTokens,
+            compacted: false,
+          },
+        }));
+      }
       return;
     }
 
@@ -1051,16 +1085,40 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     if (!answerText) return;
     setSubmittingAnswer(true);
     setStatus(null);
+    setStreaming(true);
+    clearTodoState();
+    const optimisticQuestion = pendingQuestion;
+    const optimisticMessages = [
+      ...messages,
+      {
+        role: "user" as const,
+        content: answerText,
+      },
+    ];
+    markSessionStateDirty();
+    setPendingQuestion(null);
+    setPendingAnswerDraft("");
+    setPendingCustomOpen(false);
+    setMessages(optimisticMessages);
     try {
-      await submitPendingQuestionAnswer(botId, sessionId, {
-        question_id: pendingQuestion.question_id,
+      for await (const ev of submitPendingQuestionAnswerStream(botId, sessionId, {
+        question_id: optimisticQuestion.question_id,
         answer_text: answerText,
         selected_option_value: option?.value ?? null,
-      });
+      })) {
+        applyStreamEvent(ev);
+      }
+      await refreshSessions(botId);
+      await selectSession(sessionId, { force: true });
+      await refreshBotState(botId);
     } catch (err) {
       setStatus(errorMessage(err));
+      await selectSession(sessionId, { force: true }).catch(() => null);
+      await refreshSessions(botId).catch(() => null);
+      await refreshBotState(botId).catch(() => null);
     } finally {
       setSubmittingAnswer(false);
+      setStreaming(false);
     }
   }
 
@@ -1112,7 +1170,6 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setStreaming(true);
     clearTodoState();
     try {
-      let interrupted = false;
       markSessionStateDirty();
       setReasoningOpenById({});
       setToolOpenById({});
@@ -1120,17 +1177,12 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setVisibleHistoryStartIndex(findHistoryWindowStart(optimisticMessages, INITIAL_VISIBLE_HISTORY_TURNS));
       syncContextSnapshot(sessionId, optimisticMessages);
       for await (const ev of streamRegenerateSessionMessage(botId, sessionId, messageId, reasoningEffort || null)) {
-        if (ev.type === "system" && ev.message === "Generation interrupted.") {
-          interrupted = true;
-        }
         applyStreamEvent(ev);
       }
       await refreshSessions(botId);
       await selectSession(sessionId, { force: true });
       await refreshBotState(botId);
-      if (!interrupted) {
-        setStatus(t("chat.status.regeneratedReply"));
-      }
+      setStatus(t("chat.status.regeneratedReply"));
     } catch (err) {
       setStatus(errorMessage(err));
       try {
@@ -1661,6 +1713,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 const canDelete = Boolean(messageId && !chatBusy);
                 const reasoningOpen = Boolean(messageId && reasoningOpenById[messageId]);
                 const assistantText = message.content?.trim() ?? "";
+                const interruptedAssistant = message.completion_state === "interrupted";
                 const wideAssistantShell = showReasoning || assistantInvocations.length > 0;
 
                 return (
@@ -1681,6 +1734,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                           {message.is_compaction ? (
                             <div className="mb-3 inline-flex rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200">
                               {t("chat.context.compacted")}
+                            </div>
+                          ) : null}
+                          {interruptedAssistant ? (
+                            <div className="mb-3 inline-flex rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-200">
+                              {t("chat.message.interrupted")}
                             </div>
                           ) : null}
                           {showReasoning && messageId ? (

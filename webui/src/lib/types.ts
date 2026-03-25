@@ -41,6 +41,8 @@ export type StreamEvent = {
   finish_reason?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  context_usage?: Usage;
+  context_compacted?: boolean;
   todo?: TodoSnapshot;
   question_id?: string;
   prompt?: string;
@@ -98,6 +100,7 @@ export type Message = {
   is_error?: boolean | null;
   is_compaction?: boolean;
   parent_user_message_id?: string | null;
+  completion_state?: "complete" | "interrupted" | null;
   reasoning?: string | null;
   usage?: Usage | null;
   context_usage?: Usage | null;

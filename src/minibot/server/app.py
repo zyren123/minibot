@@ -314,6 +314,59 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "ok"}
 
+    @app.post("/api/bots/{bot_id}/sessions/{session_id}/answer/stream")
+    async def submit_bot_session_answer_stream(
+        bot_id: str,
+        session_id: str,
+        req: SubmitUserAnswerRequest,
+        request: Request,
+    ) -> StreamingResponse:
+        lock = await manager.session_lock(bot_id, session_id)
+        await lock.acquire()
+
+        def _frame(*, event: str, data: str) -> str:
+            return f"event: {event}\ndata: {data}\n\n"
+
+        async def _cancel_active_bot() -> None:
+            try:
+                bot = await manager.get_bot(bot_id, session_id)
+            except Exception:
+                return
+            bot.cancel()
+
+        async def _gen() -> AsyncIterator[str]:
+            try:
+                async for event in manager.submit_user_answer_stream(
+                    bot_id,
+                    session_id,
+                    req.model_dump(exclude_unset=True),
+                ):
+                    if await request.is_disconnected():
+                        await _cancel_active_bot()
+                        break
+                    payload = json.dumps(event, ensure_ascii=False)
+                    yield _frame(event=event.get("type", "message"), data=payload)
+            except asyncio.CancelledError:
+                await _cancel_active_bot()
+                raise
+            except Exception as exc:
+                yield _frame(
+                    event="system",
+                    data=json.dumps(
+                        {"type": "system", "session_id": session_id, "message": str(exc)},
+                        ensure_ascii=False,
+                    ),
+                )
+            finally:
+                if lock.locked():
+                    lock.release()
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
         ok = await manager.delete_session("default", session_id)
@@ -388,6 +441,7 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                     prompt,
                     session_id=session_id,
                     reasoning_effort=req.reasoning_effort,
+                    stop_on_ask_user_question=True,
                 ):
                     if await request.is_disconnected():
                         bot.cancel()
@@ -508,6 +562,7 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         req.prompt,
                         session_id=session_id,
                         reasoning_effort=req.reasoning_effort,
+                        stop_on_ask_user_question=True,
                     ):
                         if await request.is_disconnected():
                             bot.cancel()
@@ -559,6 +614,7 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         req.prompt,
                         session_id=session_id,
                         reasoning_effort=req.reasoning_effort,
+                        stop_on_ask_user_question=True,
                     ):
                         if await request.is_disconnected():
                             bot.cancel()

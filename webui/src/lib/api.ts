@@ -245,6 +245,23 @@ export async function submitPendingQuestionAnswer(
   );
 }
 
+export async function* submitPendingQuestionAnswerStream(
+  botId: string,
+  sessionId: string,
+  body: { question_id: string; answer_text: string; selected_option_value?: string | null },
+): AsyncGenerator<StreamEvent> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/answer/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!resp.ok) throw new Error(await resp.text());
+  yield* streamResponse(resp);
+}
+
 export async function deleteSessionMessage(
   botId: string,
   sessionId: string,

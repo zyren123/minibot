@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 PREVIEW_MAX_LEN = 60
 
@@ -45,6 +47,13 @@ class SessionStore:
             return path
         return None
 
+    def runtime_state_path(self, session_id: str) -> Path | None:
+        """Return the runtime sidecar path for an existing session file."""
+        path = self._find_path(session_id)
+        if path is None:
+            return None
+        return path.with_suffix(".runtime.json")
+
     def create(self, session_id: str, date: datetime | None = None) -> Path:
         """Create an empty JSONL file and return its path."""
         dt = date or datetime.now()
@@ -70,6 +79,54 @@ class SessionStore:
         with path.open("w", encoding="utf-8") as f:
             for message in messages:
                 f.write(json.dumps(message, ensure_ascii=False) + "\n")
+
+    def update_message(
+        self,
+        session_id: str,
+        message_id: str,
+        updater: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        """Update the first persisted message with a matching message_id."""
+        path = self._find_path(session_id)
+        if path is None:
+            return None
+
+        messages = self._read_jsonl(path)
+        for index, message in enumerate(messages):
+            if message.get("message_id") != message_id:
+                continue
+
+            current = dict(message)
+            updated = updater(current)
+            messages[index] = dict(updated) if updated is not None else current
+            self.overwrite(session_id, messages)
+            return messages[index]
+
+        return None
+
+    def save_runtime_state(self, session_id: str, payload: dict[str, Any]) -> None:
+        """Persist runtime sidecar state as a small JSON file."""
+        path = self.runtime_state_path(session_id)
+        if path is None:
+            session_path = self.create(session_id)
+            path = session_path.with_suffix(".runtime.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_json_atomic(path, payload)
+
+    def load_runtime_state(self, session_id: str) -> dict[str, Any] | None:
+        """Load runtime sidecar state if present."""
+        path = self.runtime_state_path(session_id)
+        if path is None or not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def delete_runtime_state(self, session_id: str) -> bool:
+        """Delete the runtime sidecar if present."""
+        path = self.runtime_state_path(session_id)
+        if path is None or not path.exists():
+            return False
+        path.unlink()
+        return True
 
     def load(self, session_id: str) -> list[dict]:
         """Load conversation history from JSONL, starting from the last compaction point."""
@@ -105,7 +162,10 @@ class SessionStore:
         path = self._find_path(session_id)
         if path is None:
             return False
+        runtime_path = path.with_suffix(".runtime.json")
         path.unlink()
+        if runtime_path.exists():
+            runtime_path.unlink()
         # Clean up empty parent date dirs
         for parent in [path.parent, path.parent.parent, path.parent.parent.parent]:
             if parent == self._root:
@@ -154,3 +214,19 @@ class SessionStore:
             message_count=len(messages),
             preview=preview,
         )
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+        """Write JSON to disk atomically within the target directory."""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            json.dump(payload, tmp, ensure_ascii=False)
+            tmp.flush()
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)

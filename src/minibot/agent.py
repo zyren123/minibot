@@ -1619,18 +1619,22 @@ You are now live. Await instructions and begin the loop.""",
                         messages.append(assistant_msg)
                         assistant_msg_appended = True
 
-                    await self._emit(
-                        {
-                            "type": "ask_user_question",
-                            "message_id": assistant_message_id,
-                            "parent_user_message_id": parent_user_message_id,
-                            "question_id": question["question_id"],
-                            "prompt": question["prompt"],
-                            "options": list(question["options"]),
-                            "allow_free_text": question["allow_free_text"],
-                            "required": question["required"],
-                        }
-                    )
+                    question_event: dict[str, Any] = {
+                        "type": "ask_user_question",
+                        "message_id": assistant_message_id,
+                        "parent_user_message_id": parent_user_message_id,
+                        "question_id": question["question_id"],
+                        "prompt": question["prompt"],
+                        "options": list(question["options"]),
+                        "allow_free_text": question["allow_free_text"],
+                        "required": question["required"],
+                    }
+                    if usage:
+                        question_event["usage"] = dict(usage)
+                    if compaction_context_usage:
+                        question_event["context_usage"] = dict(compaction_context_usage)
+                        question_event["context_compacted"] = True
+                    await self._emit(question_event)
                     answer = await self._resolve_ask_user_answer(question)
                     assistant_msg["question_pending"] = False
                     messages.append(

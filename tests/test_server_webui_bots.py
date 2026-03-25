@@ -600,6 +600,7 @@ def test_message_regenerate_stream_rewrites_latest_turn_and_streams_events(
                 *,
                 session_id: str | None = None,
                 reasoning_effort: str | None = None,
+                stop_on_ask_user_question: bool = False,
             ):
                 seen["stream"] = {
                     "prompt": prompt,
@@ -767,6 +768,7 @@ def test_chat_and_stream_endpoints_forward_reasoning_effort(
                 *,
                 session_id: str | None = None,
                 reasoning_effort: str | None = None,
+                stop_on_ask_user_question: bool = False,
             ):
                 seen["stream"] = {
                     "prompt": prompt,
@@ -880,6 +882,7 @@ def test_stream_endpoint_forwards_ask_user_question_events(
                 *,
                 session_id: str | None = None,
                 reasoning_effort: str | None = None,
+                stop_on_ask_user_question: bool = False,
             ):
                 yield {
                     "type": "ask_user_question",
@@ -888,6 +891,9 @@ def test_stream_endpoint_forwards_ask_user_question_events(
                     "options": [{"label": "Shipping", "value": "shipping"}],
                     "allow_free_text": True,
                     "required": True,
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+                    "context_usage": {"total_tokens": 7},
+                    "context_compacted": True,
                 }
                 yield {
                     "type": "assistant_end",
@@ -910,6 +916,9 @@ def test_stream_endpoint_forwards_ask_user_question_events(
     assert "event: ask_user_question" in stream.text
     assert '"question_id": "ask-call-1"' in stream.text
     assert '"prompt": "Which task?"' in stream.text
+    assert '"usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10}' in stream.text
+    assert '"context_usage": {"total_tokens": 7}' in stream.text
+    assert '"context_compacted": true' in stream.text
 
 
 def test_pending_question_snapshot_and_answer_submission_endpoints(
@@ -1004,6 +1013,283 @@ def test_pending_question_endpoint_returns_null_when_idle(
     pending = client.get(f"/api/bots/{bot_id}/sessions/sess-idle/pending-question")
     assert pending.status_code == 200, pending.text
     assert pending.json() is None
+
+
+def test_pending_question_endpoint_reads_persisted_runtime_sidecar(
+    client: TestClient,
+    server_env: dict[str, Path],
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Persisted Pending Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "help", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "Which queue?",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+                "interaction_type": "askuserquestion",
+                "question_id": "ask-call-1",
+                "question_pending": True,
+            },
+        ],
+    )
+    session_mgr.save_runtime_state(
+        session_id,
+        {
+            "version": 1,
+            "state": "awaiting_user_answer",
+            "assistant_message_id": "msg-assistant-1",
+            "pending_question": {
+                "question_id": "ask-call-1",
+                "message_id": "msg-assistant-1",
+                "prompt": "Which queue?",
+                "options": [
+                    {"label": "Shipping", "value": "shipping"},
+                    {"label": "Billing", "value": "billing"},
+                ],
+                "allow_free_text": True,
+                "required": True,
+            },
+        },
+    )
+
+    pending = client.get(f"/api/bots/{bot_id}/sessions/{session_id}/pending-question")
+    assert pending.status_code == 200, pending.text
+    assert pending.json() == {
+        "question_id": "ask-call-1",
+        "message_id": "msg-assistant-1",
+        "prompt": "Which queue?",
+        "options": [
+            {"label": "Shipping", "value": "shipping"},
+            {"label": "Billing", "value": "billing"},
+        ],
+        "allow_free_text": True,
+        "required": True,
+    }
+
+
+def test_answer_stream_endpoint_appends_answer_and_resumes_events(
+    client: TestClient,
+    server_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Resume Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "help", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "Which queue?",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+                "interaction_type": "askuserquestion",
+                "question_id": "ask-call-1",
+                "question_pending": True,
+            },
+        ],
+    )
+    session_mgr.save_runtime_state(
+        session_id,
+        {
+            "version": 1,
+            "state": "awaiting_user_answer",
+            "assistant_message_id": "msg-assistant-1",
+            "pending_question": {
+                "question_id": "ask-call-1",
+                "message_id": "msg-assistant-1",
+                "prompt": "Which queue?",
+                "options": [
+                    {"label": "Shipping", "value": "shipping"},
+                    {"label": "Billing", "value": "billing"},
+                ],
+                "allow_free_text": True,
+                "required": True,
+            },
+        },
+    )
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+        assert requested_session_id == session_id
+
+        class FakeBot:
+            async def resume_pending_question_stream(
+                self,
+                *,
+                question_id: str,
+                answer_text: str,
+                selected_option_value: str | None = None,
+                reasoning_effort: str | None = None,
+            ):
+                assert question_id == "ask-call-1"
+                assert answer_text == "Shipping"
+                assert selected_option_value == "shipping"
+                assert reasoning_effort is None
+
+                loaded = session_mgr.load(requested_session_id)
+                assert loaded[1]["question_pending"] is False
+                assert loaded[2]["role"] == "user"
+                assert loaded[2]["content"] == "Shipping"
+                assert loaded[2]["answer_to_question_id"] == "ask-call-1"
+                assert loaded[2]["selected_option_value"] == "shipping"
+
+                session_mgr.overwrite(
+                    requested_session_id,
+                    loaded
+                    + [
+                        {
+                            "role": "assistant",
+                            "content": "Follow shipping.",
+                            "message_id": "msg-assistant-2",
+                            "parent_user_message_id": loaded[2]["message_id"],
+                        }
+                    ],
+                )
+                yield {
+                    "type": "assistant_start",
+                    "message_id": "msg-assistant-2",
+                    "parent_user_message_id": loaded[2]["message_id"],
+                }
+                yield {
+                    "type": "assistant_delta",
+                    "message_id": "msg-assistant-2",
+                    "parent_user_message_id": loaded[2]["message_id"],
+                    "delta_text": "Follow shipping.",
+                }
+                yield {
+                    "type": "assistant_end",
+                    "message_id": "msg-assistant-2",
+                    "parent_user_message_id": loaded[2]["message_id"],
+                    "content": "Follow shipping.",
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    stream = client.post(
+        f"/api/bots/{bot_id}/sessions/{session_id}/answer/stream",
+        json={
+            "question_id": "ask-call-1",
+            "answer_text": "Shipping",
+            "selected_option_value": "shipping",
+        },
+    )
+    assert stream.status_code == 200, stream.text
+    assert stream.headers["content-type"].startswith("text/event-stream")
+    assert "assistant_start" in stream.text
+    assert "Follow shipping." in stream.text
+
+    persisted = session_mgr.load(session_id)
+    assert persisted[1]["question_pending"] is False
+    assert persisted[2]["content"] == "Shipping"
+    assert persisted[2]["selected_option_value"] == "shipping"
+    assert persisted[3]["content"] == "Follow shipping."
+    assert session_mgr.load_runtime_state(session_id) is None
+
+
+def test_bot_stream_endpoint_pauses_live_stream_at_pending_question(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Pause Stream Bot"}).json()["bot_id"]
+    call_args: dict[str, object] = {}
+
+    async def fake_get_bot(self, requested_bot_id: str, requested_session_id: str):
+        assert requested_bot_id == bot_id
+
+        class FakeBot:
+            async def stream(
+                self,
+                prompt: str,
+                *,
+                session_id: str | None = None,
+                reasoning_effort: str | None = None,
+                stop_on_ask_user_question: bool = False,
+            ):
+                call_args["prompt"] = prompt
+                call_args["session_id"] = session_id
+                call_args["reasoning_effort"] = reasoning_effort
+                call_args["stop_on_ask_user_question"] = stop_on_ask_user_question
+                yield {
+                    "type": "ask_user_question",
+                    "message_id": "msg-assistant-1",
+                    "question_id": "ask-call-1",
+                    "prompt": "Which queue?",
+                    "options": [
+                        {"label": "Shipping", "value": "shipping"},
+                        {"label": "Billing", "value": "billing"},
+                    ],
+                    "allow_free_text": True,
+                    "required": True,
+                }
+
+            def cancel(self) -> None:
+                return None
+
+        return FakeBot()
+
+    monkeypatch.setattr("src.minibot.server.manager.AgentManager.get_bot", fake_get_bot)
+
+    response = client.post(
+        f"/api/bots/{bot_id}/stream",
+        json={"prompt": "help", "reasoning_effort": "medium"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"type": "ask_user_question"' in response.text
+    assert call_args["prompt"] == "help"
+    assert call_args["reasoning_effort"] == "medium"
+    assert call_args["stop_on_ask_user_question"] is True
+
+
+def test_pending_question_endpoint_reconciles_stale_streaming_state(
+    client: TestClient,
+    server_env: dict[str, Path],
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Stale Runtime Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "help", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "Partial answer",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+            },
+        ],
+    )
+    session_mgr.save_runtime_state(
+        session_id,
+        {
+            "version": 1,
+            "state": "streaming",
+            "assistant_message_id": "msg-assistant-1",
+        },
+    )
+
+    pending = client.get(f"/api/bots/{bot_id}/sessions/{session_id}/pending-question")
+    assert pending.status_code == 200, pending.text
+    assert pending.json() is None
+
+    loaded = client.get(f"/api/bots/{bot_id}/sessions/{session_id}")
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["messages"][-1]["completion_state"] == "interrupted"
+    assert session_mgr.load_runtime_state(session_id) is None
 
 
 def test_provider_models_can_be_deleted_in_batch(client: TestClient) -> None:

@@ -160,6 +160,7 @@ const messages: Record<Language, TranslationTable> = {
     "chat.message.copy": "复制",
     "chat.message.regenerate": "重新生成",
     "chat.message.delete": "删除",
+    "chat.message.interrupted": "已中断",
     "chat.message.tokens": "Tokens {count}",
     "chat.history.loadOlder":
       ({ count }) => `加载更早消息（还有 ${count} 轮）`,
@@ -552,6 +553,7 @@ const messages: Record<Language, TranslationTable> = {
     "chat.message.copy": "Copy",
     "chat.message.regenerate": "Regenerate",
     "chat.message.delete": "Delete",
+    "chat.message.interrupted": "Interrupted",
     "chat.message.tokens": "Tokens {count}",
     "chat.history.loadOlder":
       ({ count }) => `Load older messages (${count} hidden turn${Number(count) === 1 ? "" : "s"})`,

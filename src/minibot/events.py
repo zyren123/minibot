@@ -40,6 +40,8 @@ class StreamEvent(TypedDict, total=False):
     finish_reason: str
     tool_calls: list[dict[str, Any]]
     usage: dict[str, int]
+    context_usage: dict[str, int]
+    context_compacted: bool
     todo: dict[str, Any]
 
     # Ask-user interactions

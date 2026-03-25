@@ -7,7 +7,8 @@ import copy
 from pathlib import Path
 import re
 import shutil
-from typing import Any
+from typing import Any, AsyncIterator
+import uuid
 
 from openai import AsyncOpenAI
 
@@ -521,7 +522,69 @@ class AgentManager:
             raise ValueError("Session not found")
         return self._serialize_messages(session_mgr.load(session_id))
 
+    @staticmethod
+    def _normalize_pending_question_answer(
+        question: dict[str, Any],
+        *,
+        answer_text: Any,
+        selected_option_value: Any,
+    ) -> tuple[str, str | None]:
+        normalized_text = str(answer_text or "").strip()
+        normalized_selected = (
+            str(selected_option_value).strip()
+            if selected_option_value is not None and str(selected_option_value).strip()
+            else None
+        )
+        option_values = {str(item.get("value")) for item in question.get("options") or []}
+
+        if normalized_selected is not None and normalized_selected not in option_values:
+            raise ValueError("Pending question selected option is invalid")
+        if not question.get("allow_free_text", True) and normalized_selected is None:
+            raise ValueError("Pending question requires choosing one of the provided options")
+        if question.get("required", True) and not normalized_text and normalized_selected is None:
+            raise ValueError("Pending question requires a non-empty answer")
+
+        if normalized_selected is not None and not normalized_text:
+            for item in question.get("options") or []:
+                if item.get("value") == normalized_selected:
+                    normalized_text = str(item.get("label") or normalized_selected)
+                    break
+
+        return normalized_text, normalized_selected
+
+    def _reconcile_stale_runtime(
+        self,
+        bot_id: str,
+        session_id: str,
+        runtime_state: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if runtime_state is None or runtime_state.get("state") != "streaming":
+            return runtime_state
+
+        session_mgr = self.sessions_for(bot_id)
+        assistant_message_id = runtime_state.get("assistant_message_id")
+        if isinstance(assistant_message_id, str) and assistant_message_id.strip():
+            session_mgr.update_message(
+                session_id,
+                assistant_message_id,
+                lambda current: (
+                    dict(current)
+                    if current.get("completion_state") == "complete"
+                    else {**current, "completion_state": "interrupted"}
+                ),
+            )
+        session_mgr.delete_runtime_state(session_id)
+        return None
+
     async def pending_question_snapshot(self, bot_id: str, session_id: str) -> dict[str, Any] | None:
+        session_mgr = self.sessions_for(bot_id)
+        runtime_state = session_mgr.load_runtime_state(session_id)
+        runtime_state = self._reconcile_stale_runtime(bot_id, session_id, runtime_state)
+        if runtime_state is not None and runtime_state.get("state") == "awaiting_user_answer":
+            pending_question = runtime_state.get("pending_question")
+            if isinstance(pending_question, dict) and pending_question:
+                return dict(pending_question)
+
         bot = await self.get_bot(bot_id, session_id)
         if not hasattr(bot, "pending_question"):
             raise ValueError("Bot does not support askuserquestion state")
@@ -545,6 +608,80 @@ class AgentManager:
             ),
         )
 
+    async def submit_user_answer_stream(
+        self,
+        bot_id: str,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        session_mgr = self.sessions_for(bot_id)
+        runtime_state = self._reconcile_stale_runtime(
+            bot_id,
+            session_id,
+            session_mgr.load_runtime_state(session_id),
+        )
+        if runtime_state is None or runtime_state.get("state") != "awaiting_user_answer":
+            raise ValueError("No persisted pending question is waiting for an answer")
+
+        pending_question = runtime_state.get("pending_question")
+        if not isinstance(pending_question, dict) or not pending_question:
+            raise ValueError("Persisted pending question state is invalid")
+
+        question_id = str(payload.get("question_id") or "").strip()
+        if question_id != str(pending_question.get("question_id") or "").strip():
+            raise ValueError("Pending question id does not match")
+
+        answer_text, selected_option_value = self._normalize_pending_question_answer(
+            pending_question,
+            answer_text=payload.get("answer_text"),
+            selected_option_value=payload.get("selected_option_value"),
+        )
+
+        assistant_message_id = str(
+            runtime_state.get("assistant_message_id")
+            or pending_question.get("message_id")
+            or ""
+        ).strip()
+        if not assistant_message_id:
+            raise ValueError("Persisted pending question is missing its assistant message id")
+
+        session_mgr.update_message(
+            session_id,
+            assistant_message_id,
+            lambda current: {**current, "question_pending": False},
+        )
+        session_mgr.append_message(
+            session_id,
+            {
+                "role": "user",
+                "content": answer_text,
+                "message_id": f"msg-{uuid.uuid4().hex[:12]}",
+                "answer_to_question_id": question_id,
+                "selected_option_value": selected_option_value,
+            },
+        )
+        session_mgr.delete_runtime_state(session_id)
+        self._clear_session_cache(bot_id, session_id, preserve_lock=True)
+
+        bot = await self.get_bot(bot_id, session_id)
+        if hasattr(bot, "resume_pending_question_stream"):
+            async for event in bot.resume_pending_question_stream(
+                question_id=question_id,
+                answer_text=answer_text,
+                selected_option_value=selected_option_value,
+                reasoning_effort=reasoning_effort,
+            ):
+                yield event
+            return
+
+        if not hasattr(bot, "stream_existing_messages"):
+            raise ValueError("Bot does not support persisted pending question resume")
+
+        async for event in bot.stream_existing_messages(reasoning_effort=reasoning_effort):
+            yield event
+
     async def delete_message_turn(self, bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
         session_mgr = self.sessions_for(bot_id)
         if not session_mgr.exists(session_id):
@@ -558,6 +695,7 @@ class AgentManager:
         ]
         remaining = messages[:start] + messages[end:]
         session_mgr.overwrite(session_id, remaining)
+        session_mgr.delete_runtime_state(session_id)
         self._clear_session_cache(bot_id, session_id, preserve_lock=True)
         return {
             "session_id": session_id,
@@ -580,6 +718,7 @@ class AgentManager:
 
         preserved = messages[:start]
         session_mgr.overwrite(session_id, preserved)
+        session_mgr.delete_runtime_state(session_id)
         self._clear_session_cache(bot_id, session_id, preserve_lock=True)
         return prompt
 

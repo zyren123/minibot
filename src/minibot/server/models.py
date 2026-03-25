@@ -26,6 +26,7 @@ class MessageResponse(BaseModel):
     tool_call_id: str | None = None
     is_compaction: bool | None = None
     parent_user_message_id: str | None = None
+    completion_state: str | None = None
     reasoning: str | None = None
     usage: UsageResponse | None = None
     context_usage: UsageResponse | None = None
