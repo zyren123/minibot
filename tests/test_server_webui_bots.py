@@ -828,6 +828,7 @@ def test_stream_endpoint_forwards_todo_snapshot_events(
                 *,
                 session_id: str | None = None,
                 reasoning_effort: str | None = None,
+                stop_on_ask_user_question: bool = False,
             ):
                 yield {
                     "type": "todo_snapshot",
