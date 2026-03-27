@@ -2,19 +2,19 @@
 
 # MiniBot
 
-### A Minimalist, Framework-Free AI Agent Implementation in Pure Python
+### A learnable, extensible, local-first AI agent built in pure Python
 
 <div align="left">
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![No Frameworks](https://img.shields.io/badge/Framework-None-crimson?style=flat-square)](https://github.com/zyren123/minibot)
-[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/zyren123/minibot)
+[![PyPI](https://img.shields.io/pypi/v/minibotclaw?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/minibotclaw/)
+[![CI](https://img.shields.io/github/actions/workflow/status/zyren123/minibot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/zyren123/minibot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](../LICENSE)
-[![Code Style](https://img.shields.io/badge/Code%20Style-Black-000000?style=flat-square)](https://github.com/psf/black)
+[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/zyren123/minibot)
 
-> **No bloated abstraction layers.** MiniBot is an AI Agent project for teaching and research. It does not rely on frameworks like LangChain, AutoGen, or LangGraph—instead, it uses pure Python to demonstrate the core logic of Agents, tool invocation, MCP protocol integration, and the underlying implementation of the Hook system.
+> **Run it first, understand it next.** MiniBot gives you a REPL, WebUI, Python SDK, MCP, Skills, Hooks, Memory, and Team orchestration in one local-first project, while keeping the implementation transparent enough to study and reshape.
 
-**[ Core Philosophy ]** &nbsp; `Pure Native Implementation` • `Transparent & Controllable` • `MCP Protocol` • `Plugin Architecture`
+**[ You can use it for ]** &nbsp; `Local REPL` • `WebUI` • `Python SDK` • `MCP/Skills` • `Multi-agent teamwork`
 
 [中文](../README.md) | English
 
@@ -28,8 +28,64 @@
   <img style="height: 400px; width: auto;" alt="Paraglider Minibot" src="https://github.com/user-attachments/assets/7e221968-293b-4324-9a52-9e6ce26c4be9" />
 </div>
 <p align="center" style="margin-top: 15px; font-size: 1.2em; font-weight: bold; color: #555;">
-  At least... we're all robot assistants, right?
+  MiniBot covers the path from terminal workflows to WebUI demos to SDK embedding in your own apps.
 </p>
+
+---
+
+## ⚡ What Can MiniBot Help You Do?
+
+- Start a local interactive agent REPL with `minibot`.
+- Launch a WebUI and API server with `minibot-web` for multi-turn chat, session management, and platform integrations.
+- Embed an agent directly in Python via `from minibot import Minibot`.
+- Extend capabilities with MCP, Skills, Hooks, Memory, and Team tools instead of depending on a heavyweight framework stack.
+
+## 🎯 Why This Instead of Another Agent Demo?
+
+- **Real entry points, not just architecture talk**: terminal, WebUI, and SDK are all runnable today.
+- **Readable source code**: no LangChain, AutoGen, or LangGraph dependency layers between you and the core loop.
+- **Local-first control**: workdir, skills, memory, hooks, and MCP configuration all live in files you can inspect and change.
+
+## 🚀 30-Second Start
+
+```bash
+uv tool install minibotclaw
+
+# Complete model setup after first launch
+# Terminal REPL
+minibot
+
+# WebUI
+minibot-web
+```
+
+You need model provider credentials
+
+- WebUI: add a Provider in `Config`, import models, and choose a chat model for the Bot.
+- CLI: run `/model config` after launch to edit the global `.env` interactively.
+- Manual: edit the global `.env` directly. The default path is `~/.minibot/.env`.
+
+Minimum required fields:
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-xxxx
+MODEL_ID=gpt-4o-mini
+```
+
+## 👀 Who It Fits, And Who It Does Not
+
+Use MiniBot if you want to:
+
+- Understand how agent loops, tool calling, MCP, and skills actually work.
+- Prototype a local, controllable, hackable agent without getting buried under framework abstractions.
+- Connect CLI, WebUI, SDK, and platform integrations inside one Python project.
+
+MiniBot is probably not the right fit if you want:
+
+- A production-hardened sandbox and strict permission model out of the box.
+- A fully productized platform for non-technical end users.
+- A batteries-included framework ecosystem instead of a readable implementation.
 
 ---
 
@@ -116,7 +172,9 @@ cd ..
 
 ### Configuration
 
-Copy `.env.example` to `.env`:
+On first launch, MiniBot auto-creates a global `.env` in the app home directory. By default that path is `~/.minibot/.env`.
+
+You can finish setup through the WebUI `Config` page or the CLI `/model config` flow. If you prefer manual editing, the minimum fields are:
 
 ```bash
 OPENAI_BASE_URL=https://api.openai.com/v1

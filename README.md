@@ -2,19 +2,19 @@
 
 # MiniBot
 
-### A Minimalist, Framework-Free AI Agent Implementation in Pure Python
+### 一个用纯 Python 构建的可学习、可扩展、本地优先 AI Agent
 
 <div align="left">
 
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![No Frameworks](https://img.shields.io/badge/Framework-None-crimson?style=flat-square)](https://github.com/zyren123/minibot)
-[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/zyren123/minibot)
+[![PyPI](https://img.shields.io/pypi/v/minibotclaw?style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/minibotclaw/)
+[![CI](https://img.shields.io/github/actions/workflow/status/zyren123/minibot/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/zyren123/minibot/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Code Style](https://img.shields.io/badge/Code%20Style-Black-000000?style=flat-square)](https://github.com/psf/black)
+[![Architecture](https://img.shields.io/badge/Architecture-Event--Driven-blueviolet?style=flat-square)](https://github.com/zyren123/minibot)
 
-> **拒绝臃肿的抽象层。** MiniBot 是一个用于教学和研究的 AI Agent 项目。它不依赖 LangChain、AutoGen 或 langgraph等框架，而是使用纯 Python 原生代码展示了 Agent 的核心逻辑、工具调用、MCP 协议集成以及 Hook 系统的底层实现。
+> **先跑起来，再看懂它。** MiniBot 提供 REPL、WebUI、Python SDK、MCP、Skills、Hooks、Memory 和 Team 协作能力，适合想快速搭建本地 Agent，又希望源码透明、容易改造的开发者。
 
-**[ 核心理念 ]** &nbsp; `纯原生实现` • `透明可控` • `MCP 协议` • `插件化架构`
+**[ 你可以用它 ]** &nbsp; `本地 REPL` • `WebUI` • `Python SDK` • `MCP/Skills` • `多代理协作`
 
 [中文](README.md) | [English](docs/README.en.md)
 
@@ -28,8 +28,62 @@
   <img style="height: 400px; width: auto;" alt="Paraglider Minibot" src="https://github.com/user-attachments/assets/7e221968-293b-4324-9a52-9e6ce26c4be9" />
 </div>
 <p align="center" style="margin-top: 15px; font-size: 1.2em; font-weight: bold; color: #555;">
-  最起码......我们都是机器人助手，不是吗？
+  从命令行到 WebUI，再到 SDK 集成，MiniBot 提供一条连续的本地 Agent 开发路径。
 </p>
+
+---
+
+## ⚡ MiniBot 能帮你做什么？
+
+- 用 `minibot` 启动一个可交互的本地 Agent REPL。
+- 用 `minibot-web` 启动 WebUI 和 API 服务，快速验证多轮对话、会话、平台连接。
+- 在 Python 里直接 `from minibot import Minibot`，把 Agent 嵌入自己的脚本或应用。
+- 通过 MCP、Skills、Hooks、Memory 与 Team 工具扩展能力，而不是被大框架锁住。
+
+## 🎯 为什么不是另一个 Agent Demo？
+
+- **先有完整入口，再讲原理**：终端、WebUI、SDK 都能直接跑，不是只给一段伪代码。
+- **源码透明**：不依赖 LangChain、AutoGen 或 LangGraph，方便学习和二次改造。
+- **本地优先**：工作目录、Skills、Memory、Hooks、MCP 配置都落在文件系统里，便于追踪和控制。
+
+## 🚀 30 秒上手
+
+```bash
+uv tool install minibotclaw
+
+# 首次启动后按提示完成模型配置
+# 终端 REPL
+minibot
+
+# WebUI
+minibot-web
+```
+
+- WebUI：在 `Config` 页添加 Provider、导入模型，并给 Bot 选择聊天模型。
+- CLI：启动后使用 `/model config` 交互式配置全局 `.env`。
+- 手动：直接编辑全局 `.env`，默认路径是 `~/.minibot/.env`。
+
+最少需要配置的字段：
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-xxxx
+MODEL_ID=gpt-4o-mini
+```
+
+## 👀 适合谁 / 不适合谁
+
+适合你，如果你想要：
+
+- 学清楚 Agent、Tool Calling、MCP、Skills 这些机制到底怎么落地。
+- 在本地快速试验一个可控、可改、可嵌入 Python 项目的 Agent。
+- 用尽量少的抽象层，把 REPL、WebUI、SDK 和平台接入串起来。
+
+不太适合你，如果你更想要：
+
+- 开箱即用的生产级安全沙箱和严格权限模型。
+- 一个已经高度产品化、面向非技术用户的 Agent 平台。
+- 大而全的生态抽象，而不是偏底层、偏可读性的实现。
 
 ---
 
@@ -116,7 +170,9 @@ cd ..
 
 ### 配置
 
-复制 `.env.example` 到 `.env`：
+首次启动时，MiniBot 会自动在全局 app home 下生成 `.env`，默认位置是 `~/.minibot/.env`。
+
+你可以通过 WebUI 的 `Config` 页面或 CLI 的 `/model config` 来完成配置；如果你更喜欢手动编辑，最少需要这些字段：
 
 ```bash
 OPENAI_BASE_URL=https://api.openai.com/v1

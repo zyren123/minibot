@@ -1,9 +1,30 @@
 [project]
 name = "minibotclaw"
-version = "0.1.6"
-description = "A assistant for education purpose"
+version = "0.1.7"
+description = "A minimal, framework-free AI agent toolkit for learning, local automation, and MCP-powered workflows."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [
+    { name = "zyren123" },
+]
+keywords = [
+    "agent",
+    "ai-agent",
+    "mcp",
+    "openai",
+    "python",
+    "tool-calling",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "openai>=2.16.0,<3",
     "python-dotenv>=1.0.0",
@@ -21,6 +42,11 @@ dependencies = [
 minibot = "minibot.main:main"
 minibot-web = "minibot.server.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/zyren123/minibot"
+Repository = "https://github.com/zyren123/minibot"
+Issues = "https://github.com/zyren123/minibot/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -33,6 +59,7 @@ packages = ["src/minibot"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "LICENSE",
     "src/minibot/**",
     "webui/**",
     "README.md",
