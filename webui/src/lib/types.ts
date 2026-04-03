@@ -144,6 +144,9 @@ export type Config = {
   available_skill_targets: string[];
   tool_plugins: string[];
   api_key_masked: string | null;
+  memory_backend: "sqlite" | "postgres";
+  memory_database_url_configured: boolean;
+  memory_database_url_value: string | null;
 };
 
 export type BotMeta = {
@@ -175,6 +178,7 @@ export type BotConfig = {
   tool_plugins: string[];
   skills_disabled: string[];
   mcp_overrides: Record<string, boolean>;
+  active_memory_namespace?: string | null;
   soul: string;
   subagent_exposable: boolean;
   subagent_name: string | null;
@@ -207,6 +211,79 @@ export type SkillDeleteResult = {
   skill_name: string;
   scope: string;
   folder_name: string;
+};
+
+export type MemoryNamespace = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+};
+
+export type MemoryTreeNode = {
+  uri: string;
+  title: string;
+  kind: "folder" | "memory";
+  node_type: string | null;
+  children: MemoryTreeNode[];
+};
+
+export type MemoryTreeResponse = {
+  nodes: MemoryTreeNode[];
+};
+
+export type MemoryGraphNode = {
+  uri: string;
+  title: string;
+  kind: "folder" | "memory";
+  node_type: string | null;
+};
+
+export type MemoryGraphEdge = {
+  source: string;
+  target: string;
+};
+
+export type MemoryGraphResponse = {
+  nodes: MemoryGraphNode[];
+  edges: MemoryGraphEdge[];
+};
+
+export type MemoryNodeChild = {
+  uri: string;
+  title: string;
+  kind: "folder" | "memory";
+  node_type: string | null;
+};
+
+export type MemoryNodeDetail = {
+  id: string;
+  uri: string;
+  title: string;
+  kind: "folder" | "memory";
+  node_type: string | null;
+  is_core: boolean;
+  priority: number;
+  content: string;
+  triggers: string[];
+  children: MemoryNodeChild[];
+};
+
+export type MemorySearchResult = {
+  uri: string;
+  title: string;
+  kind: "folder" | "memory";
+  node_type: string | null;
+  matched_by: string;
+  snippet: string;
+  parent_uri: string | null;
+};
+
+export type MemorySystemViewName = "boot" | "index" | "glossary";
+
+export type MemorySystemView = {
+  uri: `system://${MemorySystemViewName}`;
+  content: string;
 };
 
 export type MCPServerInfo = {

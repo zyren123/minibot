@@ -26,6 +26,52 @@ def _save_raw(path: Path, data: dict) -> None:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
+def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+            continue
+        target[key] = value
+    return target
+
+
+def update_default_config(config_path: Path, patch: dict[str, Any]) -> dict[str, Any]:
+    """Patch global default config YAML and return saved data."""
+    data = _load_raw(config_path)
+    _deep_merge(data, patch)
+    _save_raw(config_path, data)
+    return data
+
+
+def upsert_env_value(env_path: Path, key: str, value: str | None) -> None:
+    """Upsert one dotenv key without clobbering unrelated lines."""
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    rendered = None if value is None else f"{key}={value}"
+    updated: list[str] = []
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}="):
+            if rendered is not None:
+                updated.append(rendered)
+            replaced = True
+        else:
+            updated.append(line)
+
+    if not replaced and rendered is not None:
+        updated.append(rendered)
+
+    output = "\n".join(updated).rstrip()
+    if output:
+        env_path.write_text(output + "\n", encoding="utf-8")
+    elif env_path.exists():
+        env_path.unlink()
+
+
 def save_subagents_config(
     config_path: Path,
     agents: dict[str, dict[str, Any]],

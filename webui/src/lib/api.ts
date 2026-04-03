@@ -5,6 +5,13 @@ import type {
   Config,
   DeletedMessageResult,
   DeletedModelsResult,
+  MemoryGraphResponse,
+  MemoryNamespace,
+  MemoryNodeDetail,
+  MemorySearchResult,
+  MemorySystemView,
+  MemorySystemViewName,
+  MemoryTreeResponse,
   SkillDeleteResult,
   DashboardData,
   FetchedModel,
@@ -73,6 +80,55 @@ export async function updateBotConfig(
   body: Partial<BotConfig> & { api_key?: string | null },
 ): Promise<{ status: string }> {
   return apiPut<{ status: string }>(`/api/bots/${encodeURIComponent(botId)}/config`, body);
+}
+
+export async function listMemoryNamespaces(botId: string): Promise<MemoryNamespace[]> {
+  return apiGet<MemoryNamespace[]>(`/api/bots/${encodeURIComponent(botId)}/memory/namespaces`);
+}
+
+export async function createMemoryNamespace(
+  botId: string,
+  body: { slug: string; title: string; description?: string | null },
+): Promise<MemoryNamespace> {
+  return apiPost<MemoryNamespace>(`/api/bots/${encodeURIComponent(botId)}/memory/namespaces`, body);
+}
+
+export async function createMemoryNode(
+  botId: string,
+  body: {
+    parent_uri?: string | null;
+    slug?: string | null;
+    title: string;
+    kind?: "folder" | "memory";
+    node_type?: string | null;
+    content?: string;
+    is_core?: boolean;
+    priority?: number;
+  },
+): Promise<{ id: string; uri: string; title: string; kind: string; node_type: string | null; is_core: boolean; priority: number }> {
+  return apiPost(`/api/bots/${encodeURIComponent(botId)}/memory/nodes`, body);
+}
+
+export async function getMemoryTree(botId: string): Promise<MemoryTreeResponse> {
+  return apiGet<MemoryTreeResponse>(`/api/bots/${encodeURIComponent(botId)}/memory/tree`);
+}
+
+export async function getMemoryGraph(botId: string): Promise<MemoryGraphResponse> {
+  return apiGet<MemoryGraphResponse>(`/api/bots/${encodeURIComponent(botId)}/memory/graph`);
+}
+
+export async function getMemoryNode(botId: string, uri: string): Promise<MemoryNodeDetail> {
+  return apiGet<MemoryNodeDetail>(`/api/bots/${encodeURIComponent(botId)}/memory/node?uri=${encodeURIComponent(uri)}`);
+}
+
+export async function searchMemory(botId: string, query: string, limit = 8): Promise<MemorySearchResult[]> {
+  return apiGet<MemorySearchResult[]>(
+    `/api/bots/${encodeURIComponent(botId)}/memory/search?query=${encodeURIComponent(query)}&limit=${limit}`,
+  );
+}
+
+export async function getMemoryView(botId: string, viewName: MemorySystemViewName): Promise<MemorySystemView> {
+  return apiGet<MemorySystemView>(`/api/bots/${encodeURIComponent(botId)}/memory/views/${viewName}`);
 }
 
 export async function listDashboard(): Promise<DashboardData> {

@@ -7,11 +7,13 @@ import {
   deleteProviderModels,
   disconnectMcpServer,
   fetchProviderModels,
+  getConfig,
   getBotConfig,
   listDashboard,
   listMcpServers,
   listSkills,
   listSubagentCandidates,
+  updateConfig,
   updateBotConfig,
   updateMcpServer,
   updateModel,
@@ -30,6 +32,12 @@ import type {
 import { useI18n } from "../lib/i18n";
 import PlatformsView from "./PlatformsView";
 import SkillsView from "./SkillsView";
+import {
+  buildMemoryConfigUpdate,
+  memoryComparable,
+  memoryDraftFromConfig,
+  type MemoryConfigDraft,
+} from "./configMemory";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -237,6 +245,22 @@ function providerDraftFromRecord(provider: ProviderRecord): ProviderDraft {
   };
 }
 
+function EyeIcon(props: { open: boolean }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M2 10c1.9-3 4.7-4.5 8-4.5s6.1 1.5 8 4.5c-1.9 3-4.7 4.5-8 4.5S3.9 13 2 10Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="10" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+      {props.open ? null : <path d="M4 16 16 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />}
+    </svg>
+  );
+}
+
 export default function ConfigView(props: {
   botId: string;
   onBotsChanged?: () => void;
@@ -263,6 +287,10 @@ export default function ConfigView(props: {
   const [providerDraft, setProviderDraft] = useState<ProviderDraft | null>(null);
   const [providerBaseline, setProviderBaseline] = useState("");
   const [savingProvider, setSavingProvider] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState<MemoryConfigDraft | null>(null);
+  const [memoryBaseline, setMemoryBaseline] = useState("");
+  const [savingMemory, setSavingMemory] = useState(false);
+  const [showMemoryDatabaseUrl, setShowMemoryDatabaseUrl] = useState(false);
   const [selectedMcpServerName, setSelectedMcpServerName] = useState<string | null>(null);
   const [mcpDraft, setMcpDraft] = useState<McpDraft | null>(null);
   const [mcpBaseline, setMcpBaseline] = useState("");
@@ -349,6 +377,7 @@ export default function ConfigView(props: {
   const activeModels = dashboard?.available_models ?? [];
   const botDirty = draftComparable(botDraft) !== botBaseline;
   const providerDirty = providerComparable(providerDraft) !== providerBaseline;
+  const memoryDirty = memoryComparable(memoryDraft) !== memoryBaseline;
   const mcpDirty = mcpComparable(mcpDraft) !== mcpBaseline;
   const allVisibleFetchedSelected =
     selectableFilteredFetchedNames.length > 0 &&
@@ -379,6 +408,14 @@ export default function ConfigView(props: {
     setSkills(await listSkills());
   }
 
+  async function refreshGlobalConfig() {
+    const next = await getConfig();
+    const draft = memoryDraftFromConfig(next);
+    setMemoryDraft(draft);
+    setMemoryBaseline(memoryComparable(draft));
+    setShowMemoryDatabaseUrl(false);
+  }
+
   async function refreshMcpServers(preferredName?: string | null) {
     const next = await listMcpServers();
     setMcpServers(next);
@@ -402,7 +439,7 @@ export default function ConfigView(props: {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([refreshDashboard(null), refreshBot(botId)])
+    Promise.all([refreshDashboard(null), refreshBot(botId), refreshGlobalConfig()])
       .catch((err) => setStatus(String(err)))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -471,6 +508,10 @@ export default function ConfigView(props: {
 
   function setProviderField<K extends keyof ProviderDraft>(key: K, value: ProviderDraft[K]) {
     setProviderDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  function setMemoryField<K extends keyof MemoryConfigDraft>(key: K, value: MemoryConfigDraft[K]) {
+    setMemoryDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
   function setMcpField<K extends keyof McpDraft>(key: K, value: McpDraft[K]) {
@@ -570,6 +611,21 @@ export default function ConfigView(props: {
       setStatus(String(err));
     } finally {
       setSavingProvider(false);
+    }
+  }
+
+  async function onSaveMemoryConfig() {
+    if (!memoryDraft) return;
+    setSavingMemory(true);
+    setStatus(null);
+    try {
+      await updateConfig(buildMemoryConfigUpdate(memoryDraft));
+      await refreshGlobalConfig();
+      setStatus(t("config.status.memorySaved"));
+    } catch (err) {
+      setStatus(String(err));
+    } finally {
+      setSavingMemory(false);
     }
   }
 
@@ -838,6 +894,80 @@ export default function ConfigView(props: {
         {tab === "bots" ? (
           <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
             <div className="flex flex-col gap-4">
+              <SectionCard
+                title={t("config.section.memory.title")}
+                subtitle={t("config.section.memory.subtitle")}
+                right={
+                  <button
+                    type="button"
+                    className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                    onClick={() => void onSaveMemoryConfig()}
+                    disabled={!memoryDraft || savingMemory || !memoryDirty}
+                  >
+                    {savingMemory ? t("config.memory.saving") : t("common.save")}
+                  </button>
+                }
+              >
+                {memoryDraft ? (
+                  <div className="grid gap-4">
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-zinc-200">{t("config.memory.backend")}</label>
+                      <select
+                        value={memoryDraft.backend}
+                        onChange={(e) => setMemoryField("backend", e.target.value as MemoryConfigDraft["backend"])}
+                        className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                      >
+                        <option value="sqlite">{t("config.memory.backend.sqlite")}</option>
+                        <option value="postgres">{t("config.memory.backend.postgres")}</option>
+                      </select>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <label className="text-sm font-semibold text-zinc-200">{t("config.memory.databaseUrl")}</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={showMemoryDatabaseUrl ? memoryDraft.databaseUrlValue : ""}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setMemoryDraft((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    databaseUrlValue: value,
+                                    databaseUrlConfigured: Boolean(value.trim()),
+                                  }
+                                : prev,
+                            );
+                          }}
+                          readOnly={!showMemoryDatabaseUrl}
+                          disabled={memoryDraft.backend !== "postgres"}
+                          placeholder={
+                            memoryDraft.databaseUrlConfigured
+                              ? t("config.memory.urlConfigured")
+                              : t("config.memory.urlNotConfigured")
+                          }
+                          className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                        />
+                        <button
+                          type="button"
+                          className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-zinc-300 hover:bg-zinc-800"
+                          onClick={() => setShowMemoryDatabaseUrl((prev) => !prev)}
+                          title={showMemoryDatabaseUrl ? t("config.memory.hideUrl") : t("config.memory.showUrl")}
+                          aria-label={showMemoryDatabaseUrl ? t("config.memory.hideUrl") : t("config.memory.showUrl")}
+                        >
+                          <EyeIcon open={showMemoryDatabaseUrl} />
+                        </button>
+                      </div>
+                      <div className="text-xs text-zinc-500">
+                        {memoryDraft.backend === "postgres"
+                          ? t("config.memory.databaseUrl.helpPostgres")
+                          : t("config.memory.databaseUrl.helpSqlite")}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </SectionCard>
+
               <SectionCard
                 title={t("config.section.allBots.title")}
                 subtitle={t("config.section.allBots.subtitle")}

@@ -80,6 +80,9 @@ class ConfigResponse(BaseModel):
     available_skill_targets: list[str] = Field(default_factory=list)
     tool_plugins: list[str] = Field(default_factory=list)
     api_key_masked: str | None = None
+    memory_backend: str = "sqlite"
+    memory_database_url_configured: bool = False
+    memory_database_url_value: str | None = None
 
 
 class ConfigUpdate(BaseModel):
@@ -89,6 +92,8 @@ class ConfigUpdate(BaseModel):
     stream_enabled: bool | None = None
     skills_dirs: list[str] | None = None
     tool_plugins: list[str] | None = None
+    memory_backend: str | None = None
+    memory_database_url_value: str | None = None
 
 
 class BotCreateRequest(BaseModel):
@@ -124,6 +129,7 @@ class BotConfigResponse(BaseModel):
     tool_plugins: list[str] = Field(default_factory=list)
     skills_disabled: list[str] = Field(default_factory=list)
     mcp_overrides: dict[str, bool] = Field(default_factory=dict)
+    active_memory_namespace: str | None = None
     soul: str = ""
     subagent_exposable: bool = False
     subagent_name: str | None = None
@@ -145,6 +151,7 @@ class BotConfigUpdate(BaseModel):
     tool_plugins: list[str] | None = None
     skills_disabled: list[str] | None = None
     mcp_overrides: dict[str, bool | None] | None = None
+    active_memory_namespace: str | None = None
     soul: str | None = None
     subagent_exposable: bool | None = None
     subagent_name: str | None = None
@@ -168,6 +175,23 @@ class SkillInfo(BaseModel):
     override_count: int = 0
     overridden_by_source_type: str | None = None
     overridden_by_path: str | None = None
+
+
+class MemoryNamespaceCreateRequest(BaseModel):
+    slug: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str | None = None
+
+
+class MemoryNodeCreateRequest(BaseModel):
+    parent_uri: str | None = None
+    slug: str | None = None
+    title: str = Field(min_length=1)
+    kind: Literal["folder", "memory"]
+    node_type: str | None = None
+    content: str = ""
+    is_core: bool = False
+    priority: int = 0
 
 
 class SkillCreateRequest(BaseModel):

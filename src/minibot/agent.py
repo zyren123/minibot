@@ -23,8 +23,13 @@ from .tools.builtin import (
     EditFileTool,
     TodoWriteTool,
     TodoManager,
-    MemoryReadTool,
-    MemoryWriteTool,
+    CreateMemoryTool,
+    DeleteMemoryTool,
+    EditMemoryTool,
+    ManageTriggersTool,
+    ReadMemoryTool,
+    SearchMemoryTool,
+    UpdateMemoryTool,
 )
 from .memory.manager import MemoryManager
 from .tools.meta import (
@@ -310,8 +315,13 @@ class Agent:
             self.tool_registry.register(TaskTool(self.agent_registry, self.subagent_executor))
 
         if self.memory_manager is not None:
-            self.tool_registry.register(MemoryReadTool(self.memory_manager))
-            self.tool_registry.register(MemoryWriteTool(self.memory_manager))
+            self.tool_registry.register(CreateMemoryTool(self.memory_manager))
+            self.tool_registry.register(ReadMemoryTool(self.memory_manager))
+            self.tool_registry.register(UpdateMemoryTool(self.memory_manager))
+            self.tool_registry.register(EditMemoryTool(self.memory_manager))
+            self.tool_registry.register(DeleteMemoryTool(self.memory_manager))
+            self.tool_registry.register(SearchMemoryTool(self.memory_manager))
+            self.tool_registry.register(ManageTriggersTool(self.memory_manager))
 
         self._register_team_tools()
 
@@ -403,19 +413,15 @@ Connected Servers: {server_list}
 Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when external systems or remote context are required."""
 
     def _build_memory_prompt_section(self) -> str:
-        """Describe injected memory context for the prompt."""
+        """Describe memory tool usage for the prompt."""
         if self.memory_manager is None:
             return ""
-        memory_content = self.memory_manager.get_context_for_prompt()
-        if not memory_content:
-            return ""
-        return f"""## Memory (Auto-loaded)
-{memory_content}
-
-Use `memory_write` tool to update memories as you work:
-- **long_term**: Save stable patterns, user preferences, key decisions, project conventions
-- **daily**: Save today's progress, current context, continuations for next session
-Keep long-term memory concise (<{self.config.memory.long_term_max_lines} lines). Daily memory is for ephemeral context."""
+        return """## Memory
+- Start new memory-aware work with `read_memory("system://boot")`.
+- Use `search_memory(...)` when you do not know the exact URI.
+- Use `read_memory("<uri>")` to inspect specific memory nodes or system views.
+- Do not guess URIs when exact paths are uncertain.
+- Use memory write tools only for durable information worth reusing later."""
 
     def _build_subagent_prompt_section(self) -> str:
         """Describe subagent delegation rules for the prompt."""

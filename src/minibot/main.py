@@ -27,7 +27,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show this help",
     "/info": "Show session info",
     "/stream": "Streaming control: /stream [on|off|status]",
-    "/memory": "Memory management: /memory [show|edit|list|daily|append]",
+    "/memory": "Memory inspection: /memory [boot|index|glossary|read|search]",
     "/skills": "Skills toggle: /skills [list|enable|disable|toggle]",
     "/agent": "Subagent management: /agent [list|info|enable|disable|create|delete]",
     "/mcp": "MCP server management: /mcp [list]",

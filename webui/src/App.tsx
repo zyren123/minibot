@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ChatView from "./views/ChatView";
 import ConfigView from "./views/ConfigView";
+import MemoryView from "./views/MemoryView";
 import type { BotMeta } from "./lib/types";
 import { createBot, deleteBot, listBots } from "./lib/api";
 import {
@@ -11,7 +12,7 @@ import {
   type Language,
 } from "./lib/i18n";
 
-type Tab = "chat" | "config";
+type Tab = "chat" | "memory" | "config";
 type ThemeMode = "dark" | "light" | "system";
 type ResolvedTheme = "dark" | "light";
 
@@ -178,6 +179,7 @@ export default function App() {
   const tabs = useMemo(
     () => [
       { id: "chat" as const, label: t("app.tab.chat") },
+      { id: "memory" as const, label: t("app.tab.memory") },
       { id: "config" as const, label: t("app.tab.config") },
     ],
     [t],
@@ -189,7 +191,8 @@ export default function App() {
   const currentLanguageLabel = language === "zh-CN" ? t("language.option.zh") : t("language.option.en");
 
   useEffect(() => {
-    document.title = tab === "chat" ? t("app.title.chat") : t("app.title.config");
+    document.title =
+      tab === "chat" ? t("app.title.chat") : tab === "memory" ? t("app.title.memory") : t("app.title.config");
   }, [tab, t]);
 
   async function refreshBots() {
@@ -432,6 +435,11 @@ export default function App() {
           <div className="h-full" hidden={tab !== "chat"} aria-hidden={tab !== "chat"}>
             <ChatView botId={botId} botName={currentBot?.name || botId} />
           </div>
+          {tab === "memory" ? (
+            <div className="h-full">
+              <MemoryView botId={botId} />
+            </div>
+          ) : null}
           {tab === "config" ? (
             <div className="h-full">
               <ConfigView botId={botId} onBotsChanged={refreshBots} onSelectBot={setBotId} />

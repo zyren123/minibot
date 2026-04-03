@@ -1,61 +1,17 @@
-"""Memory read/write tools for Minibot."""
+"""Structured memory tools for Minibot."""
 
+from __future__ import annotations
+
+import json
 from typing import Any
 
-from ...tools.base import BaseTool
 from ...memory.manager import MemoryManager
+from ...tools.base import BaseTool
 
 
-class MemoryReadTool(BaseTool):
-    """Tool for reading memory content."""
-
-    name = "memory_read"
-    description = "Read memory content (long-term or daily). Use this to recall project knowledge, user preferences, or previous session context."
-
-    def __init__(self, memory_manager: MemoryManager):
-        self.memory_manager = memory_manager
-
-    @property
-    def input_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "memory_type": {
-                    "type": "string",
-                    "enum": ["long_term", "daily"],
-                    "description": "Type of memory to read.",
-                },
-                "date": {
-                    "type": "string",
-                    "description": "Date for daily memory (YYYY-MM-DD). Defaults to today.",
-                },
-            },
-            "required": ["memory_type"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        memory_type = kwargs["memory_type"]
-        date = kwargs.get("date")
-
-        if memory_type == "long_term":
-            content = self.memory_manager.read_long_term()
-            return content if content else "(Long-term memory is empty)"
-        elif memory_type == "daily":
-            try:
-                content = self.memory_manager.read_daily(date)
-            except ValueError as exc:
-                return f"Invalid date: {exc}"
-            label = date or "today"
-            return content if content else f"(Daily memory for {label} is empty)"
-        else:
-            return f"Unknown memory_type: {memory_type}. Use 'long_term' or 'daily'."
-
-
-class MemoryWriteTool(BaseTool):
-    """Tool for writing memory content."""
-
-    name = "memory_write"
-    description = "Write or append to memory. Use 'long_term' for stable project knowledge, conventions, and user preferences. Use 'daily' for today's progress, context, and continuations."
+class ReadMemoryTool(BaseTool):
+    name = "read_memory"
+    description = "Read a memory node or system view by URI."
 
     def __init__(self, memory_manager: MemoryManager):
         self.memory_manager = memory_manager
@@ -65,69 +21,195 @@ class MemoryWriteTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "memory_type": {
-                    "type": "string",
-                    "enum": ["long_term", "daily"],
-                    "description": "Type of memory to write.",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write (ignored for mode 'replace').",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["overwrite", "append", "replace"],
-                    "description": "Write mode. Defaults to 'append'. Use 'replace' with 'old' and 'new'.",
-                },
-                "old": {
-                    "type": "string",
-                    "description": "Text to find when mode is 'replace'.",
-                },
-                "new": {
-                    "type": "string",
-                    "description": "Replacement text when mode is 'replace'.",
-                },
-                "date": {
-                    "type": "string",
-                    "description": "Date for daily memory (YYYY-MM-DD). Defaults to today.",
-                },
+                "uri": {"type": "string", "description": "Memory URI, for example memory://characters/ali or system://boot."},
             },
-            "required": ["memory_type"],
+            "required": ["uri"],
         }
 
     async def execute(self, **kwargs) -> str:
-        memory_type = kwargs["memory_type"]
-        content = kwargs.get("content")
-        mode = kwargs.get("mode", "append")
-        date = kwargs.get("date")
-        old = kwargs.get("old")
-        new = kwargs.get("new")
+        return self.memory_manager.read(kwargs["uri"])
 
-        if mode != "replace" and content is None:
-            return "Invalid write: 'content' is required unless mode is 'replace'."
 
-        if memory_type == "long_term":
-            if mode == "replace":
-                if not old:
-                    return "Invalid replace: 'old' must be non-empty."
-                if new is None:
-                    return "Invalid replace: 'new' is required."
-                return self.memory_manager.replace_long_term(old, new)
-            if mode == "append":
-                return self.memory_manager.append_long_term(content)
-            return self.memory_manager.write_long_term(content)
-        elif memory_type == "daily":
-            try:
-                if mode == "replace":
-                    if not old:
-                        return "Invalid replace: 'old' must be non-empty."
-                    if new is None:
-                        return "Invalid replace: 'new' is required."
-                    return self.memory_manager.replace_daily(old, new, date)
-                if mode == "append":
-                    return self.memory_manager.append_daily(content, date)
-                return self.memory_manager.write_daily(content, date)
-            except ValueError as exc:
-                return f"Invalid date: {exc}"
-        else:
-            return f"Unknown memory_type: {memory_type}. Use 'long_term' or 'daily'."
+class CreateMemoryTool(BaseTool):
+    name = "create_memory"
+    description = "Create a folder or memory node inside the active namespace."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "parent_uri": {"type": ["string", "null"]},
+                "title": {"type": "string"},
+                "kind": {"type": "string", "enum": ["folder", "memory"]},
+                "slug": {"type": "string"},
+                "node_type": {"type": "string"},
+                "content": {"type": "string"},
+                "is_core": {"type": "boolean"},
+                "priority": {"type": "integer"},
+            },
+            "required": ["parent_uri", "title", "kind"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        node = self.memory_manager.create_memory(
+            parent_uri=kwargs.get("parent_uri"),
+            title=kwargs["title"],
+            kind=kwargs["kind"],
+            slug=kwargs.get("slug"),
+            node_type=kwargs.get("node_type"),
+            content=kwargs.get("content", ""),
+            is_core=bool(kwargs.get("is_core", False)),
+            priority=int(kwargs.get("priority", 0)),
+        )
+        return f"Created {node.kind} at {node.uri}"
+
+
+class UpdateMemoryTool(BaseTool):
+    name = "update_memory"
+    description = "Update memory node metadata or replace full content."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "title": {"type": "string"},
+                "slug": {"type": "string"},
+                "content": {"type": "string"},
+                "node_type": {"type": "string"},
+                "is_core": {"type": "boolean"},
+                "priority": {"type": "integer"},
+                "parent_uri": {"type": ["string", "null"]},
+            },
+            "required": ["uri"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        uri = kwargs.pop("uri")
+        node = self.memory_manager.update_memory(uri, **kwargs)
+        return f"Updated {node.uri}"
+
+
+class EditMemoryTool(BaseTool):
+    name = "edit_memory"
+    description = "Edit memory content locally via replace_text or append_text."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "operation": {"type": "string", "enum": ["replace_text", "append_text"]},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+                "text": {"type": "string"},
+            },
+            "required": ["uri", "operation"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        uri = kwargs.pop("uri")
+        node = self.memory_manager.edit_memory(uri, **kwargs)
+        return f"Edited {node.uri}"
+
+
+class DeleteMemoryTool(BaseTool):
+    name = "delete_memory"
+    description = "Delete a memory node by URI."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {"uri": {"type": "string"}},
+            "required": ["uri"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        self.memory_manager.delete_memory(kwargs["uri"])
+        return f"Deleted {kwargs['uri']}"
+
+
+class SearchMemoryTool(BaseTool):
+    name = "search_memory"
+    description = "Search memory nodes inside the active namespace."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+                "node_types": {"type": "array", "items": {"type": "string"}},
+                "include_folders": {"type": "boolean"},
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        results = self.memory_manager.search(
+            kwargs["query"],
+            limit=int(kwargs.get("limit", 8)),
+            node_types=kwargs.get("node_types"),
+            include_folders=bool(kwargs.get("include_folders", False)),
+        )
+        payload = [
+            {
+                "uri": result.uri,
+                "title": result.title,
+                "kind": result.kind,
+                "node_type": result.node_type,
+                "matched_by": result.matched_by,
+                "snippet": result.snippet,
+                "parent_uri": result.parent_uri,
+            }
+            for result in results
+        ]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+class ManageTriggersTool(BaseTool):
+    name = "manage_triggers"
+    description = "Add or remove glossary triggers for a memory node."
+
+    def __init__(self, memory_manager: MemoryManager):
+        self.memory_manager = memory_manager
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "add": {"type": "array", "items": {"type": "string"}},
+                "remove": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["uri"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        payload = self.memory_manager.manage_triggers(
+            kwargs["uri"],
+            add=kwargs.get("add"),
+            remove=kwargs.get("remove"),
+        )
+        return json.dumps(payload, ensure_ascii=False, indent=2)

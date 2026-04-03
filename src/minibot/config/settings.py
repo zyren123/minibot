@@ -47,6 +47,9 @@ tools:
 memory:
   enabled: true
   memory_dir: memory
+  backend: sqlite
+  database_url: ${MEMORY_DATABASE_URL}
+  active_namespace:
   long_term_max_lines: 200
   daily_lookback_days: 1
 
@@ -284,6 +287,9 @@ def _parse_memory_config(data: dict | None, app_home: Path) -> MemoryConfig:
     return MemoryConfig(
         enabled=data.get("enabled", True),
         memory_dir=str(resolved_memory_dir),
+        backend=str(data.get("backend", "sqlite")),
+        database_url=data.get("database_url"),
+        active_namespace=data.get("active_namespace"),
         long_term_max_lines=data.get("long_term_max_lines", 200),
         daily_lookback_days=data.get("daily_lookback_days", 1),
     )

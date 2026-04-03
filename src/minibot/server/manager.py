@@ -13,7 +13,8 @@ import uuid
 from openai import AsyncOpenAI
 
 from ..config import Config, load_config
-from ..config.writer import update_mcp_server_config
+from ..config.writer import update_default_config, update_mcp_server_config, upsert_env_value
+from ..memory.manager import MemoryManager
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
 from ..session.manager import SessionManager
@@ -61,6 +62,8 @@ class AgentManager:
         self._bot_store = BotStore(app_home=self.app_home)
         self._dashboard_store = DashboardStore(app_home=self.app_home)
         self._platform_store = PlatformStore(app_home=self.app_home)
+        self._default_config_path = (self.app_home / "config" / "default.yaml").resolve()
+        self._env_path = (self.app_home / ".env").resolve()
         self._mcp_config_path = (self.app_home / "config" / "mcp_servers.yaml").resolve()
         self.user_skills_dir = Path(self._base_config.skills_dir).resolve()
         self.project_skills_dir = (Path(self._base_config.project_root) / "skills").resolve()
@@ -80,6 +83,7 @@ class AgentManager:
 
     def config_snapshot(self) -> dict[str, Any]:
         bot_cfg = self.bot_config_snapshot(DEFAULT_BOT_ID)
+        memory_database_url = self._base_config.memory.database_url
         return {
             "base_url": bot_cfg.get("base_url"),
             "model": bot_cfg.get("model"),
@@ -91,13 +95,52 @@ class AgentManager:
             "available_skill_targets": ["user", "project"],
             "tool_plugins": list(bot_cfg.get("tool_plugins") or []),
             "api_key_masked": bot_cfg.get("api_key_masked"),
+            "memory_backend": self._base_config.memory.backend,
+            "memory_database_url_configured": bool(memory_database_url),
+            "memory_database_url_value": memory_database_url,
         }
 
     async def update_config(self, patch: dict[str, Any]) -> None:
         """Back-compat server-wide config update (maps to default bot + global skills dirs)."""
-        if "skills_dirs" in patch and patch["skills_dirs"] is not None:
-            async with self._global_lock:
+        async with self._global_lock:
+            if "skills_dirs" in patch and patch["skills_dirs"] is not None:
                 self.skills_dirs = [str(Path(p).expanduser().resolve()) for p in patch["skills_dirs"]]
+
+            requested_backend = patch.get("memory_backend")
+            backend = (
+                str(requested_backend).strip().lower()
+                if requested_backend is not None
+                else self._base_config.memory.backend
+            )
+            if backend not in {"sqlite", "postgres"}:
+                raise ValueError("memory_backend must be 'sqlite' or 'postgres'")
+
+            raw_memory_url = patch.get("memory_database_url_value", _STATE_UNSET)
+            next_memory_url = self._base_config.memory.database_url
+            if raw_memory_url is not _STATE_UNSET:
+                if isinstance(raw_memory_url, str):
+                    next_memory_url = raw_memory_url.strip() or None
+                else:
+                    next_memory_url = None
+
+            if backend == "postgres" and not next_memory_url:
+                raise ValueError("memory_database_url_value is required when memory_backend=postgres")
+
+            if requested_backend is not None:
+                update_default_config(
+                    self._default_config_path,
+                    {
+                        "memory": {
+                            "backend": backend,
+                            "database_url": "${MEMORY_DATABASE_URL}",
+                        }
+                    },
+                )
+                self._base_config.memory.backend = backend
+
+            if raw_memory_url is not _STATE_UNSET:
+                upsert_env_value(self._env_path, "MEMORY_DATABASE_URL", next_memory_url)
+                self._base_config.memory.database_url = next_memory_url
 
         default_patch: dict[str, Any] = {}
         if "base_url" in patch:
@@ -202,6 +245,7 @@ class AgentManager:
             "tool_plugins": list(data.get("tool_plugins") or []),
             "skills_disabled": list(data.get("skills_disabled") or []),
             "mcp_overrides": dict(data.get("mcp_overrides") or {}),
+            "active_memory_namespace": data.get("active_memory_namespace"),
             "soul": soul_raw,
             "subagent_exposable": bool(data.get("subagent_exposable", False)),
             "subagent_name": data.get("subagent_name"),
@@ -252,6 +296,9 @@ class AgentManager:
             if "tool_plugins" in patch:
                 raw = patch.get("tool_plugins") or []
                 bot_patch["tool_plugins"] = [str(Path(p).expanduser().resolve()) for p in raw]
+
+            if "active_memory_namespace" in patch:
+                bot_patch["active_memory_namespace"] = self._optional_text(patch.get("active_memory_namespace"))
 
             if "skills_disabled" in patch:
                 raw = patch.get("skills_disabled") or []
@@ -1109,8 +1156,149 @@ class AgentManager:
                 server.enabled = bool(value)
 
         cfg.teams.enabled = bool(cfg.teams.enabled) and bool(data.get("teams_enabled", True))
+        cfg.memory.active_namespace = self._optional_text(data.get("active_memory_namespace"))
 
         return cfg, data
+
+    def _memory_manager_for(self, bot_id: str) -> MemoryManager:
+        cfg, _data = self._build_bot_config(bot_id)
+        return MemoryManager(cfg.memory, cfg.app_home, cfg.project_root)
+
+    def list_memory_namespaces(self, bot_id: str) -> list[dict[str, Any]]:
+        manager = self._memory_manager_for(bot_id)
+        return [
+            {
+                "id": item.id,
+                "slug": item.slug,
+                "title": item.title,
+                "description": item.description,
+            }
+            for item in manager.list_namespaces()
+        ]
+
+    async def create_memory_namespace(self, bot_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        namespace = manager.create_namespace(
+            str(patch.get("slug") or "").strip(),
+            str(patch.get("title") or "").strip(),
+            self._optional_text(patch.get("description")),
+        )
+        current = self.bot_config_snapshot(bot_id).get("active_memory_namespace")
+        if not current:
+            await self.update_bot_config(bot_id, {"active_memory_namespace": namespace.slug})
+        return {
+            "id": namespace.id,
+            "slug": namespace.slug,
+            "title": namespace.title,
+            "description": namespace.description,
+        }
+
+    def create_memory_node(self, bot_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        node = manager.create_memory(
+            parent_uri=patch.get("parent_uri"),
+            slug=self._optional_text(patch.get("slug")),
+            title=str(patch.get("title") or "").strip(),
+            kind=str(patch.get("kind") or "memory"),
+            node_type=self._optional_text(patch.get("node_type")),
+            content=str(patch.get("content") or ""),
+            is_core=bool(patch.get("is_core", False)),
+            priority=int(patch.get("priority", 0)),
+        )
+        return {
+            "id": node.id,
+            "uri": node.uri,
+            "title": node.title,
+            "kind": node.kind,
+            "node_type": node.node_type,
+            "is_core": node.is_core,
+            "priority": node.priority,
+        }
+
+    def memory_search(self, bot_id: str, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        manager = self._memory_manager_for(bot_id)
+        return [
+            {
+                "uri": item.uri,
+                "title": item.title,
+                "kind": item.kind,
+                "node_type": item.node_type,
+                "matched_by": item.matched_by,
+                "snippet": item.snippet,
+                "parent_uri": item.parent_uri,
+            }
+            for item in manager.search(query, limit=limit)
+        ]
+
+    def memory_view(self, bot_id: str, view_name: str) -> str:
+        manager = self._memory_manager_for(bot_id)
+        return manager.read(f"system://{view_name}")
+
+    def memory_node(self, bot_id: str, *, uri: str) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        namespace = manager._active_namespace()
+        node = manager.repository.get_node_by_uri(namespace, uri)
+        if node is None:
+            raise KeyError(uri)
+        children = manager.repository.list_children(namespace, uri)
+        triggers = manager.repository.list_triggers(namespace, uri)
+        return {
+            "id": node.id,
+            "uri": node.uri,
+            "title": node.title,
+            "kind": node.kind,
+            "node_type": node.node_type,
+            "is_core": node.is_core,
+            "priority": node.priority,
+            "content": manager.read(uri),
+            "triggers": triggers,
+            "children": [
+                {"uri": child.uri, "title": child.title, "kind": child.kind, "node_type": child.node_type}
+                for child in children
+            ],
+        }
+
+    def memory_tree(self, bot_id: str) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        namespace = manager._active_namespace()
+
+        def build(parent_uri: str | None) -> list[dict[str, Any]]:
+            nodes = []
+            for node in manager.repository.list_children(namespace, parent_uri):
+                nodes.append(
+                    {
+                        "uri": node.uri,
+                        "title": node.title,
+                        "kind": node.kind,
+                        "node_type": node.node_type,
+                        "children": build(node.uri),
+                    }
+                )
+            return nodes
+
+        return {"nodes": build(None)}
+
+    def memory_graph(self, bot_id: str) -> dict[str, Any]:
+        tree = self.memory_tree(bot_id)["nodes"]
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, str]] = []
+
+        def walk(items: list[dict[str, Any]]) -> None:
+            for item in items:
+                nodes.append(
+                    {
+                        "uri": item["uri"],
+                        "title": item["title"],
+                        "kind": item["kind"],
+                        "node_type": item["node_type"],
+                    }
+                )
+                for child in item["children"]:
+                    edges.append({"source": item["uri"], "target": child["uri"]})
+                walk(item["children"])
+
+        walk(tree)
+        return {"nodes": nodes, "edges": edges}
 
     def _load_plugin_tools(self, plugin_paths: list[str]) -> list[Any]:
         tools: list[Any] = []

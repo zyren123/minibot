@@ -9,44 +9,49 @@ from src.minibot.ui.cmd_memory import handle_memory_cmd
 
 def _make_memory_manager() -> MagicMock:
     mm = MagicMock()
-    mm.read_long_term.return_value = "long-term content"
-    mm.read_daily.return_value = "daily content"
-    mm.list_daily_files.return_value = ["2026-03-10", "2026-03-09"]
-    mm.write_long_term.return_value = "Updated."
-    mm.append_long_term.return_value = "Appended."
+    mm.read.return_value = "memory content"
+    mm.search.return_value = []
     return mm
 
 
 @pytest.mark.asyncio
-async def test_memory_show_calls_read_long_term():
+async def test_memory_boot_reads_system_boot():
     mm = _make_memory_manager()
     with patch("src.minibot.ui.cmd_memory.print_panel"):
-        await handle_memory_cmd("show", mm)
-    mm.read_long_term.assert_called_once()
+        await handle_memory_cmd("boot", mm)
+    mm.read.assert_called_once_with("system://boot")
 
 
 @pytest.mark.asyncio
-async def test_memory_list_calls_list_daily():
+async def test_memory_index_reads_system_index():
     mm = _make_memory_manager()
     with patch("src.minibot.ui.cmd_memory.print_panel"):
-        await handle_memory_cmd("list", mm)
-    mm.list_daily_files.assert_called_once()
+        await handle_memory_cmd("index", mm)
+    mm.read.assert_called_once_with("system://index")
 
 
 @pytest.mark.asyncio
-async def test_memory_append_calls_append_long_term():
+async def test_memory_glossary_reads_system_glossary():
     mm = _make_memory_manager()
-    with patch("src.minibot.ui.cmd_memory.print_system"):
-        await handle_memory_cmd("append hello world", mm)
-    mm.append_long_term.assert_called_once_with("hello world")
+    with patch("src.minibot.ui.cmd_memory.print_panel"):
+        await handle_memory_cmd("glossary", mm)
+    mm.read.assert_called_once_with("system://glossary")
 
 
 @pytest.mark.asyncio
-async def test_memory_daily_calls_read_daily():
+async def test_memory_read_passes_uri_through():
     mm = _make_memory_manager()
     with patch("src.minibot.ui.cmd_memory.print_panel"):
-        await handle_memory_cmd("daily 2026-03-10", mm)
-    mm.read_daily.assert_called_once_with("2026-03-10")
+        await handle_memory_cmd("read memory://characters/ali", mm)
+    mm.read.assert_called_once_with("memory://characters/ali")
+
+
+@pytest.mark.asyncio
+async def test_memory_search_calls_manager_search():
+    mm = _make_memory_manager()
+    with patch("src.minibot.ui.cmd_memory.print_panel"):
+        await handle_memory_cmd("search 白露镇", mm)
+    mm.search.assert_called_once_with("白露镇")
 
 
 @pytest.mark.asyncio

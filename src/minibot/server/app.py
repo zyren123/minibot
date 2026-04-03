@@ -18,6 +18,8 @@ from .models import (
     BotConfigResponse,
     BotConfigUpdate,
     BotCreateRequest,
+    MemoryNamespaceCreateRequest,
+    MemoryNodeCreateRequest,
     BotMetaResponse,
     ChatRequest,
     ConfigResponse,
@@ -152,6 +154,63 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "ok"}
+
+    @app.get("/api/bots/{bot_id}/memory/namespaces")
+    async def list_memory_namespaces(bot_id: str) -> Any:
+        return manager.list_memory_namespaces(bot_id)
+
+    @app.post("/api/bots/{bot_id}/memory/namespaces")
+    async def create_memory_namespace(bot_id: str, req: MemoryNamespaceCreateRequest) -> Any:
+        try:
+            return await manager.create_memory_namespace(bot_id, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/bots/{bot_id}/memory/nodes")
+    async def create_memory_node(bot_id: str, req: MemoryNodeCreateRequest) -> Any:
+        try:
+            return manager.create_memory_node(bot_id, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/memory/tree")
+    async def get_memory_tree(bot_id: str) -> Any:
+        try:
+            return manager.memory_tree(bot_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/memory/graph")
+    async def get_memory_graph(bot_id: str) -> Any:
+        try:
+            return manager.memory_graph(bot_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/memory/node")
+    async def get_memory_node(bot_id: str, uri: str) -> Any:
+        try:
+            return manager.memory_node(bot_id, uri=uri)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Memory node not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/memory/search")
+    async def search_memory(bot_id: str, query: str, limit: int = 8) -> Any:
+        try:
+            return manager.memory_search(bot_id, query=query, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bots/{bot_id}/memory/views/{view_name}")
+    async def get_memory_view(bot_id: str, view_name: str) -> Any:
+        if view_name not in {"boot", "index", "glossary"}:
+            raise HTTPException(status_code=404, detail="Unknown memory view")
+        try:
+            return {"uri": f"system://{view_name}", "content": manager.memory_view(bot_id, view_name)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/bots/{bot_id}/subagent-candidates", response_model=list[SubagentCandidateResponse])
     async def get_subagent_candidates(bot_id: str) -> Any:

@@ -58,6 +58,9 @@ class MemoryConfig:
     """Memory system configuration."""
     enabled: bool = True
     memory_dir: str = "memory"
+    backend: str = "sqlite"
+    database_url: str | None = None
+    active_namespace: str | None = None
     long_term_max_lines: int = 200
     daily_lookback_days: int = 1
 

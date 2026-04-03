@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..config.schema import MemoryConfig
+from .render import render_markdown_links
+from .repository import MemoryRepository
+from .search import SearchResult, rank_search_results
 
 
 class MemoryManager:
@@ -19,6 +22,7 @@ class MemoryManager:
         self.long_term_file = self.memory_dir / "LONG_TERM.md"
         self.daily_dir = self.memory_dir / "daily"
         self.state_dir = self.app_home / "state"
+        self.repository = MemoryRepository.from_config(config, app_home=self.app_home)
         self._migration_notice: str | None = None
         self._ensure_dirs()
         self._migrate_legacy_project_memory_once()
@@ -124,6 +128,220 @@ class MemoryManager:
 
     def migration_notice(self) -> str | None:
         return self._migration_notice
+
+    def _active_namespace(self) -> str:
+        if self.config.active_namespace:
+            return self.config.active_namespace
+        namespaces = self.repository.list_namespaces()
+        if not namespaces:
+            raise ValueError("No memory namespace is active.")
+        self.config.active_namespace = namespaces[0].slug
+        return namespaces[0].slug
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        value = value.strip().lower()
+        value = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", value)
+        return value.strip("-") or "node"
+
+    def create_namespace(self, slug: str, title: str, description: str | None = None):
+        namespace = self.repository.create_namespace(slug=slug, title=title, description=description)
+        if not self.config.active_namespace:
+            self.config.active_namespace = slug
+        return namespace
+
+    def list_namespaces(self):
+        return self.repository.list_namespaces()
+
+    def create_memory(
+        self,
+        *,
+        parent_uri: str | None,
+        title: str,
+        kind: str,
+        slug: str | None = None,
+        node_type: str | None = None,
+        content: str = "",
+        is_core: bool = False,
+        priority: int = 0,
+    ):
+        return self.repository.create_node(
+            self._active_namespace(),
+            parent_uri=parent_uri,
+            slug=slug or self._slugify(title),
+            title=title,
+            kind=kind,
+            node_type=node_type,
+            content=content,
+            is_core=is_core,
+            priority=priority,
+        )
+
+    def update_memory(self, uri: str, **fields):
+        return self.repository.update_node(self._active_namespace(), uri, **fields)
+
+    def edit_memory(self, uri: str, *, operation: str, old_text: str | None = None, new_text: str | None = None, text: str | None = None):
+        node = self.repository.get_node_by_uri(self._active_namespace(), uri)
+        if node is None:
+            raise ValueError(f"Unknown memory URI: {uri}")
+        if operation == "replace_text":
+            if not old_text:
+                raise ValueError("old_text is required for replace_text")
+            replacement = new_text or ""
+            content = node.content.replace(old_text, replacement)
+            return self.update_memory(uri, content=content)
+        if operation == "append_text":
+            content = node.content + (text or "")
+            return self.update_memory(uri, content=content)
+        raise ValueError(f"Unsupported edit operation: {operation}")
+
+    def delete_memory(self, uri: str) -> None:
+        self.repository.delete_node(self._active_namespace(), uri)
+
+    def manage_triggers(
+        self,
+        uri: str,
+        *,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> dict[str, object]:
+        current = self.repository.update_triggers(
+            self._active_namespace(),
+            uri,
+            add=add,
+            remove=remove,
+        )
+        return {
+            "uri": uri,
+            "added": list(add or []),
+            "removed": list(remove or []),
+            "current_triggers": current,
+        }
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        node_types: list[str] | None = None,
+        include_folders: bool = False,
+    ) -> list[SearchResult]:
+        documents = self.repository.search_documents(
+            self._active_namespace(),
+            node_types=node_types,
+            include_folders=include_folders,
+        )
+        return rank_search_results(query, documents)[:limit]
+
+    def read(self, uri: str) -> str:
+        namespace_slug = self._active_namespace()
+        if uri == "system://boot":
+            return self._read_boot(namespace_slug)
+        if uri == "system://index":
+            return self._read_index(namespace_slug)
+        if uri == "system://glossary":
+            return self._read_glossary(namespace_slug)
+        node = self.repository.get_node_by_uri(namespace_slug, uri)
+        if node is None:
+            raise ValueError(f"URI not found in current namespace: {uri}")
+        self.repository.touch_node(namespace_slug, uri)
+        return self._read_node(namespace_slug, node.uri)
+
+    def _read_boot(self, namespace_slug: str) -> str:
+        namespace = self.repository.get_namespace_by_slug(namespace_slug)
+        if namespace is None:
+            raise ValueError(f"Unknown namespace: {namespace_slug}")
+        root_nodes = self.repository.list_children(namespace_slug, None)
+        core_nodes = self.repository.list_core_nodes(namespace_slug)
+        recent_nodes = self.repository.list_recent_nodes(namespace_slug, limit=5)
+        lines = [
+            "# system://boot",
+            f"Namespace: {namespace.slug}",
+            f"Title: {namespace.title}",
+            "",
+            "Core memories:",
+        ]
+        if core_nodes:
+            for node in core_nodes:
+                lines.append(f"- `{node.uri}` [{node.kind}] {node.title}")
+        else:
+            lines.append("- (none)")
+        lines.extend(["", "Root summary:"])
+        if root_nodes:
+            for node in root_nodes:
+                child_count = len(self.repository.list_children(namespace_slug, node.uri))
+                node_type = f" node_type: {node.node_type}" if node.node_type else ""
+                lines.append(f"- `{node.uri}` [{node.kind}]{node_type} children: {child_count}")
+        else:
+            lines.append("- (empty)")
+        lines.extend(["", "Recently active:"])
+        if recent_nodes:
+            for node in recent_nodes:
+                lines.append(f"- `{node.uri}` [{node.kind}] {node.title}")
+        else:
+            lines.append("- (none)")
+        return "\n".join(lines)
+
+    def _read_index(self, namespace_slug: str) -> str:
+        lines = ["# system://index", ""]
+
+        def visit(parent_uri: str | None, depth: int) -> None:
+            for node in self.repository.list_children(namespace_slug, parent_uri):
+                indent = "  " * depth
+                child_count = len(self.repository.list_children(namespace_slug, node.uri))
+                node_type = f" node_type: {node.node_type}" if node.node_type else ""
+                lines.append(
+                    f"{indent}- `{node.uri}` [{node.kind}]{node_type} children: {child_count}"
+                )
+                visit(node.uri, depth + 1)
+
+        visit(None, 0)
+        return "\n".join(lines)
+
+    def _read_glossary(self, namespace_slug: str) -> str:
+        entries = self.repository.glossary_entries(namespace_slug)
+        lines = ["# system://glossary", ""]
+        if not entries:
+            lines.append("(empty)")
+            return "\n".join(lines)
+        for entry in entries:
+            lines.append(f"- {entry['term']} -> {entry['uri']}")
+        return "\n".join(lines)
+
+    def _read_node(self, namespace_slug: str, uri: str) -> str:
+        node = self.repository.get_node_by_uri(namespace_slug, uri)
+        if node is None:
+            raise ValueError(f"Unknown memory URI: {uri}")
+        triggers = self.repository.list_triggers(namespace_slug, uri)
+        children = self.repository.list_children(namespace_slug, uri)
+        child_lines = [f"- `{child.uri}` [{child.kind}] {child.title}" for child in children]
+        lines = [
+            f"URI: {node.uri}",
+            f"Title: {node.title}",
+            f"Kind: {node.kind}",
+            f"Node Type: {node.node_type or '-'}",
+            f"Parent URI: {self.repository._parent_uri_by_id(node.parent_id) or '-'}",
+            f"Children: {len(children)}",
+            f"Is Core: {node.is_core}",
+            f"Priority: {node.priority}",
+            f"Triggers: {', '.join(triggers) if triggers else '-'}",
+            "",
+        ]
+        if node.kind == "folder":
+            lines.append(node.content or "(No description)")
+        else:
+            glossary = [
+                {"term": entry["term"], "uri": entry["uri"]}
+                for entry in self.repository.glossary_entries(namespace_slug)
+                if entry["uri"] != node.uri
+            ]
+            lines.append(render_markdown_links(node.content, glossary) or "(Empty content)")
+        lines.extend(["", "Children:"])
+        if child_lines:
+            lines.extend(child_lines)
+        else:
+            lines.append("- (none)")
+        return "\n".join(lines)
 
     def _today_str(self) -> str:
         return datetime.now().strftime("%Y-%m-%d")

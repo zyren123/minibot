@@ -1,5 +1,7 @@
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+import pytest
 
 from src.minibot.agent import Agent
 from src.minibot.config.schema import (
@@ -10,6 +12,21 @@ from src.minibot.config.schema import (
     MemoryConfig,
     TeamsConfig,
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def _make_agent(
@@ -96,11 +113,21 @@ def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(t
 
     assert "## Extended Capabilities (MCP)" in prompt
     assert "Connected Servers: docs" in prompt
-    assert "## Memory (Auto-loaded)" in prompt
-    assert "Prefer concise updates" in prompt
-    assert "Continue prompt overhaul" in prompt
+    assert 'read_memory("system://boot")' in prompt
+    assert "Prefer concise updates" not in prompt
+    assert "Continue prompt overhaul" not in prompt
+    assert "## Memory (Auto-loaded)" not in prompt
     assert "## Team Orchestration Policy" in prompt
     assert prompt.rstrip().endswith(extra)
+
+
+def test_system_prompt_instructs_boot_search_not_auto_loaded_memory(tmp_path):
+    agent = _make_agent(tmp_path, memory_enabled=True)
+
+    prompt = agent.system_prompt
+
+    assert 'read_memory("system://boot")' in prompt
+    assert "## Memory (Auto-loaded)" not in prompt
 
 
 def test_teammate_prompt_uses_teammate_constraints(tmp_path):

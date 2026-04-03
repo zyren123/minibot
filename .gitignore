@@ -74,6 +74,10 @@ Thumbs.db
 .minibot/
 .superpowers/
 .worktrees/
+/memory/
+.reference/
+docs/superpowers/specs/
+docs/superpowers/plans/
 
 # WebUI
 webui/node_modules/
