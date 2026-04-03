@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .messages import normalize_session_message
+
 PREVIEW_MAX_LEN = 60
 
 
@@ -143,9 +145,9 @@ class SessionStore:
                 compaction_index = i
                 
         if compaction_index >= 0:
-            return messages[compaction_index:]
+            return [normalize_session_message(message) for message in messages[compaction_index:]]
             
-        return messages
+        return [normalize_session_message(message) for message in messages]
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict]:

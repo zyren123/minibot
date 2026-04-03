@@ -12,6 +12,7 @@ from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
 from ..events import StreamEvent
 from ..session.manager import SessionManager
+from ..session.messages import normalize_tool_calls
 from ..tools.base import BaseTool
 
 from ._event_router import RouterEventSink
@@ -233,7 +234,9 @@ class Minibot:
             if context_usage:
                 message["context_usage"] = dict(context_usage)
             if tool_calls:
-                message["tool_calls"] = [dict(item) for item in tool_calls]
+                normalized_tool_calls = normalize_tool_calls(tool_calls)
+                if normalized_tool_calls:
+                    message["tool_calls"] = normalized_tool_calls
             if extra_fields:
                 message.update(extra_fields)
             return message

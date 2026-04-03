@@ -100,6 +100,34 @@ def test_init_skill_script_creates_layout_and_examples(tmp_path: Path) -> None:
     assert (skill_dir / "assets" / "example_asset.txt").exists()
 
 
+def test_init_skill_script_loads_without_redefining_memory_tables(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.minibot.memory.db_models  # noqa: F401
+
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "src"))
+    for module_name in list(sys.modules):
+        if module_name == "minibot" or module_name.startswith("minibot."):
+            monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    script = REPO_ROOT / "src/minibot/builtin_skills/skill-creator/scripts/init_skill.py"
+    module = _load_script(
+        script,
+        "test_init_skill_script_loaded_after_src_package",
+    )
+
+    skill_dir = module.init_skill(
+        "demo-skill-reuse-src-package",
+        tmp_path,
+        [],
+        include_examples=False,
+    )
+
+    assert skill_dir == tmp_path / "demo-skill-reuse-src-package"
+    assert (skill_dir / "SKILL.md").exists()
+
+
 def test_init_skill_script_defaults_to_user_skills_dir(tmp_path: Path, monkeypatch) -> None:
     script = REPO_ROOT / "src/minibot/builtin_skills/skill-creator/scripts/init_skill.py"
     module = _load_script(script, "test_init_skill_default_dir_script")

@@ -1473,6 +1473,10 @@ You are now live. Await instructions and begin the loop.""",
                         if self._ui_enabled():
                             print_system(f"Warning: Context compaction failed: {e}")
 
+            display_tool_calls = [
+                tc for tc in tool_calls if not self._is_ask_user_tool(self._tool_call_name(tc))
+            ]
+
             # Emit structured assistant end event for all non-interrupted responses.
             tool_call_summaries = [
                 {
@@ -1480,7 +1484,7 @@ You are now live. Await instructions and begin the loop.""",
                     "name": self._tool_call_name(tc),
                     "arguments": self._tool_call_arguments(tc),
                 }
-                for i, tc in enumerate(tool_calls, start=1)
+                for i, tc in enumerate(display_tool_calls, start=1)
             ]
             await self._emit(
                 {
@@ -1514,9 +1518,7 @@ You are now live. Await instructions and begin the loop.""",
                 messages.append(assistant_msg)
                 return messages
 
-            generic_tool_calls = [
-                tc for tc in tool_calls if not self._is_ask_user_tool(self._tool_call_name(tc))
-            ]
+            generic_tool_calls = display_tool_calls
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": content,
@@ -1542,7 +1544,7 @@ You are now live. Await instructions and begin the loop.""",
                     for i, tc in enumerate(generic_tool_calls, start=1)
                 ]
             assistant_msg_appended = False
-            tool_results: list[dict[str, str]] = []
+            tool_results: list[dict[str, Any]] = []
             for i, tc in enumerate(tool_calls, start=1):
                 tc_id = self._tool_call_id(tc) or f"tool-call-{i}"
                 tc_name = self._tool_call_name(tc)
@@ -1568,6 +1570,7 @@ You are now live. Await instructions and begin the loop.""",
                             "type": "tool_result",
                             "tool_call_id": tc_id,
                             "tool_name": tc_name,
+                            "tool_args": {},
                             "tool_output": output,
                             "is_error": True,
                         }
@@ -1576,7 +1579,14 @@ You are now live. Await instructions and begin the loop.""",
                         print()
                         print_tool_call(f"{self._tool_log_prefix()}> {tc_name}(invalid_args)")
                         print_tool_output(self._tool_output_name(tc_name), output)
-                    tool_results.append({"tool_call_id": tc_id, "output": output})
+                    tool_results.append(
+                        {
+                            "tool_call_id": tc_id,
+                            "tool_name": tc_name,
+                            "tool_args": {},
+                            "output": output,
+                        }
+                    )
                     continue
 
                 await self._emit(
@@ -1680,6 +1690,7 @@ You are now live. Await instructions and begin the loop.""",
                         "type": "tool_result",
                         "tool_call_id": tc_id,
                         "tool_name": tc_name,
+                        "tool_args": tc_input,
                         "tool_output": output,
                         "is_error": False,
                         "note": parse_note or "",
@@ -1689,7 +1700,14 @@ You are now live. Await instructions and begin the loop.""",
                     await self._emit_todo_snapshot()
                 if self._ui_enabled():
                     print_tool_output(self._tool_output_name(tc_name), output)
-                tool_results.append({"tool_call_id": tc_id, "output": output})
+                tool_results.append(
+                    {
+                        "tool_call_id": tc_id,
+                        "tool_name": tc_name,
+                        "tool_args": tc_input,
+                        "output": output,
+                    }
+                )
 
             if not assistant_msg_appended:
                 messages.append(assistant_msg)
@@ -1701,6 +1719,8 @@ You are now live. Await instructions and begin the loop.""",
                         "message_id": self._new_message_id(),
                         "parent_user_message_id": parent_user_message_id,
                         "tool_call_id": result["tool_call_id"],
+                        "tool_name": result["tool_name"],
+                        "tool_args": result["tool_args"],
                         "content": result["output"],
                     }
                 )

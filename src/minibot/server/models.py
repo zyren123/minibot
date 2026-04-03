@@ -24,6 +24,8 @@ class MessageResponse(BaseModel):
     role: str
     content: str = ""
     tool_call_id: str | None = None
+    tool_name: str | None = None
+    tool_args: dict[str, object] | None = None
     is_compaction: bool | None = None
     parent_user_message_id: str | None = None
     completion_state: str | None = None

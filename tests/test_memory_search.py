@@ -39,3 +39,21 @@ def test_search_prefers_trigger_then_title_then_content(tmp_path):
 
     assert results[0].uri == "memory://locations/bailu-town"
     assert results[0].matched_by == "trigger"
+
+
+def test_search_accepts_kind_filters_inside_node_types_argument(tmp_path):
+    manager = _make_manager(tmp_path)
+    manager.create_namespace("ember-falls", "Ember Falls")
+    manager.create_memory(parent_uri=None, slug="characters", title="Characters", kind="folder")
+    manager.create_memory(
+        parent_uri="memory://characters",
+        slug="ding-he-yue",
+        title="丁荷月",
+        kind="memory",
+        node_type="character",
+        content="人物：丁荷月。身份：中国女性。",
+    )
+
+    results = manager.search("丁荷月", node_types=["memory", "folder"], include_folders=True)
+
+    assert [result.uri for result in results] == ["memory://characters/ding-he-yue"]

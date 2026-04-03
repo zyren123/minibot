@@ -383,8 +383,10 @@ async def test_minibot_stream_can_stop_at_ask_user_question_for_resume_flow(tmp_
     ]
 
     question_event = next(event for event in events if event.get("type") == "ask_user_question")
+    assistant_end_event = next(event for event in events if event.get("type") == "assistant_end")
     assert events[-1]["type"] == "ask_user_question"
     assert question_event["question_id"] == "ask-call-live-pause"
+    assert assistant_end_event["tool_calls"] == []
 
     mgr = SessionManager(sessions_dir)
     runtime = mgr.load_runtime_state("sess-pause-on-question")
@@ -875,6 +877,111 @@ async def test_minibot_stream_persists_runtime_sidecar_until_answer(tmp_path):
     }
 
     await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_minibot_stream_reload_normalizes_persisted_tool_calls_for_next_turn(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    cfg = Config(
+        workdir=tmp_path,
+        app_home=tmp_path / ".minibot",
+        project_root=tmp_path,
+        llm=LLMConfig(
+            base_url="http://localhost:8000/v1",
+            api_key="test",
+            model="test-model",
+            stream_enabled=False,
+        ),
+        memory=MemoryConfig(enabled=False),
+        teams=TeamsConfig(enabled=False),
+        session=SessionConfig(enabled=True, sessions_dir=str(sessions_dir)),
+    )
+
+    def lookup_character(query: str) -> str:
+        return f"found {query}"
+
+    bot = Minibot(config=cfg, session_id="sess-tool-history", tools=[lookup_character])
+
+    class ToolCallingClient:
+        model = "test-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def create_message_async(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _tool_response(
+                    name="lookup_character",
+                    arguments={"query": "丁荷月"},
+                    tool_call_id="call-tool-1",
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="查到了。", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=4, completion_tokens=6, total_tokens=10),
+            )
+
+        async def create_message_stream_async(self, **_kwargs):
+            raise RuntimeError("stream unavailable")
+
+        async def close(self):
+            return None
+
+    bot.agent.client = ToolCallingClient()
+    events = [event async for event in bot.stream("查一下丁荷月")]
+    assert any(event.get("type") == "tool_result" for event in events)
+
+    reloaded = Minibot(config=cfg, session_id="sess-tool-history", tools=[lookup_character])
+
+    class RecordingClient:
+        model = "test-model"
+
+        def __init__(self):
+            self.seen_messages = None
+
+        async def create_message_async(self, **kwargs):
+            self.seen_messages = kwargs["messages"]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="继续吧。", tool_calls=[]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=2, completion_tokens=3, total_tokens=5),
+            )
+
+        async def create_message_stream_async(self, **_kwargs):
+            raise AssertionError("stream should not be used")
+
+        async def close(self):
+            return None
+
+    recording = RecordingClient()
+    reloaded.agent.client = recording
+
+    await reloaded.chat("继续")
+
+    assistant_with_tool = next(
+        message
+        for message in recording.seen_messages
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assert assistant_with_tool["tool_calls"] == [
+        {
+            "id": "call-tool-1",
+            "type": "function",
+            "function": {
+                "name": "lookup_character",
+                "arguments": json.dumps({"query": "丁荷月"}, ensure_ascii=False),
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

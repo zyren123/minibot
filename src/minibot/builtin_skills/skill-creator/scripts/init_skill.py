@@ -4,15 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import re
 import sys
 from pathlib import Path
-
-try:
-    from minibot.config import load_config
-except ImportError:  # pragma: no cover - repo tests import via src.minibot
-    from src.minibot.config import load_config
 
 MAX_SKILL_NAME_LENGTH = 64
 ALLOWED_RESOURCES = {"scripts", "references", "assets"}
@@ -59,6 +55,28 @@ Move detailed domain knowledge here when SKILL.md would otherwise become too lar
 """
 
 EXAMPLE_ASSET = """This placeholder represents an output asset or template file."""
+
+
+def _import_load_config():
+    """Reuse whichever package namespace is already loaded to avoid double-importing Minibot."""
+    module_names: list[str] = []
+    if "minibot.config" in sys.modules or "minibot" in sys.modules:
+        module_names.append("minibot.config")
+    if "src.minibot.config" in sys.modules or "src.minibot" in sys.modules:
+        module_names.append("src.minibot.config")
+    module_names.extend(["minibot.config", "src.minibot.config"])
+
+    seen: set[str] = set()
+    for module_name in module_names:
+        if module_name in seen:
+            continue
+        seen.add(module_name)
+        try:
+            return importlib.import_module(module_name).load_config
+        except ImportError:
+            continue
+
+    raise ImportError("Could not import load_config from minibot.config or src.minibot.config")
 
 
 def normalize_skill_name(skill_name: str) -> str:
@@ -143,6 +161,7 @@ def init_skill(
 
 def resolve_default_output_dir() -> Path:
     try:
+        load_config = _import_load_config()
         return Path(load_config().skills_dir).resolve()
     except Exception:
         home = os.environ.get("MINIBOT_HOME", "").strip()

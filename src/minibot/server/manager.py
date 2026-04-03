@@ -1569,6 +1569,12 @@ class AgentManager:
         serialized: list[dict[str, Any]] = []
         for raw in messages:
             item = dict(raw)
+            tool_calls = cls._normalize_tool_calls(item.get("tool_calls"))
+            if "tool_calls" in item:
+                if tool_calls:
+                    item["tool_calls"] = tool_calls
+                else:
+                    item.pop("tool_calls", None)
             for key in ("usage", "context_usage"):
                 usage = cls._normalize_usage(item.get(key))
                 if usage is None:
@@ -1577,6 +1583,42 @@ class AgentManager:
                     item[key] = usage
             serialized.append(item)
         return serialized
+
+    @staticmethod
+    def _normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for index, raw in enumerate(value, start=1):
+            if not isinstance(raw, dict):
+                continue
+            tool_id = str(raw.get("id") or f"tool-call-{index}")
+            if isinstance(raw.get("function"), dict):
+                function = dict(raw["function"])
+                normalized.append(
+                    {
+                        "id": tool_id,
+                        "type": str(raw.get("type") or "function"),
+                        "function": {
+                            "name": str(function.get("name") or ""),
+                            "arguments": str(function.get("arguments") or ""),
+                        },
+                    }
+                )
+                continue
+
+            normalized.append(
+                {
+                    "id": tool_id,
+                    "type": "function",
+                    "function": {
+                        "name": str(raw.get("name") or ""),
+                        "arguments": str(raw.get("arguments") or ""),
+                    },
+                }
+            )
+        return normalized
 
     @classmethod
     def _assistant_turn_bounds(cls, messages: list[dict[str, Any]], message_id: str) -> tuple[int, int, int]:

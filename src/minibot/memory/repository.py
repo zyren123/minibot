@@ -369,12 +369,22 @@ class MemoryRepository:
                 )
                 .order_by(MemorySearchDocumentRow.title)
             ).all()
-            node_type_set = set(node_types or [])
+            filter_terms = {
+                str(value).strip().lower()
+                for value in (node_types or [])
+                if str(value).strip()
+            }
             filtered: list[dict[str, Any]] = []
             for node_id, uri, title, kind, node_type, search_text, parent_id in rows:
                 if not include_folders and kind == "folder":
                     continue
-                if node_type_set and node_type not in node_type_set:
+                normalized_kind = kind.strip().lower()
+                normalized_node_type = node_type.strip().lower() if node_type else None
+                if (
+                    filter_terms
+                    and normalized_kind not in filter_terms
+                    and normalized_node_type not in filter_terms
+                ):
                     continue
                 filtered.append(
                     {

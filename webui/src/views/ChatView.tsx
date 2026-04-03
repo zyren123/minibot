@@ -34,6 +34,12 @@ import {
   expandHistoryWindowStart,
   findHistoryWindowStart,
 } from "./chatHistoryWindow";
+import {
+  buildToolRenderState,
+  normalizeStreamToolCalls,
+  type ToolInvocationStatus,
+  type ToolInvocationView,
+} from "./chatToolState";
 
 const INITIAL_VISIBLE_HISTORY_TURNS = 24;
 const HISTORY_TURN_BATCH = 24;
@@ -260,47 +266,6 @@ async function copyText(text: string) {
   document.body.removeChild(area);
 }
 
-type ToolInvocationStatus = "running" | "done" | "error";
-
-type ToolInvocationView = {
-  key: string;
-  toolCallId: string | null;
-  name: string;
-  argumentsText: string;
-  outputText: string;
-  status: ToolInvocationStatus;
-};
-
-type ToolRenderState = {
-  assistantInvocationsByIndex: Map<number, ToolInvocationView[]>;
-  linkedToolMessageIndexes: Set<number>;
-  orphanInvocationsByIndex: Map<number, ToolInvocationView>;
-};
-
-function normalizeStreamToolCalls(
-  toolCalls: StreamEvent["tool_calls"] | undefined,
-): Message["tool_calls"] {
-  if (!toolCalls?.length) return [];
-  return toolCalls.map((toolCall) => ({
-    id: toolCall.id,
-    type: "function",
-    function: {
-      name: toolCall.name,
-      arguments: toolCall.arguments,
-    },
-  }));
-}
-
-function formatToolArguments(raw: string | null | undefined) {
-  const text = raw?.trim() ?? "";
-  if (!text) return "";
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
-}
-
 function markdownElementChildren(node: unknown): Array<Record<string, unknown>> {
   if (!node || typeof node !== "object") return [];
   const children = (node as { children?: unknown }).children;
@@ -335,58 +300,6 @@ function markdownWideTableStyle(columnCount: number): CSSProperties | undefined 
   return {
     ["--markdown-table-columns" as "--markdown-table-columns"]: String(columnCount),
   } as CSSProperties;
-}
-
-function buildToolRenderState(messages: Message[]): ToolRenderState {
-  const toolResultsByCallId = new Map<string, { index: number; message: Message }>();
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role !== "tool" || !message.tool_call_id) continue;
-    toolResultsByCallId.set(message.tool_call_id, { index, message });
-  }
-
-  const assistantInvocationsByIndex = new Map<number, ToolInvocationView[]>();
-  const linkedToolMessageIndexes = new Set<number>();
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
-
-    const invocations = message.tool_calls.map((toolCall, toolIndex) => {
-      const toolCallId = toolCall.id?.trim() || null;
-      const toolName = toolCall.function?.name?.trim() || "";
-      const result = toolCallId ? toolResultsByCallId.get(toolCallId) : undefined;
-      if (result) linkedToolMessageIndexes.add(result.index);
-      const status: ToolInvocationStatus = result ? (result.message.is_error ? "error" : "done") : "running";
-      return {
-        key: toolCallId ?? `${message.message_id ?? `assistant-${index}`}-tool-${toolIndex}`,
-        toolCallId,
-        name: toolName,
-        argumentsText: formatToolArguments(toolCall.function?.arguments),
-        outputText: result?.message.content ?? "",
-        status,
-      };
-    });
-
-    if (invocations.length > 0) {
-      assistantInvocationsByIndex.set(index, invocations);
-    }
-  }
-
-  const orphanInvocationsByIndex = new Map<number, ToolInvocationView>();
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role !== "tool" || linkedToolMessageIndexes.has(index)) continue;
-    orphanInvocationsByIndex.set(index, {
-      key: message.tool_call_id?.trim() || `tool-${index}`,
-      toolCallId: message.tool_call_id ?? null,
-      name: message.tool_name?.trim() || "",
-      argumentsText: "",
-      outputText: message.content ?? "",
-      status: message.is_error ? "error" : "done",
-    });
-  }
-
-  return { assistantInvocationsByIndex, linkedToolMessageIndexes, orphanInvocationsByIndex };
 }
 
 function statusClasses(status: ToolInvocationStatus) {
@@ -932,6 +845,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           content: ev.tool_output ?? "",
           tool_call_id: ev.tool_call_id,
           tool_name: ev.tool_name ?? null,
+          tool_args: ev.tool_args ?? null,
           is_error: ev.is_error ?? null,
         },
       ]);

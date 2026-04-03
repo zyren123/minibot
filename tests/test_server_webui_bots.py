@@ -1073,6 +1073,60 @@ def test_pending_question_endpoint_reads_persisted_runtime_sidecar(
     }
 
 
+def test_session_endpoint_preserves_tool_metadata_for_webui(
+    client: TestClient,
+    server_env: dict[str, Path],
+) -> None:
+    bot_id = client.post("/api/bots", json={"name": "Tool Metadata Bot"}).json()["bot_id"]
+    session_id = client.post(f"/api/bots/{bot_id}/sessions", json={}).json()["session_id"]
+    session_mgr = SessionManager(server_env["home"] / "bots" / bot_id / "sessions")
+    session_mgr.overwrite(
+        session_id,
+        [
+            {"role": "user", "content": "remember this", "message_id": "msg-user-1"},
+            {
+                "role": "assistant",
+                "content": "",
+                "message_id": "msg-assistant-1",
+                "parent_user_message_id": "msg-user-1",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "create_memory",
+                        "arguments": '{"title":"荷月","kind":"memory"}',
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "Created memory://characters/heyue",
+                "message_id": "msg-tool-1",
+                "parent_user_message_id": "msg-user-1",
+                "tool_call_id": "call-1",
+                "tool_name": "create_memory",
+                "tool_args": {"title": "荷月", "kind": "memory"},
+            },
+        ],
+    )
+
+    response = client.get(f"/api/bots/{bot_id}/sessions/{session_id}")
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    assert payload["messages"][1]["tool_calls"] == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "create_memory",
+                "arguments": '{"title":"荷月","kind":"memory"}',
+            },
+        }
+    ]
+    assert payload["messages"][2]["tool_name"] == "create_memory"
+    assert payload["messages"][2]["tool_args"] == {"title": "荷月", "kind": "memory"}
+
+
 def test_answer_stream_endpoint_appends_answer_and_resumes_events(
     client: TestClient,
     server_env: dict[str, Path],

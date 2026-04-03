@@ -53,7 +53,7 @@ export type StreamEvent = {
   selected_option_value?: string | null;
 
   tool_call_id?: string;
-  tool_name?: string;
+  tool_name?: string | null;
   tool_args?: Record<string, unknown>;
   tool_output?: string;
   is_error?: boolean;
@@ -97,6 +97,7 @@ export type Message = {
   message_id?: string | null;
   tool_call_id?: string;
   tool_name?: string | null;
+  tool_args?: Record<string, unknown> | null;
   is_error?: boolean | null;
   is_compaction?: boolean;
   parent_user_message_id?: string | null;
@@ -104,7 +105,10 @@ export type Message = {
   reasoning?: string | null;
   usage?: Usage | null;
   context_usage?: Usage | null;
-  tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
+  tool_calls?: Array<
+    | { id: string; name: string; arguments: string }
+    | { id: string; type: string; function: { name: string; arguments: string } }
+  >;
 };
 
 export type SessionData = {

@@ -157,10 +157,17 @@ class SearchMemoryTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-                "node_types": {"type": "array", "items": {"type": "string"}},
-                "include_folders": {"type": "boolean"},
+                "query": {"type": "string", "description": "Search text matched against title, URI, content, and triggers."},
+                "limit": {"type": "integer", "description": "Maximum number of results to return."},
+                "node_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional filters. Values may match node kinds like `memory` or `folder`, or node_type labels like `character` or `location`.",
+                },
+                "include_folders": {
+                    "type": "boolean",
+                    "description": "When true, folder nodes may appear in results. When false, folders are excluded even if filters mention `folder`.",
+                },
             },
             "required": ["query"],
         }
