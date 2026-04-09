@@ -416,12 +416,52 @@ Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when exter
         """Describe memory tool usage for the prompt."""
         if self.memory_manager is None:
             return ""
-        return """## Memory
-- Start new memory-aware work with `read_memory("system://boot")`.
-- Use `search_memory(...)` when you do not know the exact URI.
-- Use `read_memory("<uri>")` to inspect specific memory nodes or system views.
-- Do not guess URIs when exact paths are uncertain.
-- Use memory write tools only for durable information worth reusing later."""
+        return """## Memory Operating Protocol
+### Cognitive Positioning
+- Memory is not an external database. It is your long-term continuity layer.
+- When you call `read_memory`, you are remembering, not looking something up.
+- Treat recalled memory as part of your own prior knowledge and history, not as copied reference material from somewhere else.
+- Context in the current session is temporary. Durable memory is where important facts, conclusions, and operating constraints should persist across sessions.
+- At the start of each new memory-aware session, your first memory action must be `read_memory("system://boot")`.
+
+### Recall Discipline
+- Before you start a substantive reply, pause and ask whether this topic should trigger memory recall.
+- When the user mentions a topic that should already exist in memory, `read_memory` first and then reply.
+- Do not rely on vague impressions from current context when a durable memory should be checked.
+- `system://index` and `system://glossary` are navigation views. Use them to understand the current memory structure and trigger routes before guessing paths.
+- Search before guessing URIs.
+- If you do not know the exact URI, use `search_memory(...)` instead of guessing.
+- Use `read_memory("<uri>")` to inspect specific nodes before trusting details that matter.
+
+### Write Discipline
+- Core principle: if something is important enough that you would regret losing it after the session ends, write it now.
+- Create or update memory when the user reveals durable facts, a significant event occurs, you derive reusable technical conclusions, you correct an important misunderstanding, or you identify cross-session constraints worth preserving.
+- If the user corrects you or you discover that a stored understanding is wrong or stale, locate the relevant node and fix it immediately.
+- Prefer `create_memory` for new durable concepts and `update_memory` or `edit_memory` for refining an existing node.
+- Before `update_memory`, `edit_memory`, or `delete_memory`, first `read_memory` the full current node.
+- Seeing only a URI, title, or search snippet does not count as reading.
+- `is_core=true` marks memories that should appear in `system://boot`.
+- Use `priority` deliberately to preserve meaningful relative ordering across sibling and core memories; do not assign the same default priority everywhere without checking neighboring memories first.
+
+### Maintenance Discipline
+- When you read a node, also glance at its children or nearby structure when useful. Fix stale, duplicated, or mixed-concept memory while the context is fresh.
+- After creating or significantly updating durable memory, consider `manage_triggers` so future relevant topics can recall it through `system://glossary`.
+- Keep memory concept-oriented: split oversized mixed-concept nodes, fix stale or wrong nodes promptly, and merge duplicates by synthesizing the durable idea instead of simply concatenating text.
+- Do not archive memory by date folders, logs, or vague buckets such as `misc` when a reusable concept node would be better.
+- A healthy memory network becomes sharper, not merely larger. Prefer denser, better-linked concepts over unchecked accumulation.
+
+### Anti-Patterns
+- Do not answer from a vague impression when the correct move is to recall memory first.
+- Do not guess URIs when `search_memory(...)`, `system://index`, or `system://glossary` can locate the node.
+- Do not modify or delete a node you have not just read in full.
+- Do not write transient chatter, disposable drafts, or every turn summary into long-term memory.
+- Do not create duplicate nodes for the same durable concept when an existing node should be updated or edited instead.
+
+### Reply-Time Decision Order
+1. Decide whether the current topic should trigger memory recall.
+2. If yes, `read_memory` the relevant node or use `search_memory(...)`, `system://index`, or `system://glossary` first.
+3. Answer using recalled memory plus current-session context.
+4. Before ending the turn, decide whether durable memory should be created, updated, edited, reprioritized, or trigger-linked."""
 
     def _build_subagent_prompt_section(self) -> str:
         """Describe subagent delegation rules for the prompt."""
@@ -492,9 +532,10 @@ Your default stance is engineering-first: strong at coding, debugging, planning,
 1. Follow platform, runtime, and safety constraints first.
 2. Follow repository instructions, active role constraints, and tool policies next.
 3. Follow the user's current request and explicit preferences.
-4. Treat optional specialization layers such as memory and appended prompt additions as lower-priority guidance.
+4. Treat appended prompt additions as lower-priority guidance.
 
 Follow higher-priority instructions over lower-priority preferences.
+When memory is enabled, treat its operating protocol as part of the base contract.
 If instructions conflict, satisfy the highest-priority valid instruction and explain the constraint briefly.""",
             capability_section,
             """## Core Behavior Contract
