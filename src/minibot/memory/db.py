@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, Session, create_engine
@@ -17,6 +18,10 @@ class MemoryDatabase:
     engine: object
     session_factory: sessionmaker
     database_path: Path | None
+
+
+_MEMORY_DB_CACHE: dict[tuple[str, str], MemoryDatabase] = {}
+_MEMORY_DB_CACHE_LOCK = Lock()
 
 
 def _resolve_memory_dir(memory_dir: str, *, app_home: Path) -> Path:
@@ -36,6 +41,11 @@ def _normalize_postgres_database_url(database_url: str) -> str:
     return database_url
 
 
+def _clear_memory_db_cache() -> None:
+    with _MEMORY_DB_CACHE_LOCK:
+        _MEMORY_DB_CACHE.clear()
+
+
 def create_memory_db(config: MemoryConfig, *, app_home: Path) -> MemoryDatabase:
     backend = (config.backend or "sqlite").strip().lower()
 
@@ -43,18 +53,42 @@ def create_memory_db(config: MemoryConfig, *, app_home: Path) -> MemoryDatabase:
         memory_dir = _resolve_memory_dir(config.memory_dir, app_home=app_home)
         memory_dir.mkdir(parents=True, exist_ok=True)
         database_path = memory_dir / "memory_v2.sqlite3"
-        engine = create_engine(f"sqlite:///{database_path}", connect_args={"check_same_thread": False})
+        cache_key = ("sqlite", str(database_path.resolve()))
+
+        with _MEMORY_DB_CACHE_LOCK:
+            cached = _MEMORY_DB_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+            engine = create_engine(f"sqlite:///{database_path}", connect_args={"check_same_thread": False})
+            SQLModel.metadata.create_all(engine)
+            database = MemoryDatabase(
+                engine=engine,
+                session_factory=sessionmaker(bind=engine, class_=Session, expire_on_commit=False),
+                database_path=database_path,
+            )
+            _MEMORY_DB_CACHE[cache_key] = database
+            return database
     elif backend == "postgres":
         if not config.database_url:
             raise ValueError("memory.database_url is required for postgres backend")
         database_path = None
-        engine = create_engine(_normalize_postgres_database_url(config.database_url))
+        database_url = _normalize_postgres_database_url(config.database_url)
+        cache_key = ("postgres", database_url)
+
+        with _MEMORY_DB_CACHE_LOCK:
+            cached = _MEMORY_DB_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+            engine = create_engine(database_url)
+            SQLModel.metadata.create_all(engine)
+            database = MemoryDatabase(
+                engine=engine,
+                session_factory=sessionmaker(bind=engine, class_=Session, expire_on_commit=False),
+                database_path=database_path,
+            )
+            _MEMORY_DB_CACHE[cache_key] = database
+            return database
     else:
         raise ValueError(f"Unsupported memory backend: {config.backend}")
-
-    SQLModel.metadata.create_all(engine)
-    return MemoryDatabase(
-        engine=engine,
-        session_factory=sessionmaker(bind=engine, class_=Session, expire_on_commit=False),
-        database_path=database_path,
-    )

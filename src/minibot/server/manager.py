@@ -1236,47 +1236,33 @@ class AgentManager:
 
     def memory_node(self, bot_id: str, *, uri: str) -> dict[str, Any]:
         manager = self._memory_manager_for(bot_id)
-        namespace = manager._active_namespace()
-        node = manager.repository.get_node_by_uri(namespace, uri)
-        if node is None:
-            raise KeyError(uri)
-        children = manager.repository.list_children(namespace, uri)
-        triggers = manager.repository.list_triggers(namespace, uri)
-        return {
-            "id": node.id,
-            "uri": node.uri,
-            "title": node.title,
-            "kind": node.kind,
-            "node_type": node.node_type,
-            "is_core": node.is_core,
-            "priority": node.priority,
-            "content": manager.read(uri),
-            "triggers": triggers,
-            "children": [
-                {"uri": child.uri, "title": child.title, "kind": child.kind, "node_type": child.node_type}
-                for child in children
-            ],
-        }
+        try:
+            return manager.node_detail(uri)
+        except ValueError as exc:
+            raise KeyError(uri) from exc
 
     def memory_tree(self, bot_id: str) -> dict[str, Any]:
         manager = self._memory_manager_for(bot_id)
         namespace = manager._active_namespace()
-
-        def build(parent_uri: str | None) -> list[dict[str, Any]]:
-            nodes = []
-            for node in manager.repository.list_children(namespace, parent_uri):
-                nodes.append(
-                    {
-                        "uri": node.uri,
-                        "title": node.title,
-                        "kind": node.kind,
-                        "node_type": node.node_type,
-                        "children": build(node.uri),
-                    }
-                )
-            return nodes
-
-        return {"nodes": build(None)}
+        rows = manager.repository.list_nodes(namespace)
+        payloads = {
+            node.id: {
+                "uri": node.uri,
+                "title": node.title,
+                "kind": node.kind,
+                "node_type": node.node_type,
+                "children": [],
+            }
+            for node in rows
+        }
+        roots: list[dict[str, Any]] = []
+        for node in rows:
+            payload = payloads[node.id]
+            if node.parent_id and node.parent_id in payloads:
+                payloads[node.parent_id]["children"].append(payload)
+            else:
+                roots.append(payload)
+        return {"nodes": roots}
 
     def memory_graph(self, bot_id: str) -> dict[str, Any]:
         tree = self.memory_tree(bot_id)["nodes"]

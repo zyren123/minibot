@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -33,6 +34,14 @@ def _new_id(prefix: str) -> str:
 
 def _normalize_term(term: str) -> str:
     return " ".join(term.strip().lower().split())
+
+
+@dataclass
+class MemoryNodeBundle:
+    node: MemoryNode
+    parent_uri: str | None
+    children: list[MemoryNode]
+    triggers: list[str]
 
 
 class MemoryRepository:
@@ -192,6 +201,57 @@ class MemoryRepository:
             if row is None:
                 return None
             return self._row_to_node(row)
+
+    def get_node_bundle(self, namespace_slug: str, uri: str) -> MemoryNodeBundle | None:
+        with self.database.session_factory() as session:
+            namespace = self._require_namespace_row(session, namespace_slug)
+            row = session.exec(
+                select(MemoryNodeRow).where(
+                    MemoryNodeRow.namespace_id == namespace.id,
+                    MemoryNodeRow.uri == uri,
+                    MemoryNodeRow.deleted_at.is_(None),
+                )
+            ).first()
+            if row is None:
+                return None
+            child_rows = session.exec(
+                select(MemoryNodeRow)
+                .where(
+                    MemoryNodeRow.namespace_id == namespace.id,
+                    MemoryNodeRow.parent_id == row.id,
+                    MemoryNodeRow.deleted_at.is_(None),
+                )
+                .order_by(MemoryNodeRow.kind, MemoryNodeRow.priority.desc(), MemoryNodeRow.title)
+            ).all()
+            triggers = session.exec(
+                select(MemoryTriggerRow.term)
+                .where(MemoryTriggerRow.node_id == row.id)
+                .order_by(MemoryTriggerRow.term)
+            ).all()
+            parent_uri = None
+            if row.parent_id:
+                parent_uri = session.exec(
+                    select(MemoryNodeRow.uri).where(MemoryNodeRow.id == row.parent_id)
+                ).first()
+            return MemoryNodeBundle(
+                node=self._row_to_node(row),
+                parent_uri=parent_uri,
+                children=[self._row_to_node(child_row) for child_row in child_rows],
+                triggers=triggers,
+            )
+
+    def list_nodes(self, namespace_slug: str) -> list[MemoryNode]:
+        with self.database.session_factory() as session:
+            namespace = self._require_namespace_row(session, namespace_slug)
+            rows = session.exec(
+                select(MemoryNodeRow)
+                .where(
+                    MemoryNodeRow.namespace_id == namespace.id,
+                    MemoryNodeRow.deleted_at.is_(None),
+                )
+                .order_by(MemoryNodeRow.kind, MemoryNodeRow.priority.desc(), MemoryNodeRow.title)
+            ).all()
+            return [self._row_to_node(row) for row in rows]
 
     def list_children(self, namespace_slug: str, parent_uri: str | None = None) -> list[MemoryNode]:
         with self.database.session_factory() as session:

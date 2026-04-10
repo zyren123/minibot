@@ -4,10 +4,11 @@ import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from ..config.schema import MemoryConfig
 from .render import render_markdown_links
-from .repository import MemoryRepository
+from .repository import MemoryNodeBundle, MemoryRepository
 from .search import SearchResult, rank_search_results
 
 
@@ -241,18 +242,55 @@ class MemoryManager:
             return self._read_index(namespace_slug)
         if uri == "system://glossary":
             return self._read_glossary(namespace_slug)
-        node = self.repository.get_node_by_uri(namespace_slug, uri)
-        if node is None:
+        bundle = self.repository.get_node_bundle(namespace_slug, uri)
+        if bundle is None:
             raise ValueError(f"URI not found in current namespace: {uri}")
         self.repository.touch_node(namespace_slug, uri)
-        return self._read_node(namespace_slug, node.uri)
+        return self._render_node_bundle(namespace_slug, bundle)
+
+    def node_detail(self, uri: str) -> dict[str, Any]:
+        namespace_slug = self._active_namespace()
+        bundle = self.repository.get_node_bundle(namespace_slug, uri)
+        if bundle is None:
+            raise ValueError(f"Unknown memory URI: {uri}")
+        self.repository.touch_node(namespace_slug, uri)
+        node = bundle.node
+        return {
+            "id": node.id,
+            "uri": node.uri,
+            "title": node.title,
+            "kind": node.kind,
+            "node_type": node.node_type,
+            "is_core": node.is_core,
+            "priority": node.priority,
+            "content": self._render_node_bundle(namespace_slug, bundle),
+            "triggers": bundle.triggers,
+            "children": [
+                {"uri": child.uri, "title": child.title, "kind": child.kind, "node_type": child.node_type}
+                for child in bundle.children
+            ],
+        }
+
+    def _node_hierarchy_snapshot(self, namespace_slug: str) -> tuple[dict[str | None, list[Any]], dict[str, int]]:
+        nodes = self.repository.list_nodes(namespace_slug)
+        nodes_by_id = {node.id: node for node in nodes}
+        nodes_by_parent: dict[str | None, list[Any]] = {}
+        child_counts: dict[str, int] = {node.uri: 0 for node in nodes}
+        for node in nodes:
+            nodes_by_parent.setdefault(node.parent_id, []).append(node)
+        for node in nodes:
+            if node.parent_id and node.parent_id in nodes_by_id:
+                parent = nodes_by_id[node.parent_id]
+                child_counts[parent.uri] = child_counts.get(parent.uri, 0) + 1
+        return nodes_by_parent, child_counts
 
     def _read_boot(self, namespace_slug: str) -> str:
         namespace = self.repository.get_namespace_by_slug(namespace_slug)
         if namespace is None:
             raise ValueError(f"Unknown namespace: {namespace_slug}")
-        root_nodes = self.repository.list_children(namespace_slug, None)
-        core_nodes = self.repository.list_core_nodes(namespace_slug)
+        nodes_by_parent, child_counts = self._node_hierarchy_snapshot(namespace_slug)
+        root_nodes = nodes_by_parent.get(None, [])
+        core_nodes = [node for nodes in nodes_by_parent.values() for node in nodes if node.is_core]
         recent_nodes = self.repository.list_recent_nodes(namespace_slug, limit=5)
         lines = [
             "# system://boot",
@@ -269,9 +307,8 @@ class MemoryManager:
         lines.extend(["", "Root summary:"])
         if root_nodes:
             for node in root_nodes:
-                child_count = len(self.repository.list_children(namespace_slug, node.uri))
                 node_type = f" node_type: {node.node_type}" if node.node_type else ""
-                lines.append(f"- `{node.uri}` [{node.kind}]{node_type} children: {child_count}")
+                lines.append(f"- `{node.uri}` [{node.kind}]{node_type} children: {child_counts.get(node.uri, 0)}")
         else:
             lines.append("- (empty)")
         lines.extend(["", "Recently active:"])
@@ -284,16 +321,16 @@ class MemoryManager:
 
     def _read_index(self, namespace_slug: str) -> str:
         lines = ["# system://index", ""]
+        nodes_by_parent, child_counts = self._node_hierarchy_snapshot(namespace_slug)
 
-        def visit(parent_uri: str | None, depth: int) -> None:
-            for node in self.repository.list_children(namespace_slug, parent_uri):
+        def visit(parent_id: str | None, depth: int) -> None:
+            for node in nodes_by_parent.get(parent_id, []):
                 indent = "  " * depth
-                child_count = len(self.repository.list_children(namespace_slug, node.uri))
                 node_type = f" node_type: {node.node_type}" if node.node_type else ""
                 lines.append(
-                    f"{indent}- `{node.uri}` [{node.kind}]{node_type} children: {child_count}"
+                    f"{indent}- `{node.uri}` [{node.kind}]{node_type} children: {child_counts.get(node.uri, 0)}"
                 )
-                visit(node.uri, depth + 1)
+                visit(node.id, depth + 1)
 
         visit(None, 0)
         return "\n".join(lines)
@@ -308,23 +345,19 @@ class MemoryManager:
             lines.append(f"- {entry['term']} -> {entry['uri']}")
         return "\n".join(lines)
 
-    def _read_node(self, namespace_slug: str, uri: str) -> str:
-        node = self.repository.get_node_by_uri(namespace_slug, uri)
-        if node is None:
-            raise ValueError(f"Unknown memory URI: {uri}")
-        triggers = self.repository.list_triggers(namespace_slug, uri)
-        children = self.repository.list_children(namespace_slug, uri)
-        child_lines = [f"- `{child.uri}` [{child.kind}] {child.title}" for child in children]
+    def _render_node_bundle(self, namespace_slug: str, bundle: MemoryNodeBundle) -> str:
+        node = bundle.node
+        child_lines = [f"- `{child.uri}` [{child.kind}] {child.title}" for child in bundle.children]
         lines = [
             f"URI: {node.uri}",
             f"Title: {node.title}",
             f"Kind: {node.kind}",
             f"Node Type: {node.node_type or '-'}",
-            f"Parent URI: {self.repository._parent_uri_by_id(node.parent_id) or '-'}",
-            f"Children: {len(children)}",
+            f"Parent URI: {bundle.parent_uri or '-'}",
+            f"Children: {len(bundle.children)}",
             f"Is Core: {node.is_core}",
             f"Priority: {node.priority}",
-            f"Triggers: {', '.join(triggers) if triggers else '-'}",
+            f"Triggers: {', '.join(bundle.triggers) if bundle.triggers else '-'}",
             "",
         ]
         if node.kind == "folder":

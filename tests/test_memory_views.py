@@ -1,5 +1,6 @@
 from src.minibot.config.schema import MemoryConfig
 from src.minibot.memory.manager import MemoryManager
+from src.minibot.memory.repository import MemoryRepository
 
 
 def _make_manager(tmp_path):
@@ -79,3 +80,41 @@ def test_read_memory_renders_glossary_links_inline(tmp_path):
     body = manager.read("memory://characters/ali")
 
     assert "[白露镇](memory://locations/bailu-town)" in body
+
+
+def test_system_boot_avoids_recursive_list_children_reads(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    _seed_story(manager)
+
+    calls = {"count": 0}
+    original = MemoryRepository.list_children
+
+    def counted(self, namespace_slug: str, parent_uri: str | None = None):
+        calls["count"] += 1
+        return original(self, namespace_slug, parent_uri)
+
+    monkeypatch.setattr(MemoryRepository, "list_children", counted)
+
+    payload = manager.read("system://boot")
+
+    assert "Root summary:" in payload
+    assert calls["count"] == 0
+
+
+def test_system_index_avoids_recursive_list_children_reads(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    _seed_story(manager)
+
+    calls = {"count": 0}
+    original = MemoryRepository.list_children
+
+    def counted(self, namespace_slug: str, parent_uri: str | None = None):
+        calls["count"] += 1
+        return original(self, namespace_slug, parent_uri)
+
+    monkeypatch.setattr(MemoryRepository, "list_children", counted)
+
+    payload = manager.read("system://index")
+
+    assert "memory://characters" in payload
+    assert calls["count"] == 0

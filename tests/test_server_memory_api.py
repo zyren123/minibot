@@ -3,6 +3,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from src.minibot.memory.manager import MemoryManager
+from src.minibot.memory.repository import MemoryRepository
+
 
 @pytest.fixture()
 def server_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
@@ -114,3 +117,90 @@ def test_memory_tree_graph_and_node_endpoints_return_structured_payloads(client:
     node = client.get("/api/bots/default/memory/node", params={"uri": "memory://characters/ali"})
     assert node.status_code == 200, node.text
     assert node.json()["uri"] == "memory://characters/ali"
+
+
+def test_memory_tree_endpoint_avoids_recursive_list_children_reads(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.post("/api/bots/default/memory/namespaces", json={"slug": "ember-falls", "title": "Ember Falls"})
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "characters", "title": "Characters", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "locations", "title": "Locations", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={
+            "parent_uri": "memory://characters",
+            "slug": "ali",
+            "title": "Ali",
+            "kind": "memory",
+            "node_type": "character",
+            "content": "POV protagonist",
+        },
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={
+            "parent_uri": "memory://locations",
+            "slug": "bailu-town",
+            "title": "Bailu Town",
+            "kind": "memory",
+            "node_type": "location",
+            "content": "Riverside town",
+        },
+    )
+
+    calls = {"count": 0}
+    original = MemoryRepository.list_children
+
+    def counted(self, namespace_slug: str, parent_uri: str | None = None):
+        calls["count"] += 1
+        return original(self, namespace_slug, parent_uri)
+
+    monkeypatch.setattr(MemoryRepository, "list_children", counted)
+
+    tree = client.get("/api/bots/default/memory/tree")
+
+    assert tree.status_code == 200, tree.text
+    assert calls["count"] == 0
+
+
+def test_memory_node_endpoint_does_not_reenter_generic_read_path(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.post("/api/bots/default/memory/namespaces", json={"slug": "ember-falls", "title": "Ember Falls"})
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "characters", "title": "Characters", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={
+            "parent_uri": "memory://characters",
+            "slug": "ali",
+            "title": "Ali",
+            "kind": "memory",
+            "node_type": "character",
+            "content": "POV protagonist",
+        },
+    )
+
+    calls = {"count": 0}
+    original = MemoryManager.read
+
+    def counted(self, uri: str):
+        calls["count"] += 1
+        return original(self, uri)
+
+    monkeypatch.setattr(MemoryManager, "read", counted)
+
+    node = client.get("/api/bots/default/memory/node", params={"uri": "memory://characters/ali"})
+
+    assert node.status_code == 200, node.text
+    assert calls["count"] == 0
