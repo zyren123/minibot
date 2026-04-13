@@ -18,8 +18,11 @@ from .models import (
     BotConfigResponse,
     BotConfigUpdate,
     BotCreateRequest,
+    MemoryNodeBatchDeleteRequest,
     MemoryNamespaceCreateRequest,
     MemoryNodeCreateRequest,
+    MemoryNodeDeleteRequest,
+    MemoryNodeUpdateRequest,
     BotMetaResponse,
     ChatRequest,
     ConfigResponse,
@@ -170,6 +173,27 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     async def create_memory_node(bot_id: str, req: MemoryNodeCreateRequest) -> Any:
         try:
             return manager.create_memory_node(bot_id, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/bots/{bot_id}/memory/node")
+    async def update_memory_node(bot_id: str, req: MemoryNodeUpdateRequest) -> Any:
+        try:
+            return manager.update_memory_node(bot_id, req.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/bots/{bot_id}/memory/node")
+    async def delete_memory_node(bot_id: str, req: MemoryNodeDeleteRequest) -> Any:
+        try:
+            return manager.delete_memory_node(bot_id, uri=req.uri)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/bots/{bot_id}/memory/nodes")
+    async def delete_memory_nodes(bot_id: str, req: MemoryNodeBatchDeleteRequest) -> Any:
+        try:
+            return manager.delete_memory_nodes(bot_id, uris=req.uris)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

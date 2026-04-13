@@ -5,12 +5,16 @@ import remarkGfm from "remark-gfm";
 import {
   createMemoryNamespace,
   getBotConfig,
+  deleteMemoryNode,
+  deleteMemoryNodes,
   getMemoryNode,
   getMemoryTree,
   getMemoryView,
   listMemoryNamespaces,
   searchMemory,
+  updateMemoryNode,
   updateBotConfig,
+  createMemoryNode,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import type {
@@ -34,11 +38,19 @@ type DetailState =
 
 type ViewMode = "graph" | "tree";
 
+type MemoryBootstrapSnapshot = {
+  namespaces: MemoryNamespace[];
+  activeNamespace: string | null;
+  tree: MemoryTreeNode[];
+  createOpen: boolean;
+};
+
 const GRAPH_COLUMN_GAP = 240;
 const GRAPH_ROW_GAP = 148;
 const GRAPH_PADDING = 72;
 const GRAPH_NODE_WIDTH = 184;
 const GRAPH_NODE_HEIGHT = 84;
+const memoryBootstrapCache = new Map<string, Promise<MemoryBootstrapSnapshot>>();
 
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
@@ -54,9 +66,50 @@ function slugify(value: string) {
   return `novel-${Date.now().toString(36)}`;
 }
 
-function firstNodeUri(nodes: MemoryTreeNode[]): string | null {
-  if (nodes.length === 0) return null;
-  return nodes[0]?.uri ?? null;
+async function fetchMemoryBootstrap(botId: string): Promise<MemoryBootstrapSnapshot> {
+  const cached = memoryBootstrapCache.get(botId);
+  if (cached) return cached;
+  const pending = (async () => {
+    const [config, namespaceList] = await Promise.all([getBotConfig(botId), listMemoryNamespaces(botId)]);
+    if (namespaceList.length === 0) {
+      return {
+        namespaces: [],
+        activeNamespace: null,
+        tree: [],
+        createOpen: true,
+      };
+    }
+    const nextActive = config.active_memory_namespace ?? namespaceList[0]?.slug ?? null;
+    if (!nextActive) {
+      return {
+        namespaces: namespaceList,
+        activeNamespace: null,
+        tree: [],
+        createOpen: false,
+      };
+    }
+    if (config.active_memory_namespace !== nextActive) {
+      await updateBotConfig(botId, { active_memory_namespace: nextActive });
+    }
+    const treePayload = await getMemoryTree(botId);
+    return {
+      namespaces: namespaceList,
+      activeNamespace: nextActive,
+      tree: treePayload.nodes,
+      createOpen: false,
+    };
+  })();
+  memoryBootstrapCache.set(botId, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    memoryBootstrapCache.delete(botId);
+    throw error;
+  }
+}
+
+function invalidateMemoryBootstrap(botId: string) {
+  memoryBootstrapCache.delete(botId);
 }
 
 function NamespaceSelect(props: {
@@ -174,9 +227,11 @@ function SearchResults(props: {
 function TreeBranch(props: {
   nodes: MemoryTreeNode[];
   selectedUri: string | null;
+  selectedBatchUris: string[];
   spacious?: boolean;
   emptyLabel: string;
   onSelect: (uri: string) => void;
+  onToggleBatch: (uri: string) => void;
 }) {
   if (props.nodes.length === 0) {
     return <div className="memory-empty">{props.emptyLabel}</div>;
@@ -186,30 +241,41 @@ function TreeBranch(props: {
     <div className={props.spacious ? "memory-tree-branch-spacious" : "memory-tree-branch"}>
       {props.nodes.map((node) => (
         <div key={node.uri} className="memory-tree-node">
-          <button
-            type="button"
-            className="memory-tree-button"
-            data-selected={props.selectedUri === node.uri ? "true" : "false"}
-            data-spacious={props.spacious ? "true" : "false"}
-            data-kind={node.kind}
-            onClick={() => props.onSelect(node.uri)}
-          >
-            <span className="memory-tree-titleblock">
-              <span className="memory-tree-title">{node.title}</span>
-              <span className="memory-tree-uri">{node.uri}</span>
-            </span>
-            <span className="memory-kind-pill" data-kind={node.kind}>
-              {node.node_type ?? node.kind}
-            </span>
-          </button>
+          <div className="memory-tree-row">
+            <label className="memory-tree-check">
+              <input
+                type="checkbox"
+                checked={props.selectedBatchUris.includes(node.uri)}
+                onChange={() => props.onToggleBatch(node.uri)}
+              />
+            </label>
+            <button
+              type="button"
+              className="memory-tree-button"
+              data-selected={props.selectedUri === node.uri ? "true" : "false"}
+              data-spacious={props.spacious ? "true" : "false"}
+              data-kind={node.kind}
+              onClick={() => props.onSelect(node.uri)}
+            >
+              <span className="memory-tree-titleblock">
+                <span className="memory-tree-title">{node.title}</span>
+                <span className="memory-tree-uri">{node.uri}</span>
+              </span>
+              <span className="memory-kind-pill" data-kind={node.kind}>
+                {node.node_type ?? node.kind}
+              </span>
+            </button>
+          </div>
           {node.children.length > 0 ? (
             <div className="memory-tree-children">
               <TreeBranch
                 nodes={node.children}
                 selectedUri={props.selectedUri}
+                selectedBatchUris={props.selectedBatchUris}
                 spacious={props.spacious}
                 emptyLabel={props.emptyLabel}
                 onSelect={props.onSelect}
+                onToggleBatch={props.onToggleBatch}
               />
             </div>
           ) : null}
@@ -382,26 +448,47 @@ function GraphCanvas(props: {
 
 export default function MemoryView({ botId }: Props) {
   const { t } = useI18n();
+  const hasInitializedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [namespaces, setNamespaces] = useState<MemoryNamespace[]>([]);
   const [activeNamespace, setActiveNamespace] = useState<string | null>(null);
   const [tree, setTree] = useState<MemoryTreeNode[]>([]);
+  const [selectedBatchUris, setSelectedBatchUris] = useState<string[]>([]);
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("graph");
+  const [viewMode, setViewMode] = useState<ViewMode>("tree");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<MemorySearchResult[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [namespaceTitle, setNamespaceTitle] = useState("");
   const [namespaceSlug, setNamespaceSlug] = useState("");
   const [namespaceDescription, setNamespaceDescription] = useState("");
+  const [editingNode, setEditingNode] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [creatingChild, setCreatingChild] = useState(false);
+  const [childTitle, setChildTitle] = useState("");
+  const [childSlug, setChildSlug] = useState("");
+  const [childKind, setChildKind] = useState<"folder" | "memory">("memory");
+  const [childContent, setChildContent] = useState("");
 
   const activeNamespaceRecord = useMemo(
     () => namespaces.find((item) => item.slug === activeNamespace) ?? null,
     [activeNamespace, namespaces],
   );
+
+  function resetNodeForms() {
+    setEditingNode(false);
+    setCreatingChild(false);
+    setEditTitle("");
+    setEditContent("");
+    setChildTitle("");
+    setChildSlug("");
+    setChildKind("memory");
+    setChildContent("");
+  }
 
   async function openSystemView(view: MemorySystemViewName) {
     const payload = await getMemoryView(botId, view);
@@ -415,6 +502,10 @@ export default function MemoryView({ botId }: Props) {
       const payload = await getMemoryNode(botId, uri);
       setSelectedUri(uri);
       setDetail({ mode: "node", payload });
+      setEditingNode(false);
+      setCreatingChild(false);
+      setEditTitle(payload.title);
+      setEditContent(payload.content);
     } catch (error) {
       setStatus(String(error));
     } finally {
@@ -422,28 +513,37 @@ export default function MemoryView({ botId }: Props) {
     }
   }
 
-  async function loadWorkspace(options?: { preferredUri?: string | null; showView?: MemorySystemViewName }) {
+  async function loadWorkspace(options?: { preferredUri?: string | null; showView?: MemorySystemViewName; hydrateDetail?: boolean }) {
     setBusy(true);
     setStatus(null);
     try {
       const treePayload = await getMemoryTree(botId);
       setTree(treePayload.nodes);
       setSearchResults([]);
+      setSelectedBatchUris([]);
 
-      const preferredUri = options?.preferredUri ?? selectedUri ?? firstNodeUri(treePayload.nodes);
-      if (preferredUri) {
+      const preferredUri = options?.preferredUri ?? selectedUri;
+      if (options?.hydrateDetail && preferredUri) {
         const nodePayload = await getMemoryNode(botId, preferredUri);
         setSelectedUri(preferredUri);
         setDetail({ mode: "node", payload: nodePayload });
+        setEditTitle(nodePayload.title);
+        setEditContent(nodePayload.content);
+      } else if (options?.showView) {
+        setSelectedUri(null);
+        await openSystemView(options.showView);
       } else {
         setSelectedUri(null);
-        await openSystemView(options?.showView ?? "boot");
+        setDetail(null);
+        resetNodeForms();
       }
     } catch (error) {
       setStatus(String(error));
       setTree([]);
+      setSelectedBatchUris([]);
       setSelectedUri(null);
       setDetail(null);
+      resetNodeForms();
     } finally {
       setBusy(false);
     }
@@ -454,8 +554,9 @@ export default function MemoryView({ botId }: Props) {
     setStatus(null);
     try {
       await updateBotConfig(botId, { active_memory_namespace: slug });
+      invalidateMemoryBootstrap(botId);
       setActiveNamespace(slug);
-      await loadWorkspace(options);
+      await loadWorkspace({ preferredUri: options?.preferredUri ?? null, showView: options?.showView, hydrateDetail: false });
     } catch (error) {
       setStatus(String(error));
       setBusy(false);
@@ -466,56 +567,118 @@ export default function MemoryView({ botId }: Props) {
     setLoading(true);
     setStatus(null);
     try {
-      const [config, namespaceList] = await Promise.all([getBotConfig(botId), listMemoryNamespaces(botId)]);
-      setNamespaces(namespaceList);
-
-      if (namespaceList.length === 0) {
-        setActiveNamespace(null);
-        setTree([]);
-        setSelectedUri(null);
-        setDetail(null);
-        setCreateOpen(true);
-        return;
-      }
-
-      const nextActive = config.active_memory_namespace ?? namespaceList[0]?.slug ?? null;
-      if (!nextActive) {
-        setActiveNamespace(null);
-        return;
-      }
-      setCreateOpen(false);
-
-      if (config.active_memory_namespace !== nextActive) {
-        await updateBotConfig(botId, { active_memory_namespace: nextActive });
-      }
-
-      setActiveNamespace(nextActive);
-      const treePayload = await getMemoryTree(botId);
-      setTree(treePayload.nodes);
-      const initialUri = firstNodeUri(treePayload.nodes);
-      if (initialUri) {
-        const nodePayload = await getMemoryNode(botId, initialUri);
-        setSelectedUri(initialUri);
-        setDetail({ mode: "node", payload: nodePayload });
-      } else {
-        setSelectedUri(null);
-        const bootPayload = await getMemoryView(botId, "boot");
-        setDetail({ mode: "system", view: "boot", payload: bootPayload });
-      }
+      const snapshot = await fetchMemoryBootstrap(botId);
+      setNamespaces(snapshot.namespaces);
+      setActiveNamespace(snapshot.activeNamespace);
+      setTree(snapshot.tree);
+      setSelectedBatchUris([]);
+      setSelectedUri(null);
+      setDetail(null);
+      setCreateOpen(snapshot.createOpen);
+      resetNodeForms();
     } catch (error) {
       setStatus(String(error));
       setNamespaces([]);
       setActiveNamespace(null);
       setTree([]);
+      setSelectedBatchUris([]);
       setSelectedUri(null);
       setDetail(null);
+      resetNodeForms();
     } finally {
       setLoading(false);
       setBusy(false);
     }
   }
 
+  function toggleBatchUri(uri: string) {
+    setSelectedBatchUris((current) =>
+      current.includes(uri) ? current.filter((item) => item !== uri) : [...current, uri],
+    );
+  }
+
+  async function submitNodeEdit() {
+    if (detail?.mode !== "node") return;
+    const nextTitle = editTitle.trim();
+    if (!nextTitle) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const updated = await updateMemoryNode(botId, {
+        uri: detail.payload.uri,
+        title: nextTitle,
+        content: editContent,
+      });
+      invalidateMemoryBootstrap(botId);
+      await loadWorkspace({ preferredUri: updated.uri, hydrateDetail: true });
+      setEditingNode(false);
+    } catch (error) {
+      setStatus(String(error));
+      setBusy(false);
+    }
+  }
+
+  async function submitChildCreate() {
+    if (detail?.mode !== "node") return;
+    const nextTitle = childTitle.trim();
+    if (!nextTitle) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const created = await createMemoryNode(botId, {
+        parent_uri: detail.payload.uri,
+        slug: childSlug.trim() || undefined,
+        title: nextTitle,
+        kind: childKind,
+        content: childContent,
+      });
+      invalidateMemoryBootstrap(botId);
+      await loadWorkspace({ preferredUri: created.uri, hydrateDetail: true });
+      setCreatingChild(false);
+      setChildTitle("");
+      setChildSlug("");
+      setChildContent("");
+      setChildKind("memory");
+    } catch (error) {
+      setStatus(String(error));
+      setBusy(false);
+    }
+  }
+
+  async function removeCurrentNode() {
+    if (detail?.mode !== "node") return;
+    if (!window.confirm(`Delete subtree ${detail.payload.uri}?`)) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const fallbackUri = detail.payload.parent_uri ?? null;
+      await deleteMemoryNode(botId, detail.payload.uri);
+      invalidateMemoryBootstrap(botId);
+      await loadWorkspace({ preferredUri: fallbackUri, hydrateDetail: Boolean(fallbackUri) });
+    } catch (error) {
+      setStatus(String(error));
+      setBusy(false);
+    }
+  }
+
+  async function removeSelectedNodes() {
+    if (selectedBatchUris.length === 0) return;
+    if (!window.confirm(`Delete ${selectedBatchUris.length} selected subtree(s)?`)) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      await deleteMemoryNodes(botId, selectedBatchUris);
+      invalidateMemoryBootstrap(botId);
+      await loadWorkspace({ preferredUri: null, hydrateDetail: false });
+    } catch (error) {
+      setStatus(String(error));
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
+    if (hasInitializedRef.current) return;
+    hasInitializedRef.current = true;
     void loadNamespaces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId]);
@@ -647,11 +810,23 @@ export default function MemoryView({ botId }: Props) {
               </div>
             </div>
             <div className="memory-sidebar-scroll">
+              <div className="memory-sidebar-actions">
+                <button
+                  type="button"
+                  className="memory-control-button memory-danger-button"
+                  disabled={busy || selectedBatchUris.length === 0}
+                  onClick={() => void removeSelectedNodes()}
+                >
+                  Delete Selected ({selectedBatchUris.length})
+                </button>
+              </div>
               <TreeBranch
                 nodes={tree}
                 selectedUri={selectedUri}
+                selectedBatchUris={selectedBatchUris}
                 emptyLabel={t("memory.explorer.empty")}
                 onSelect={(uri) => void openNode(uri)}
+                onToggleBatch={toggleBatchUri}
               />
             </div>
           </aside>
@@ -723,9 +898,11 @@ export default function MemoryView({ botId }: Props) {
                   <TreeBranch
                     nodes={tree}
                     selectedUri={selectedUri}
+                    selectedBatchUris={selectedBatchUris}
                     spacious
                     emptyLabel={t("memory.tree.empty")}
                     onSelect={(uri) => void openNode(uri)}
+                    onToggleBatch={toggleBatchUri}
                   />
                 </div>
               </section>
@@ -765,8 +942,16 @@ export default function MemoryView({ botId }: Props) {
               <div className="memory-detail-scroll">
                 <div className="memory-detail-grid">
                   <div className="memory-detail-field">
+                    <span className="memory-detail-label">{t("memory.namespace.label")}</span>
+                    <span className="memory-detail-value">{activeNamespaceRecord?.title ?? activeNamespace}</span>
+                  </div>
+                  <div className="memory-detail-field">
                     <span className="memory-detail-label">URI</span>
                     <span className="memory-detail-value">{detail.payload.uri}</span>
+                  </div>
+                  <div className="memory-detail-field">
+                    <span className="memory-detail-label">Parent URI</span>
+                    <span className="memory-detail-value">{detail.payload.parent_uri ?? "-"}</span>
                   </div>
                   <div className="memory-detail-field">
                     <span className="memory-detail-label">{t("memory.detail.kind")}</span>
@@ -789,6 +974,132 @@ export default function MemoryView({ botId }: Props) {
                     <span className="memory-detail-value">{detail.payload.children.length}</span>
                   </div>
                 </div>
+
+                <div className="memory-detail-actions">
+                  <button
+                    type="button"
+                    className="memory-control-button"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditTitle(detail.payload.title);
+                      setEditContent(detail.payload.content);
+                      setEditingNode((value) => !value);
+                      setCreatingChild(false);
+                    }}
+                  >
+                    {editingNode ? "Cancel Edit" : "Edit Node"}
+                  </button>
+                  <button
+                    type="button"
+                    className="memory-control-button"
+                    disabled={busy}
+                    onClick={() => {
+                      setCreatingChild((value) => !value);
+                      setEditingNode(false);
+                    }}
+                  >
+                    {creatingChild ? "Cancel Child" : "Create Child"}
+                  </button>
+                  <button
+                    type="button"
+                    className="memory-control-button memory-danger-button"
+                    disabled={busy}
+                    onClick={() => void removeCurrentNode()}
+                  >
+                    Delete Subtree
+                  </button>
+                </div>
+
+                {editingNode ? (
+                  <form
+                    className="memory-detail-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void submitNodeEdit();
+                    }}
+                  >
+                    <label className="memory-field">
+                      <span className="memory-field-label">Title</span>
+                      <input
+                        value={editTitle}
+                        onChange={(event) => setEditTitle(event.target.value)}
+                        className="memory-input"
+                        disabled={busy}
+                      />
+                    </label>
+                    <label className="memory-field memory-field-wide">
+                      <span className="memory-field-label">Content</span>
+                      <textarea
+                        value={editContent}
+                        onChange={(event) => setEditContent(event.target.value)}
+                        className="memory-input memory-textarea"
+                        disabled={busy}
+                      />
+                    </label>
+                    <div className="memory-create-actions">
+                      <button type="submit" className="memory-primary-button" disabled={busy || !editTitle.trim()}>
+                        Save Node
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
+
+                {creatingChild ? (
+                  <form
+                    className="memory-detail-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void submitChildCreate();
+                    }}
+                  >
+                    <div className="memory-detail-inline-grid">
+                      <label className="memory-field">
+                        <span className="memory-field-label">Title</span>
+                        <input
+                          value={childTitle}
+                          onChange={(event) => setChildTitle(event.target.value)}
+                          className="memory-input"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label className="memory-field">
+                        <span className="memory-field-label">Slug</span>
+                        <input
+                          value={childSlug}
+                          onChange={(event) => setChildSlug(event.target.value)}
+                          className="memory-input"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label className="memory-field">
+                        <span className="memory-field-label">Kind</span>
+                        <select
+                          value={childKind}
+                          onChange={(event) => setChildKind(event.target.value as "folder" | "memory")}
+                          className="memory-input"
+                          disabled={busy}
+                        >
+                          <option value="memory">memory</option>
+                          <option value="folder">folder</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="memory-field memory-field-wide">
+                      <span className="memory-field-label">Content</span>
+                      <textarea
+                        value={childContent}
+                        onChange={(event) => setChildContent(event.target.value)}
+                        className="memory-input memory-textarea"
+                        disabled={busy}
+                      />
+                    </label>
+                    <div className="memory-create-actions">
+                      <button type="submit" className="memory-primary-button" disabled={busy || !childTitle.trim()}>
+                        Create Child
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
 
                 <div className="memory-detail-section">
                   <div className="memory-detail-section-title">{t("memory.detail.triggers")}</div>

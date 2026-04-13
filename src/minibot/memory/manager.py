@@ -199,6 +199,26 @@ class MemoryManager:
     def delete_memory(self, uri: str) -> None:
         self.repository.delete_node(self._active_namespace(), uri)
 
+    def delete_memories(self, uris: list[str]) -> dict[str, object]:
+        namespace_slug = self._active_namespace()
+        deleted: list[str] = []
+        pending: list[str] = []
+        for uri in uris:
+            normalized = str(uri or "").strip()
+            if not normalized:
+                continue
+            if self.repository.get_node_by_uri(namespace_slug, normalized) is None:
+                raise ValueError(f"Unknown memory URI: {normalized}")
+            pending.append(normalized)
+        for normalized in pending:
+            self.repository.delete_node(namespace_slug, normalized)
+            deleted.append(normalized)
+        return {
+            "deleted": bool(deleted),
+            "deleted_count": len(deleted),
+            "deleted_uris": deleted,
+        }
+
     def manage_triggers(
         self,
         uri: str,
@@ -261,9 +281,10 @@ class MemoryManager:
             "title": node.title,
             "kind": node.kind,
             "node_type": node.node_type,
+            "parent_uri": bundle.parent_uri,
             "is_core": node.is_core,
             "priority": node.priority,
-            "content": self._render_node_bundle(namespace_slug, bundle),
+            "content": node.content,
             "triggers": bundle.triggers,
             "children": [
                 {"uri": child.uri, "title": child.title, "kind": child.kind, "node_type": child.node_type}

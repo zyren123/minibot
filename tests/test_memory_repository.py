@@ -47,13 +47,6 @@ def test_create_update_move_and_delete_node_records_versions(tmp_path):
     assert updated.title == "Ali Ren"
     assert updated.uri == "memory://characters/ali"
 
-    try:
-        repo.delete_node(namespace.slug, "memory://characters")
-    except ValueError as exc:
-        assert "children" in str(exc).lower()
-    else:
-        raise AssertionError("expected delete_node to reject non-empty parent")
-
     moved = repo.update_node(
         namespace.slug,
         "memory://characters/ali",
@@ -67,3 +60,40 @@ def test_create_update_move_and_delete_node_records_versions(tmp_path):
 
     versions = repo.list_versions(ali.id)
     assert [version["operation"] for version in versions] == ["create", "update", "update"]
+
+
+def test_delete_node_removes_entire_subtree(tmp_path):
+    config = MemoryConfig(memory_dir=str(tmp_path / "memory"), backend="sqlite")
+    repo = MemoryRepository.from_config(config, app_home=tmp_path / ".minibot")
+
+    namespace = repo.create_namespace(slug="ember-falls", title="Ember Falls")
+    root = repo.create_node(
+        namespace.slug,
+        parent_uri=None,
+        slug="characters",
+        title="Characters",
+        kind="folder",
+    )
+    child = repo.create_node(
+        namespace.slug,
+        parent_uri=root.uri,
+        slug="ali",
+        title="Ali",
+        kind="memory",
+        content="POV protagonist.",
+    )
+    grandchild = repo.create_node(
+        namespace.slug,
+        parent_uri=child.uri,
+        slug="notes",
+        title="Notes",
+        kind="memory",
+        content="Nested note.",
+    )
+
+    repo.delete_node(namespace.slug, root.uri)
+
+    assert repo.get_node_by_uri(namespace.slug, root.uri) is None
+    assert repo.get_node_by_uri(namespace.slug, child.uri) is None
+    assert repo.get_node_by_uri(namespace.slug, grandchild.uri) is None
+    assert repo.list_nodes(namespace.slug) == []

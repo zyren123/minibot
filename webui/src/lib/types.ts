@@ -266,6 +266,7 @@ export type MemoryNodeDetail = {
   title: string;
   kind: "folder" | "memory";
   node_type: string | null;
+  parent_uri?: string | null;
   is_core: boolean;
   priority: number;
   content: string;

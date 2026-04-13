@@ -204,3 +204,91 @@ def test_memory_node_endpoint_does_not_reenter_generic_read_path(
 
     assert node.status_code == 200, node.text
     assert calls["count"] == 0
+
+
+def test_memory_node_update_endpoint_edits_title_and_content(client: TestClient) -> None:
+    client.post("/api/bots/default/memory/namespaces", json={"slug": "ember-falls", "title": "Ember Falls"})
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={
+            "parent_uri": None,
+            "slug": "furina-persona",
+            "title": "Furina Persona",
+            "kind": "memory",
+            "content": "Before",
+        },
+    )
+
+    updated = client.put(
+        "/api/bots/default/memory/node",
+        json={"uri": "memory://furina-persona", "title": "Furina Core Persona", "content": "After"},
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["title"] == "Furina Core Persona"
+
+    node = client.get("/api/bots/default/memory/node", params={"uri": "memory://furina-persona"})
+    assert node.status_code == 200, node.text
+    assert node.json()["title"] == "Furina Core Persona"
+    assert node.json()["content"] == "After"
+
+
+def test_memory_node_delete_endpoint_removes_subtree(client: TestClient) -> None:
+    client.post("/api/bots/default/memory/namespaces", json={"slug": "ember-falls", "title": "Ember Falls"})
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "characters", "title": "Characters", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": "memory://characters", "slug": "ali", "title": "Ali", "kind": "memory", "content": "A"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": "memory://characters/ali", "slug": "notes", "title": "Notes", "kind": "memory", "content": "B"},
+    )
+
+    deleted = client.request("DELETE", "/api/bots/default/memory/node", json={"uri": "memory://characters"})
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+
+    tree = client.get("/api/bots/default/memory/tree")
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["nodes"] == []
+
+    node = client.get("/api/bots/default/memory/node", params={"uri": "memory://characters/ali"})
+    assert node.status_code == 404, node.text
+
+
+def test_memory_batch_delete_endpoint_removes_multiple_subtrees(client: TestClient) -> None:
+    client.post("/api/bots/default/memory/namespaces", json={"slug": "ember-falls", "title": "Ember Falls"})
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "characters", "title": "Characters", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": None, "slug": "locations", "title": "Locations", "kind": "folder"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": "memory://characters", "slug": "ali", "title": "Ali", "kind": "memory", "content": "A"},
+    )
+    client.post(
+        "/api/bots/default/memory/nodes",
+        json={"parent_uri": "memory://locations", "slug": "bailu-town", "title": "Bailu Town", "kind": "memory", "content": "B"},
+    )
+
+    deleted = client.request(
+        "DELETE",
+        "/api/bots/default/memory/nodes",
+        json={"uris": ["memory://characters", "memory://locations"]},
+    )
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted_count"] == 2
+
+    tree = client.get("/api/bots/default/memory/tree")
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["nodes"] == []

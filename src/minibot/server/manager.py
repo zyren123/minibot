@@ -1215,6 +1215,42 @@ class AgentManager:
             "priority": node.priority,
         }
 
+    def update_memory_node(self, bot_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        uri = str(patch.get("uri") or "").strip()
+        if not uri:
+            raise ValueError("uri is required")
+        fields = {
+            key: patch[key]
+            for key in ("parent_uri", "slug", "title", "node_type", "content", "is_core", "priority")
+            if key in patch
+        }
+        node = manager.update_memory(uri, **fields)
+        return {
+            "id": node.id,
+            "uri": node.uri,
+            "title": node.title,
+            "kind": node.kind,
+            "node_type": node.node_type,
+            "is_core": node.is_core,
+            "priority": node.priority,
+        }
+
+    def delete_memory_node(self, bot_id: str, *, uri: str) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        manager.delete_memory(uri)
+        return {"deleted": True, "deleted_count": 1, "deleted_uris": [uri]}
+
+    def delete_memory_nodes(self, bot_id: str, *, uris: list[str]) -> dict[str, Any]:
+        manager = self._memory_manager_for(bot_id)
+        normalized = [str(uri).strip() for uri in uris if str(uri).strip()]
+        roots: list[str] = []
+        for uri in sorted(set(normalized), key=len):
+            if any(uri == root or uri.startswith(f"{root}/") for root in roots):
+                continue
+            roots.append(uri)
+        return manager.delete_memories(roots)
+
     def memory_search(self, bot_id: str, *, query: str, limit: int = 8) -> list[dict[str, Any]]:
         manager = self._memory_manager_for(bot_id)
         return [

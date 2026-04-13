@@ -815,6 +815,14 @@ html[data-theme="light"] .hover\:text-red-200:hover {
   padding: 1rem;
 }
 
+.memory-sidebar-actions,
+.memory-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-bottom: 0.9rem;
+}
+
 .memory-detail-scroll {
   max-height: min(75vh, 64rem);
   overflow: auto;
@@ -831,10 +839,30 @@ html[data-theme="light"] .hover\:text-red-200:hover {
   gap: 0.65rem;
 }
 
+.memory-tree-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+}
+
 .memory-tree-children {
   margin-left: 0.95rem;
   padding-left: 0.95rem;
   border-left: 1px solid var(--border-subtle);
+}
+
+.memory-tree-check {
+  display: inline-flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
+  padding-top: 0.15rem;
+}
+
+.memory-tree-check input {
+  height: 1rem;
+  width: 1rem;
 }
 
 .memory-tree-button {
@@ -919,6 +947,16 @@ html[data-theme="light"] .hover\:text-red-200:hover {
 .memory-kind-pill[data-kind="memory"] {
   background: rgba(56, 189, 248, 0.14);
   color: var(--memory-node-memory);
+}
+
+.memory-danger-button {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+.memory-danger-button:hover {
+  border-color: var(--danger-border-hover);
+  background: var(--danger-bg-soft);
 }
 
 .memory-search-results {
@@ -1098,6 +1136,18 @@ html[data-theme="light"] .hover\:text-red-200:hover {
   gap: 0.75rem;
 }
 
+.memory-detail-form {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.memory-detail-inline-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .memory-detail-section-title {
   font-size: 0.78rem;
   font-weight: 800;
@@ -1143,7 +1193,8 @@ html[data-theme="light"] .hover\:text-red-200:hover {
   }
 
   .memory-create-form,
-  .memory-detail-grid {
+  .memory-detail-grid,
+  .memory-detail-inline-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

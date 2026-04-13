@@ -177,22 +177,28 @@ class MemoryRepository:
     def delete_node(self, namespace_slug: str, uri: str) -> None:
         with self.database.session_factory() as session:
             node_row = self._require_node_row(session, namespace_slug, uri)
-            child = session.exec(
-                select(MemoryNodeRow.id).where(
-                    MemoryNodeRow.namespace_id == node_row.namespace_id,
-                    MemoryNodeRow.parent_id == node_row.id,
-                    MemoryNodeRow.deleted_at.is_(None),
-                ).limit(1)
-            ).first()
-            if child is not None:
-                raise ValueError("Cannot delete node with children")
             now = _utc_now()
-            node_row.deleted_at = now
-            node_row.updated_at = now
-            session.add(node_row)
-            self._delete_search_document(session, node_row.id)
-            node = self._row_to_node(node_row)
-            self._record_version(session, node, operation="delete", change={"deleted": True})
+            rows = session.exec(
+                select(MemoryNodeRow)
+                .where(
+                    MemoryNodeRow.namespace_id == node_row.namespace_id,
+                    MemoryNodeRow.deleted_at.is_(None),
+                    (MemoryNodeRow.uri == node_row.uri) | (MemoryNodeRow.uri.like(f"{node_row.uri}/%")),
+                )
+                .order_by(func.length(MemoryNodeRow.uri).desc())
+            ).all()
+            for row in rows:
+                row.deleted_at = now
+                row.updated_at = now
+                session.add(row)
+                self._delete_search_document(session, row.id)
+                triggers = session.exec(
+                    select(MemoryTriggerRow).where(MemoryTriggerRow.node_id == row.id)
+                ).all()
+                for trigger in triggers:
+                    session.delete(trigger)
+                node = self._row_to_node(row)
+                self._record_version(session, node, operation="delete", change={"deleted": True, "root_uri": uri})
             session.commit()
 
     def get_node_by_uri(self, namespace_slug: str, uri: str) -> MemoryNode | None:

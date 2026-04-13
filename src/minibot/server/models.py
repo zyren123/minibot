@@ -196,6 +196,25 @@ class MemoryNodeCreateRequest(BaseModel):
     priority: int = 0
 
 
+class MemoryNodeUpdateRequest(BaseModel):
+    uri: str = Field(min_length=1)
+    parent_uri: str | None = None
+    slug: str | None = None
+    title: str | None = None
+    node_type: str | None = None
+    content: str | None = None
+    is_core: bool | None = None
+    priority: int | None = None
+
+
+class MemoryNodeDeleteRequest(BaseModel):
+    uri: str = Field(min_length=1)
+
+
+class MemoryNodeBatchDeleteRequest(BaseModel):
+    uris: list[str] = Field(default_factory=list)
+
+
 class SkillCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     description: str | None = None

@@ -109,6 +109,45 @@ export async function createMemoryNode(
   return apiPost(`/api/bots/${encodeURIComponent(botId)}/memory/nodes`, body);
 }
 
+export async function updateMemoryNode(
+  botId: string,
+  body: {
+    uri: string;
+    parent_uri?: string | null;
+    slug?: string | null;
+    title?: string | null;
+    node_type?: string | null;
+    content?: string | null;
+    is_core?: boolean | null;
+    priority?: number | null;
+  },
+): Promise<{ id: string; uri: string; title: string; kind: string; node_type: string | null; is_core: boolean; priority: number }> {
+  return apiPut(`/api/bots/${encodeURIComponent(botId)}/memory/node`, body);
+}
+
+export async function deleteMemoryNode(botId: string, uri: string): Promise<{ deleted: boolean; deleted_count: number; deleted_uris: string[] }> {
+  const resp = await fetch(`/api/bots/${encodeURIComponent(botId)}/memory/node`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uri }),
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as { deleted: boolean; deleted_count: number; deleted_uris: string[] };
+}
+
+export async function deleteMemoryNodes(
+  botId: string,
+  uris: string[],
+): Promise<{ deleted: boolean; deleted_count: number; deleted_uris: string[] }> {
+  const resp = await fetch(`/api/bots/${encodeURIComponent(botId)}/memory/nodes`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uris }),
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return (await resp.json()) as { deleted: boolean; deleted_count: number; deleted_uris: string[] };
+}
+
 export async function getMemoryTree(botId: string): Promise<MemoryTreeResponse> {
   return apiGet<MemoryTreeResponse>(`/api/bots/${encodeURIComponent(botId)}/memory/tree`);
 }
