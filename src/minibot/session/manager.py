@@ -15,7 +15,8 @@ class SessionManager:
     """High-level session lifecycle: create, load, save, list, delete."""
 
     def __init__(self, sessions_dir: Path) -> None:
-        self.store = SessionStore(sessions_dir)
+        self.sessions_dir = sessions_dir.resolve()
+        self.store = SessionStore(self.sessions_dir)
 
     def create(self) -> str:
         """Create a new session and return its id."""
@@ -47,9 +48,9 @@ class SessionManager:
         """Load runtime state for a session."""
         return self.store.load_runtime_state(session_id)
 
-    def delete_runtime_state(self, session_id: str) -> bool:
-        """Delete runtime state for a session."""
-        return self.store.delete_runtime_state(session_id)
+    def delete_runtime_state(self, session_id: str, *, expected: dict[str, Any] | None = None) -> bool:
+        """Delete the sidecar if present and, when supplied, matching expected."""
+        return self.store.delete_runtime_state(session_id, expected=expected)
 
     def update_message(
         self,

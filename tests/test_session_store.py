@@ -1,6 +1,7 @@
 """Tests for SessionStore JSONL persistence."""
 
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -52,13 +53,26 @@ def test_delete_session(store: SessionStore) -> None:
     assert store.delete("del-me") is False
 
 
-def test_runtime_sidecar_round_trip(store: SessionStore) -> None:
+def test_runtime_sidecar_round_trip(store: SessionStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    read_text = Path.read_text
+    named_temporary_file = tempfile.NamedTemporaryFile
+
+    def read_utf8(path, *args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        return read_text(path, *args, **kwargs)
+
+    def write_utf8(*args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        return named_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_utf8)
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", write_utf8)
     store.create("sess-1")
     payload = {
         "version": 1,
         "state": "awaiting_user_answer",
         "assistant_message_id": "msg-assistant-1",
-        "pending_question": {"question_id": "ask-1", "prompt": "Which task?"},
+        "pending_question": {"question_id": "ask-1", "prompt": "哪个任务？"},
     }
 
     store.save_runtime_state("sess-1", payload)

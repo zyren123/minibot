@@ -17,6 +17,7 @@ from ..config.writer import update_default_config, update_mcp_server_config, ups
 from ..memory.manager import MemoryManager
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
+from ..sdk._active_streams import is_active_stream
 from ..session.manager import SessionManager
 from ..skills.loader import SkillLoader
 from ..subagents.registry import AgentType
@@ -609,6 +610,9 @@ class AgentManager:
             return runtime_state
 
         session_mgr = self.sessions_for(bot_id)
+        if is_active_stream(session_mgr, session_id, runtime_state.get("run_id")):
+            return runtime_state
+
         assistant_message_id = runtime_state.get("assistant_message_id")
         if isinstance(assistant_message_id, str) and assistant_message_id.strip():
             session_mgr.update_message(
@@ -620,13 +624,15 @@ class AgentManager:
                     else {**current, "completion_state": "interrupted"}
                 ),
             )
-        session_mgr.delete_runtime_state(session_id)
+        session_mgr.delete_runtime_state(session_id, expected=runtime_state)
         return None
 
     async def pending_question_snapshot(self, bot_id: str, session_id: str) -> dict[str, Any] | None:
         session_mgr = self.sessions_for(bot_id)
         runtime_state = session_mgr.load_runtime_state(session_id)
         runtime_state = self._reconcile_stale_runtime(bot_id, session_id, runtime_state)
+        if runtime_state is not None and runtime_state.get("state") == "streaming":
+            return None
         if runtime_state is not None and runtime_state.get("state") == "awaiting_user_answer":
             pending_question = runtime_state.get("pending_question")
             if isinstance(pending_question, dict) and pending_question:

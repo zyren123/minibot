@@ -122,10 +122,12 @@ class SessionStore:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def delete_runtime_state(self, session_id: str) -> bool:
-        """Delete the runtime sidecar if present."""
+    def delete_runtime_state(self, session_id: str, *, expected: dict[str, Any] | None = None) -> bool:
+        """Delete the sidecar if present and, when supplied, matching expected."""
         path = self.runtime_state_path(session_id)
         if path is None or not path.exists():
+            return False
+        if expected is not None and self.load_runtime_state(session_id) != expected:
             return False
         path.unlink()
         return True

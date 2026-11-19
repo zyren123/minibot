@@ -15,6 +15,7 @@ from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
 from ..tools.base import BaseTool
 
+from ._active_streams import own_stream
 from ._event_router import RouterEventSink
 from .types import ChatResult
 
@@ -65,6 +66,9 @@ def _new_message_id() -> str:
 
 @dataclass
 class _StreamPersistenceState:
+    session_id: str
+    stop_on_ask_user_question: bool = False
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     persisted_message_ids: set[str] = field(default_factory=set)
     assistant_contents: dict[str, str] = field(default_factory=dict)
     assistant_reasoning: dict[str, str] = field(default_factory=dict)
@@ -114,7 +118,7 @@ class Minibot:
         self._active_interrupt_queue: "asyncio.Queue[None] | None" = None
         self._pending_question: dict[str, Any] | None = None
         self._pending_question_future: "asyncio.Future[dict[str, Any]] | None" = None
-        self._persisted_message_ids_for_active_run: set[str] | None = None
+        self._active_stream: _StreamPersistenceState | None = None
 
         self.agent = Agent(
             config=self.config,
@@ -145,6 +149,8 @@ class Minibot:
 
     def set_session(self, session_id: str) -> None:
         """Switch active session (and load its history if persistence is enabled)."""
+        if self._active_stream is not None:
+            raise RuntimeError("Cannot switch sessions while a stream is running")
         self.session_id = self._resolve_session_id(session_id)
         self.agent.reset_session(self.session_id)
         self.messages = (
@@ -154,6 +160,8 @@ class Minibot:
         )
 
     def create_session(self) -> str:
+        if self._active_stream is not None:
+            raise RuntimeError("Cannot switch sessions while a stream is running")
         if self._session_manager is None:
             session_id = str(uuid.uuid4())[:8]
         else:
@@ -176,19 +184,22 @@ class Minibot:
         return None
 
     def _persisted_ids_for_active_run(self) -> set[str]:
-        return self._persisted_message_ids_for_active_run or set()
+        return self._active_stream.persisted_message_ids if self._active_stream else set()
 
-    def _save_streaming_runtime_state(self, *, message_id: str, parent_user_message_id: str | None) -> None:
+    def _save_streaming_runtime_state(
+        self, state: _StreamPersistenceState, *, message_id: str, parent_user_message_id: str | None,
+    ) -> None:
         if self._session_manager is None:
             return
         payload: dict[str, Any] = {
             "version": 1,
             "state": "streaming",
+            "run_id": state.run_id,
             "assistant_message_id": message_id,
         }
         if parent_user_message_id:
             payload["parent_user_message_id"] = parent_user_message_id
-        self._session_manager.save_runtime_state(self.session_id, payload)
+        self._session_manager.save_runtime_state(state.session_id, payload)
 
     def _persist_assistant_message(
         self,
@@ -243,13 +254,13 @@ class Minibot:
 
         if message_id in state.persisted_message_ids:
             self._session_manager.update_message(
-                self.session_id,
+                state.session_id,
                 message_id,
                 lambda current: build_message(dict(current)),
             )
             return
 
-        self._session_manager.append_message(self.session_id, build_message())
+        self._session_manager.append_message(state.session_id, build_message())
         state.persisted_message_ids.add(message_id)
 
     def _persist_answer_message_for_question(
@@ -272,7 +283,7 @@ class Minibot:
                 continue
             if message_id in persisted_ids:
                 return
-            self._session_manager.append_message(self.session_id, dict(message))
+            self._session_manager.append_message(state.session_id, dict(message))
             state.persisted_message_ids.add(message_id)
             return
 
@@ -314,6 +325,7 @@ class Minibot:
                 reasoning=state.assistant_reasoning.get(message_id, ""),
             )
             self._save_streaming_runtime_state(
+                state,
                 message_id=message_id,
                 parent_user_message_id=state.assistant_parent_ids.get(message_id),
             )
@@ -331,6 +343,7 @@ class Minibot:
                 reasoning=next_reasoning,
             )
             self._save_streaming_runtime_state(
+                state,
                 message_id=message_id,
                 parent_user_message_id=state.assistant_parent_ids.get(message_id),
             )
@@ -348,6 +361,7 @@ class Minibot:
                 reasoning=state.assistant_reasoning.get(message_id, ""),
             )
             self._save_streaming_runtime_state(
+                state,
                 message_id=message_id,
                 parent_user_message_id=state.assistant_parent_ids.get(message_id),
             )
@@ -370,7 +384,7 @@ class Minibot:
                 tool_calls=tool_calls if isinstance(tool_calls, list) and tool_calls else None,
             )
             if event.get("finish_reason") != "tool_calls":
-                self._session_manager.delete_runtime_state(self.session_id)
+                self._clear_streaming_state(state)
             return
 
         if event_type == "ask_user_question":
@@ -403,7 +417,7 @@ class Minibot:
                 },
             )
             self._session_manager.save_runtime_state(
-                self.session_id,
+                state.session_id,
                 {
                     "version": 1,
                     "state": "awaiting_user_answer",
@@ -425,45 +439,30 @@ class Minibot:
             message_id = state.question_message_ids.get(question_id)
             if message_id:
                 self._session_manager.update_message(
-                    self.session_id,
+                    state.session_id,
                     message_id,
                     lambda current: {**current, "question_pending": False},
                 )
             self._persist_answer_message_for_question(question_id=question_id, state=state)
-            self._session_manager.delete_runtime_state(self.session_id)
+            saved = self._session_manager.load_runtime_state(state.session_id)
+            if (saved and saved.get("state") == "awaiting_user_answer"
+                    and saved.get("assistant_message_id") == message_id):
+                self._session_manager.delete_runtime_state(state.session_id, expected=saved)
 
-    async def _finalize_stream_run(
-        self,
-        run_task: "asyncio.Task[tuple[list[dict[str, Any]], dict[str, int] | None]]",
-        state: _StreamPersistenceState,
-    ) -> None:
-        try:
-            await run_task
-        except UserInterruptedError:
-            if self._session_manager is not None:
-                runtime_state = self._session_manager.load_runtime_state(self.session_id)
-                if runtime_state is None or runtime_state.get("state") != "awaiting_user_answer":
-                    assistant_message_id = None
-                    if isinstance(runtime_state, dict):
-                        raw_message_id = runtime_state.get("assistant_message_id")
-                        if isinstance(raw_message_id, str) and raw_message_id.strip():
-                            assistant_message_id = raw_message_id
-                    if assistant_message_id is None and state.assistant_contents:
-                        assistant_message_id = next(reversed(state.assistant_contents))
-                    if assistant_message_id is not None:
-                        self._session_manager.update_message(
-                            self.session_id,
-                            assistant_message_id,
-                            lambda current: {**current, "completion_state": "interrupted"},
-                        )
-                    self._session_manager.delete_runtime_state(self.session_id)
-        except Exception:
-            pass
-        finally:
-            if self._session_manager is not None:
-                self.messages = self._session_manager.load(self.session_id)
-            self._persisted_message_ids_for_active_run = None
-            await self._event_router.set_tap(None)
+    def _clear_streaming_state(self, state: _StreamPersistenceState, *, interrupted: bool = False) -> None:
+        if self._session_manager is None:
+            return
+        saved = self._session_manager.load_runtime_state(state.session_id)
+        if not saved or saved.get("state") != "streaming" or saved.get("run_id") != state.run_id:
+            return
+        if interrupted:
+            message_id = saved.get("assistant_message_id")
+            if isinstance(message_id, str) and message_id.strip():
+                self._session_manager.update_message(
+                    state.session_id, message_id,
+                    lambda current: {**current, "completion_state": "interrupted"},
+                )
+        self._session_manager.delete_runtime_state(state.session_id, expected=saved)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         if self._session_manager is None:
@@ -485,6 +484,8 @@ class Minibot:
     def delete_session(self, session_id: str) -> bool:
         if self._session_manager is None:
             return False
+        if self._active_stream is not None and self._active_stream.session_id == session_id:
+            raise RuntimeError("Cannot delete a session while its stream is running")
         ok = self._session_manager.delete(session_id)
         if ok and session_id == self.session_id:
             self.create_session()
@@ -536,22 +537,12 @@ class Minibot:
             pending.set_exception(UserInterruptedError("Interrupted while waiting for user answer"))
             return
 
-        if self._session_manager is None:
-            return
-
-        runtime_state = self._session_manager.load_runtime_state(self.session_id)
-        if runtime_state is None or runtime_state.get("state") != "streaming":
-            return
-        assistant_message_id = runtime_state.get("assistant_message_id")
-        if isinstance(assistant_message_id, str) and assistant_message_id.strip():
-            self._session_manager.update_message(
-                self.session_id,
-                assistant_message_id,
-                lambda current: {**current, "completion_state": "interrupted"},
-            )
-        self._session_manager.delete_runtime_state(self.session_id)
+        if self._active_stream is not None:
+            self._clear_streaming_state(self._active_stream, interrupted=True)
 
     async def _wait_for_user_answer(self, question: dict[str, Any]) -> dict[str, Any]:
+        if self._active_stream is not None and self._active_stream.stop_on_ask_user_question:
+            raise UserInterruptedError("Paused for user answer")
         if self._pending_question_future is not None and not self._pending_question_future.done():
             raise RuntimeError("Another askuserquestion interaction is already pending")
         loop = asyncio.get_running_loop()
@@ -591,76 +582,14 @@ class Minibot:
             }
         )
 
-    async def stream_existing_messages(
+    def stream_existing_messages(
         self,
         *,
         reasoning_effort: str | None = None,
         stop_on_ask_user_question: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Continue generation from the current persisted message history."""
-        queue: asyncio.Queue[StreamEvent] = asyncio.Queue(maxsize=256)
-        await self._event_router.set_queue(queue)
-        stream_state = _StreamPersistenceState()
-        self._persisted_message_ids_for_active_run = stream_state.persisted_message_ids
-        await self._event_router.set_tap(
-            lambda event: self._handle_stream_persistence_event(event, stream_state)
-        )
-        prev_stream = self.agent.stream_enabled
-        self.agent.set_stream_enabled(True)
-
-        interrupt_queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
-        self._active_interrupt_queue = interrupt_queue
-
-        run_task = asyncio.create_task(
-            self._run_existing_messages_once(
-                interrupt_queue=interrupt_queue,
-                reasoning_effort=reasoning_effort,
-            ),
-            name=f"minibot-resume-{self.session_id}",
-        )
-        finalize_task = asyncio.create_task(
-            self._finalize_stream_run(run_task, stream_state),
-            name=f"minibot-resume-finalize-{self.session_id}",
-        )
-
-        run_exc: BaseException | None = None
-        pause_requested = False
-
-        try:
-            while True:
-                if run_task.done():
-                    run_exc = run_task.exception()
-                if run_task.done() and queue.empty():
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
-                if (
-                    stop_on_ask_user_question
-                    and not pause_requested
-                    and event.get("type") == "ask_user_question"
-                ):
-                    pause_requested = True
-                    self.cancel()
-                yield event
-        finally:
-            self._active_interrupt_queue = None
-            self.agent.set_stream_enabled(prev_stream)
-            await self._event_router.set_queue(None)
-
-        if run_exc is None:
-            _messages, _usage = run_task.result()
-            await finalize_task
-            return
-
-        if isinstance(run_exc, UserInterruptedError):
-            await finalize_task
-            return
-
-        await finalize_task
-        yield {"type": "system", "message": "Error during generation.", "data": {"error": str(run_exc)}}
-        raise run_exc
+        return self._stream_events(None, None, reasoning_effort, stop_on_ask_user_question)
 
     async def resume_pending_question_stream(
         self,
@@ -688,6 +617,8 @@ class Minibot:
         if session_id is not None and session_id != self.session_id:
             self.set_session(session_id)
 
+        if self._active_stream is not None:
+            raise RuntimeError("A stream is already running on this bot")
         queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
         await self._event_router.set_queue(queue)
         prev_stream = self.agent.stream_enabled
@@ -736,7 +667,7 @@ class Minibot:
             raise RuntimeError("chat_sync() cannot be used inside a running event loop; use 'await chat()'.")
         return asyncio.run(self.chat(prompt, session_id=session_id, reasoning_effort=reasoning_effort))
 
-    async def stream(
+    def stream(
         self,
         prompt: str,
         *,
@@ -745,73 +676,81 @@ class Minibot:
         stop_on_ask_user_question: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """Streaming chat call yielding structured events."""
-        if session_id is not None and session_id != self.session_id:
-            self.set_session(session_id)
+        return self._stream_events(prompt, session_id, reasoning_effort, stop_on_ask_user_question)
 
+    async def _stream_events(
+        self, prompt: str | None, session_id: str | None, reasoning_effort: str | None,
+        stop_on_ask_user_question: bool,
+    ) -> AsyncIterator[StreamEvent]:
+        if session_id == "":
+            if self._active_stream is not None:
+                raise RuntimeError("A stream is already running on this bot")
+            session_id = self._resolve_session_id(session_id)
+        state = _StreamPersistenceState(
+            session_id=self.session_id if session_id is None else session_id,
+            stop_on_ask_user_question=stop_on_ask_user_question,
+        )
         queue: asyncio.Queue[StreamEvent] = asyncio.Queue(maxsize=256)
-        await self._event_router.set_queue(queue)
-        stream_state = _StreamPersistenceState()
-        self._persisted_message_ids_for_active_run = stream_state.persisted_message_ids
-        await self._event_router.set_tap(
-            lambda event: self._handle_stream_persistence_event(event, stream_state)
-        )
-        prev_stream = self.agent.stream_enabled
-        self.agent.set_stream_enabled(True)
-
         interrupt_queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
-        self._active_interrupt_queue = interrupt_queue
+        detached = False
 
-        run_task = asyncio.create_task(
-            self._run_once(
-                prompt,
-                interrupt_queue=interrupt_queue,
-                reasoning_effort=reasoning_effort,
-            ),
-            name=f"minibot-run-{self.session_id}",
-        )
-        finalize_task = asyncio.create_task(
-            self._finalize_stream_run(run_task, stream_state),
-            name=f"minibot-stream-finalize-{self.session_id}",
-        )
+        async def produce() -> None:
+            if self._active_stream is not None:
+                raise RuntimeError("A stream is already running on this bot")
+            with own_stream(self._session_manager, state.session_id, state.run_id):
+                if state.session_id != self.session_id:
+                    self.set_session(state.session_id)
+                self._active_stream = state
+                self._active_interrupt_queue = interrupt_queue
+                prev_stream = self.agent.stream_enabled
+                try:
+                    await self._event_router.set_queue(None if detached else queue)
+                    await self._event_router.set_tap(
+                        lambda event: self._handle_stream_persistence_event(event, state)
+                    )
+                    self.agent.set_stream_enabled(True)
+                    if prompt is None:
+                        await self._run_existing_messages_once(
+                            interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                        )
+                    else:
+                        await self._run_once(
+                            prompt, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                        )
+                except asyncio.CancelledError:
+                    self._clear_streaming_state(state, interrupted=True)
+                    raise
+                except UserInterruptedError:
+                    self._clear_streaming_state(state, interrupted=True)
+                except Exception as exc:
+                    await self._event_router.emit({
+                        "type": "system", "message": "Error during generation.",
+                        "data": {"error": str(exc)},
+                    })
+                    raise
+                finally:
+                    try:
+                        self.agent.set_stream_enabled(prev_stream)
+                        await self._event_router.set_tap(None)
+                        if self._session_manager is not None:
+                            self.messages = self._session_manager.load(state.session_id)
+                    finally:
+                        self._active_interrupt_queue = None
+                        self._active_stream = None
 
-        run_exc: BaseException | None = None
-        pause_requested = False
-
+        task = asyncio.create_task(produce(), name=f"minibot-stream-{state.session_id}")
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         try:
-            while True:
-                if run_task.done():
-                    run_exc = run_task.exception()
-                if run_task.done() and queue.empty():
-                    break
+            while not task.done() or not queue.empty():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.1)
                 except asyncio.TimeoutError:
                     continue
-                if (
-                    stop_on_ask_user_question
-                    and not pause_requested
-                    and event.get("type") == "ask_user_question"
-                ):
-                    pause_requested = True
-                    self.cancel()
                 yield event
+            await task
         finally:
-            self._active_interrupt_queue = None
-            self.agent.set_stream_enabled(prev_stream)
-            await self._event_router.set_queue(None)
-
-        if run_exc is None:
-            _messages, _usage = run_task.result()
-            await finalize_task
-            return
-
-        if isinstance(run_exc, UserInterruptedError):
-            await finalize_task
-            return
-
-        await finalize_task
-        yield {"type": "system", "message": "Error during generation.", "data": {"error": str(run_exc)}}
-        raise run_exc
+            detached = True
+            self._event_router.detach_queue(queue)
 
     def stream_sync(
         self,
@@ -824,13 +763,13 @@ class Minibot:
         if _has_running_loop():
             raise RuntimeError("stream_sync() cannot be used inside a running event loop; use 'async for e in stream()'.")
         loop = asyncio.new_event_loop()
+        agen = self.stream(
+            prompt,
+            session_id=session_id,
+            reasoning_effort=reasoning_effort,
+            stop_on_ask_user_question=stop_on_ask_user_question,
+        )
         try:
-            agen = self.stream(
-                prompt,
-                session_id=session_id,
-                reasoning_effort=reasoning_effort,
-                stop_on_ask_user_question=stop_on_ask_user_question,
-            )
             while True:
                 try:
                     event = loop.run_until_complete(agen.__anext__())
@@ -839,6 +778,12 @@ class Minibot:
                 yield event
         finally:
             try:
+                tasks = asyncio.all_tasks(loop)
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                loop.run_until_complete(agen.aclose())
                 loop.run_until_complete(loop.shutdown_asyncgens())
             finally:
                 loop.close()

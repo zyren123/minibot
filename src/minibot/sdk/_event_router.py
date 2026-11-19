@@ -22,6 +22,14 @@ class RouterEventSink(EventSink):
         with self._lock:
             self._queue = queue
 
+    def detach_queue(self, queue: asyncio.Queue[StreamEvent]) -> None:
+        with self._lock:
+            if self._queue is queue:
+                self._queue = None
+        # Wake a producer already waiting to put an event into a full queue.
+        if queue.full():
+            queue.get_nowait()
+
     async def set_tap(
         self,
         tap: "Callable[[StreamEvent], Awaitable[Any] | Any] | None",

@@ -689,6 +689,38 @@ async def test_minibot_stream_persists_ask_user_history_when_interrupted_during_
 
 
 @pytest.mark.asyncio
+async def test_minibot_stream_with_empty_session_id_creates_a_new_session(tmp_path):
+    sessions_dir = tmp_path / "sessions"
+    config = Config(
+        workdir=tmp_path,
+        app_home=tmp_path / ".minibot",
+        llm=LLMConfig(api_key="test", model="test-model"),
+        memory=MemoryConfig(enabled=False),
+        teams=TeamsConfig(enabled=False),
+        session=SessionConfig(enabled=True, sessions_dir=str(sessions_dir)),
+    )
+    sessions = SessionManager(sessions_dir)
+    original = [{"role": "user", "content": "Old conversation"}]
+    sessions.overwrite("original", original)
+    bot = Minibot(config=config, session_id="original")
+
+    class FakeClient:
+        model = "test-model"
+
+        async def create_message_stream_async(self, **kwargs):
+            assert all(message.get("content") != "Old conversation" for message in kwargs["messages"])
+            return _FakeStream([_stream_chunk(content="Fresh answer"), _stream_chunk(finish_reason="stop")])
+
+    bot.agent.client = FakeClient()
+    events = [event async for event in bot.stream("New conversation", session_id="")]
+
+    assert bot.session_id != "original"
+    assert any(event.get("content") == "Fresh answer" for event in events)
+    assert sessions.load("original") == original
+    assert sessions.load(bot.session_id)[0]["content"] == "New conversation"
+
+
+@pytest.mark.asyncio
 async def test_minibot_stream_partial_assistant_output_persists_as_interrupted(tmp_path):
     sessions_dir = tmp_path / "sessions"
     cfg = Config(

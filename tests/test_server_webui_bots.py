@@ -1309,7 +1309,9 @@ def test_bot_stream_endpoint_pauses_live_stream_at_pending_question(
     assert call_args["stop_on_ask_user_question"] is True
 
 
+@pytest.mark.parametrize("run_fields", [{}, {"run_id": "orphan-after-restart"}])
 def test_pending_question_endpoint_reconciles_stale_streaming_state(
+    run_fields: dict[str, str],
     client: TestClient,
     server_env: dict[str, Path],
 ) -> None:
@@ -1333,6 +1335,7 @@ def test_pending_question_endpoint_reconciles_stale_streaming_state(
         {
             "version": 1,
             "state": "streaming",
+            **run_fields,
             "assistant_message_id": "msg-assistant-1",
         },
     )
@@ -1345,6 +1348,356 @@ def test_pending_question_endpoint_reconciles_stale_streaming_state(
     assert loaded.status_code == 200, loaded.text
     assert loaded.json()["messages"][-1]["completion_state"] == "interrupted"
     assert session_mgr.load_runtime_state(session_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+async def test_pending_question_query_preserves_active_stream(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, resume: bool,
+) -> None:
+    import httpx
+    from src.minibot.server.app import create_app
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    monkeypatch.setattr("src.minibot.server.app.AgentManager", lambda **kwargs: manager)
+    app = create_app(workdir=server_env["workdir"])
+    bot_id = (await manager.create_bot(name="Active Stream Bot"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    bot = await manager.get_bot(bot_id, session_id)
+    paused = asyncio.Event()
+    release = asyncio.Event()
+
+    def chunk(content=None, finish_reason=None):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content=content, tool_calls=[]),
+            finish_reason=finish_reason,
+        )])
+
+    class GatedClient:
+        model = "test-model"
+
+        async def create_message_stream_async(self, **kwargs):
+            async def chunks():
+                yield chunk(content="Partial answer")
+                paused.set()
+                await release.wait()
+                yield chunk(finish_reason="stop")
+            return chunks()
+
+    bot.agent.client = GatedClient()
+    bot.agent.silent = True
+    bot.agent.status_enabled = False
+    lock = await manager.session_lock(bot_id, session_id)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as api:
+        async def generate():
+            if resume:
+                async with lock:
+                    async for _ in bot.stream_existing_messages():
+                        pass
+            else:
+                response = await api.post(f"/api/bots/{bot_id}/stream", json={
+                    "session_id": session_id, "prompt": "Say something",
+                })
+                assert response.status_code == 200, response.text
+
+        if resume:
+            sessions.append_message(session_id, {"role": "user", "content": "Continue"})
+            bot.messages = sessions.load(session_id)
+        task = asyncio.create_task(generate())
+        try:
+            await asyncio.wait_for(paused.wait(), timeout=5)
+            assert lock.locked()
+            before = sessions.load_runtime_state(session_id)
+            messages = sessions.load(session_id)
+            assert before is not None and before["state"] == "streaming"
+            assert before["run_id"]
+            manager._clear_bot_cache(bot_id)
+            response = await api.get(f"/api/bots/{bot_id}/sessions/{session_id}/pending-question")
+            assert response.status_code == 200, response.text
+            assert response.json() is None
+            assert (bot_id, session_id) not in manager._bots
+            assert sessions.load_runtime_state(session_id) == before
+            assert sessions.load(session_id) == messages
+        finally:
+            release.set()
+            await asyncio.wait_for(task, timeout=5)
+    assert sessions.load_runtime_state(session_id) is None
+    assert sessions.load(session_id)[-1]["completion_state"] == "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["complete", "error", "interrupt"])
+async def test_detached_stream_owns_session_until_finalized(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    from src.minibot.agent import UserInterruptedError
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    bot_id = (await manager.create_bot(name="Detached stream"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    bot = await manager.get_bot(bot_id, session_id)
+    release = asyncio.Event()
+    finalizing = asyncio.Event()
+    finish = asyncio.Event()
+    producer = None
+
+    async def run(prompt, **kwargs):
+        nonlocal producer
+        producer = asyncio.current_task()
+        await bot.agent._emit({"type": "assistant_start", "message_id": "partial"})
+        await release.wait()
+        if outcome == "error":
+            raise RuntimeError("producer failed")
+        if outcome == "interrupt":
+            raise UserInterruptedError("cancelled")
+        await bot.agent._emit({"type": "assistant_end", "message_id": "partial", "content": "done"})
+
+    set_tap = bot._event_router.set_tap
+
+    async def gate_finalization(tap):
+        if tap is None:
+            finalizing.set()
+            await finish.wait()
+        await set_tap(tap)
+
+    monkeypatch.setattr(bot, "_run_once", run)
+    monkeypatch.setattr(bot._event_router, "set_tap", gate_finalization)
+    reader = bot.stream("start")
+    await asyncio.wait_for(anext(reader), 5)
+    await reader.aclose()
+
+    saved = sessions.load_runtime_state(session_id)
+    assert saved and saved["run_id"]
+    foreign = {**saved, "run_id": "other-run", "assistant_message_id": "other-message"}
+    manager._clear_bot_cache(bot_id)
+    replacement = await manager.get_bot(bot_id, session_id)
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            await anext(replacement.stream_existing_messages())
+        assert await manager.pending_question_snapshot(bot_id, session_id) is None
+        assert sessions.load_runtime_state(session_id) == saved
+
+        sessions.save_runtime_state(session_id, foreign)
+        bot.cancel()
+        release.set()
+        await asyncio.wait_for(finalizing.wait(), 5)
+        assert sessions.load_runtime_state(session_id) == foreign
+        assert await manager.pending_question_snapshot(bot_id, session_id) is None
+        assert sessions.load_runtime_state(session_id) is None
+
+        sessions.save_runtime_state(session_id, saved)
+        assert await manager.pending_question_snapshot(bot_id, session_id) is None
+        assert sessions.load_runtime_state(session_id) == saved
+    finally:
+        release.set()
+        finish.set()
+
+    assert producer is not None
+    if outcome == "error":
+        with pytest.raises(RuntimeError, match="producer failed"):
+            await asyncio.wait_for(producer, 5)
+    else:
+        await asyncio.wait_for(producer, 5)
+    assert await manager.pending_question_snapshot(bot_id, session_id) is None
+    assert sessions.load_runtime_state(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_detached_stream_pauses_at_question_and_allows_answer_resume(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    bot_id = (await manager.create_bot(name="Detached question"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    release = asyncio.Event()
+    producer = None
+
+    def chunk(content=None, tool_calls=None, finish_reason=None):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            delta=SimpleNamespace(content=content, tool_calls=tool_calls or []),
+            finish_reason=finish_reason,
+        )])
+
+    class GatedClient:
+        model = "test-model"
+        calls = 0
+
+        async def create_message_stream_async(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                async def question():
+                    yield chunk(content="Preparing")
+                    await release.wait()
+                    yield chunk(tool_calls=[SimpleNamespace(
+                        index=0, id="ask-detached", type="function",
+                        function=SimpleNamespace(name="askuserquestion", arguments=json.dumps({
+                            "prompt": "Which task?", "options": ["Shipping", "Billing"],
+                        })),
+                    )])
+                    yield chunk(finish_reason="tool_calls")
+                return question()
+
+            async def answer():
+                yield chunk(content="Resumed")
+                yield chunk(finish_reason="stop")
+            return answer()
+
+    client = GatedClient()
+    get_bot = manager.get_bot
+
+    async def configured_bot(*args, **kwargs):
+        bot = await get_bot(*args, **kwargs)
+        bot.agent.client = client
+        return bot
+
+    monkeypatch.setattr(manager, "get_bot", configured_bot)
+    bot = await manager.get_bot(bot_id, session_id)
+    run_once = bot._run_once
+
+    async def tracked_run(*args, **kwargs):
+        nonlocal producer
+        producer = asyncio.current_task()
+        return await run_once(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_run_once", tracked_run)
+    reader = bot.stream("Help", stop_on_ask_user_question=True)
+    try:
+        async for event in reader:
+            if event.get("type") == "assistant_delta":
+                break
+        await reader.aclose()
+        manager._clear_bot_cache(bot_id)
+        release.set()
+        assert producer is not None
+        await asyncio.wait_for(asyncio.shield(producer), timeout=1)
+        question = await manager.pending_question_snapshot(bot_id, session_id)
+        assert question is not None, sessions.load(session_id)
+        assert question["question_id"] == "ask-detached"
+        events = [event async for event in manager.submit_user_answer_stream(
+            bot_id, session_id, {"question_id": "ask-detached", "answer_text": "Shipping"},
+        )]
+        assert any(event.get("content") == "Resumed" for event in events)
+        assert sessions.load_runtime_state(session_id) is None
+        assert client.calls == 2
+    finally:
+        release.set()
+        await reader.aclose()
+        if producer is not None and not producer.done():
+            bot.cancel()
+            await asyncio.wait_for(producer, timeout=5)
+
+
+def test_closing_sync_reader_finalizes_interrupted_stream(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    bot_id = asyncio.run(manager.create_bot(name="Synchronous stream"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    bot = asyncio.run(manager.get_bot(bot_id, session_id))
+
+    async def run(prompt, **kwargs):
+        await bot.agent._emit({"type": "assistant_start", "message_id": "partial"})
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(bot, "_run_once", run)
+    reader = bot.stream_sync("start")
+    assert next(reader)["type"] == "assistant_start"
+    assert sessions.load_runtime_state(session_id)["run_id"]
+    reader.close()
+    assert sessions.load_runtime_state(session_id) is None
+    assert sessions.load(session_id)[-1]["completion_state"] == "interrupted"
+
+
+def test_closing_sync_reader_does_not_wait_for_background_tool(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    bot_id = asyncio.run(manager.create_bot(name="Background tool"))["bot_id"]
+    session_id = manager.sessions_for(bot_id).create()
+    bot = asyncio.run(manager.get_bot(bot_id, session_id))
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+    errors = []
+
+    def background_tool():
+        started.set()
+        release.wait()
+
+    async def run(prompt, **kwargs):
+        await bot.agent._emit({"type": "assistant_start", "message_id": "partial"})
+        await asyncio.to_thread(background_tool)
+
+    monkeypatch.setattr(bot, "_run_once", run)
+
+    def consume_and_close():
+        reader = bot.stream_sync("start")
+        try:
+            assert next(reader)["type"] == "assistant_start"
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            reader.close()
+            closed.set()
+
+    consumer = threading.Thread(target=consume_and_close, daemon=True)
+    consumer.start()
+    try:
+        assert started.wait(5)
+        assert closed.wait(2), "Closing the reader waited for the background tool"
+        assert not errors
+    finally:
+        release.set()
+        consumer.join(timeout=5)
+    assert not consumer.is_alive()
+    assert manager.sessions_for(bot_id).load_runtime_state(session_id) is None
+
+
+def test_sync_reader_preserves_keyboard_interrupt(
+    server_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    bot_id = asyncio.run(manager.create_bot(name="Interrupted reader"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    bot = asyncio.run(manager.get_bot(bot_id, session_id))
+    producer_loop = None
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    async def run(prompt, **kwargs):
+        nonlocal producer_loop
+        producer_loop = asyncio.get_running_loop()
+        await bot.agent._emit({"type": "assistant_start", "message_id": "partial"})
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(bot, "_run_once", run)
+    reader = bot.stream_sync("start")
+    assert next(reader)["type"] == "assistant_start"
+    assert producer_loop is not None
+    producer_loop.call_later(0, interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        next(reader)
+    assert sessions.load_runtime_state(session_id) is None
+    assert sessions.load(session_id)[-1]["completion_state"] == "interrupted"
 
 
 def test_provider_models_can_be_deleted_in_batch(client: TestClient) -> None:
