@@ -18,6 +18,12 @@ tools:
     - "*"  # Enable all tools
   disabled: []
   timeout: 60
+  bash:
+    backend: local
+    image: debian:bookworm
+    memory_mb: 512
+    cpus: 1.0
+    pids_limit: 128
 
 # Agent teams configuration
 teams:

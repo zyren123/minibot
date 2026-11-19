@@ -218,6 +218,13 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
 skills_dir: custom-skills
 llm:
   model: 模型😀
+tools:
+  bash:
+    backend: docker
+    image: debian:bookworm
+    memory_mb: 256
+    cpus: 0.5
+    pids_limit: 32
 """.strip(),
     )
 
@@ -238,4 +245,8 @@ llm:
     )
 
     assert config.llm.model == "模型😀"
+    assert config.tools.bash.backend == "docker"
+    assert config.tools.bash.memory_mb == 256
+    assert config.tools.bash.cpus == 0.5
+    assert config.tools.bash.pids_limit == 32
     assert observed_encodings == ["utf-8"]

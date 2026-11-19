@@ -1,8 +1,9 @@
 """Configuration schema definitions."""
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -16,12 +17,41 @@ class LLMConfig:
     stream_enabled: bool = True
 
 
+@dataclass(frozen=True)
+class BashConfig:
+    """Bash execution policy. Local execution remains the default."""
+    backend: Literal["disabled", "local", "docker"] = "local"
+    image: str = "debian:bookworm"
+    memory_mb: int = 512
+    cpus: float = 1.0
+    pids_limit: int = 128
+
+    def __post_init__(self):
+        if self.backend not in ("disabled", "local", "docker"):
+            raise ValueError("tools.bash.backend must be disabled, local, or docker")
+        if not isinstance(self.image, str) or not self.image.strip() or self.image.startswith("-"):
+            raise ValueError("tools.bash.image must be a nonempty image reference")
+        for name in ("memory_mb", "pids_limit"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"tools.bash.{name} must be a positive integer")
+        if type(self.cpus) not in (int, float) or not math.isfinite(self.cpus) or self.cpus <= 0:
+            raise ValueError("tools.bash.cpus must be a positive finite number")
+
+
 @dataclass
 class ToolsConfig:
     """Tools configuration."""
     enabled: list[str] = field(default_factory=lambda: ["*"])
     disabled: list[str] = field(default_factory=list)
-    timeout: int = 60
+    timeout: int | float = 60
+    bash: BashConfig = field(default_factory=BashConfig)
+
+    def __post_init__(self):
+        if type(self.timeout) not in (int, float) or not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError("tools.timeout must be a positive finite number")
+        if not isinstance(self.bash, BashConfig):
+            raise ValueError("tools.bash must be a BashConfig")
 
 
 @dataclass

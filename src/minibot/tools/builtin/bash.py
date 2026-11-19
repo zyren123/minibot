@@ -1,11 +1,12 @@
 """Bash tool implementation."""
 
-import asyncio
-import subprocess
 from pathlib import Path
+import math
 from typing import Any
 
 from ..base import BaseTool
+from ...config.schema import BashConfig
+from .bash_execution import LocalBackend, DockerBackend
 from ...teams.context import get_team_execution_context
 
 
@@ -17,9 +18,14 @@ class BashTool(BaseTool):
 
     DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs"]
 
-    def __init__(self, workdir: Path, timeout: int = 60):
+    def __init__(self, workdir: Path, timeout: int | float = 60, *, config: BashConfig | None = None):
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be a positive finite number")
         self.workdir = workdir
         self.timeout = timeout
+        self.config = config or BashConfig()
+        self._backend = (DockerBackend(workdir, self.config)
+                         if self.config.backend == "docker" else LocalBackend(workdir))
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -36,6 +42,8 @@ class BashTool(BaseTool):
 
     async def execute(self, command: str) -> str:
         """Execute a shell command."""
+        if self.config.backend == "disabled":
+            return "Error: Bash execution is disabled"
         # Safety check
         for pattern in self.DANGEROUS_PATTERNS:
             if pattern in command:
@@ -58,22 +66,11 @@ class BashTool(BaseTool):
                         f"Current owner: {owner}"
                     )
 
-            # Run in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=self.workdir,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout,
-                ),
-            )
+            result = await self._backend.run(command, timeout=self.timeout)
             output = (result.stdout + result.stderr).strip()
-            return output[:50000] if output else "(no output)"
-        except subprocess.TimeoutExpired:
+            prefix = f"Error: Command exited with code {result.exit_code}\n" if result.exit_code else ""
+            return (prefix + (output or "(no output)"))[:50000]
+        except TimeoutError:
             return f"Error: Command timed out after {self.timeout}s"
         except Exception as e:
             return f"Error: {e}"

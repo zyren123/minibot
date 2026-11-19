@@ -74,6 +74,7 @@ class _StreamPersistenceState:
     assistant_reasoning: dict[str, str] = field(default_factory=dict)
     assistant_parent_ids: dict[str, str | None] = field(default_factory=dict)
     question_message_ids: dict[str, str] = field(default_factory=dict)
+    producer: asyncio.Task[None] | None = None
 
 
 class Minibot:
@@ -739,6 +740,7 @@ class Minibot:
                         self._active_stream = None
 
         task = asyncio.create_task(produce(), name=f"minibot-stream-{state.session_id}")
+        state.producer = task
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         try:
             while not task.done() or not queue.empty():
@@ -778,6 +780,12 @@ class Minibot:
                 yield event
         finally:
             try:
+                state = self._active_stream
+                producer = state.producer if state is not None else None
+                if producer is not None and producer.get_loop() is loop:
+                    loop.run_until_complete(self._event_router.set_queue(None))
+                    producer.cancel()
+                    loop.run_until_complete(asyncio.gather(producer, return_exceptions=True))
                 tasks = asyncio.all_tasks(loop)
                 for task in tasks:
                     task.cancel()

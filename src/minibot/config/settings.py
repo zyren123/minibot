@@ -12,6 +12,7 @@ from .schema import (
     Config,
     LLMConfig,
     ToolsConfig,
+    BashConfig,
     HooksConfig,
     MCPConfig,
     MCPServerConfig,
@@ -43,6 +44,12 @@ tools:
     - "*"
   disabled: []
   timeout: 60
+  bash:
+    backend: local
+    image: debian:bookworm
+    memory_mb: 512
+    cpus: 1.0
+    pids_limit: 128
 
 memory:
   enabled: true
@@ -381,11 +388,7 @@ def load_config(
         project_root=project_root,
         skills_dir=skills_dir,
         llm=_parse_llm_config(default_config.get("llm", {}), env_defaults),
-        tools=ToolsConfig(
-            enabled=default_config.get("tools", {}).get("enabled", ["*"]),
-            disabled=default_config.get("tools", {}).get("disabled", []),
-            timeout=default_config.get("tools", {}).get("timeout", 60),
-        ),
+        tools=_parse_tools_config(default_config.get("tools", {})),
         hooks=_parse_hooks_config(hooks_config, hooks_dir),
         mcp=_parse_mcp_config(mcp_config),
         memory=_parse_memory_config(default_config.get("memory"), app_home),
@@ -395,6 +398,22 @@ def load_config(
     )
 
     return _config
+
+
+def _parse_tools_config(data: Any) -> ToolsConfig:
+    if not isinstance(data, dict):
+        raise ValueError("tools must be a mapping")
+    bash = data.get("bash", {})
+    if not isinstance(bash, dict):
+        raise ValueError("tools.bash must be a mapping")
+    try:
+        policy = BashConfig(**bash)
+    except TypeError as exc:
+        raise ValueError(f"Invalid tools.bash configuration: {exc}") from exc
+    return ToolsConfig(
+        enabled=data.get("enabled", ["*"]), disabled=data.get("disabled", []),
+        timeout=data.get("timeout", 60), bash=policy,
+    )
 
 
 def get_config() -> Config:

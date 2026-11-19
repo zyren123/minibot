@@ -14,6 +14,7 @@ from .config import Config, get_config
 from .core.client import LLMClient
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
+from .tools.builtin.bash_execution import ExecutionCleanupCancelledError
 from .tools.builtin.ask_user import normalize_ask_user_prompt_and_options
 from .tools.builtin import (
     AskUserQuestionTool,
@@ -303,7 +304,10 @@ class Agent:
     def _register_tools(self) -> None:
         """Register all available tools."""
         self.tool_registry.register(AskUserQuestionTool())
-        self.tool_registry.register(BashTool(self.workdir, self.config.tools.timeout))
+        if self.config.tools.bash.backend != "disabled":
+            self.tool_registry.register(BashTool(
+                self.workdir, self.config.tools.timeout, config=self.config.tools.bash,
+            ))
         self.tool_registry.register(ReadFileTool(self.workdir))
         self.tool_registry.register(WriteFileTool(self.workdir))
         self.tool_registry.register(EditFileTool(self.workdir))
@@ -659,6 +663,54 @@ You are now live. Await instructions and begin the loop.""",
 
         await self.hook_manager.trigger_post_tool_call(name, args, result)
         return result
+
+    async def _execute_interruptible_tool(
+        self, name: str, args: dict[str, Any], interrupt_queue: "asyncio.Queue[None] | None",
+    ) -> str:
+        tool = self.tool_registry.get(name)
+        if interrupt_queue is None or not isinstance(tool, (BashTool, TaskTool)):
+            return await self._execute_tool_with_hooks(name, args)
+        try:
+            interrupt_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        else:
+            raise UserInterruptedError("Interrupted by user")
+        cleanup_error = None
+
+        async def run_owned():
+            nonlocal cleanup_error
+            try:
+                return await self._execute_tool_with_hooks(name, args)
+            except ExecutionCleanupCancelledError as exc:
+                cleanup_error = str(exc)
+                raise
+
+        owner = asyncio.create_task(run_owned())
+        interrupt = asyncio.create_task(interrupt_queue.get())
+        try:
+            done, _ = await asyncio.wait({owner, interrupt}, return_when=asyncio.FIRST_COMPLETED)
+            if interrupt in done:
+                raise UserInterruptedError("Interrupted by user")
+            return await owner
+        finally:
+            if not owner.done():
+                owner.cancel()
+            interrupt.cancel()
+            finalizer = asyncio.gather(owner, interrupt, return_exceptions=True)
+            cancelled = False
+            while not finalizer.done():
+                try:
+                    await asyncio.shield(finalizer)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cleanup_error:
+                await self._emit({
+                    "type": "system", "message": cleanup_error,
+                    "data": {"error": cleanup_error},
+                })
+            if cancelled:
+                raise asyncio.CancelledError
 
     @staticmethod
     def _drain_interrupt_queue(interrupt_queue: "asyncio.Queue[None] | None") -> None:
@@ -1714,7 +1766,7 @@ You are now live. Await instructions and begin the loop.""",
                     continue
 
                 if tc_name == "Task":
-                    output = await self._execute_tool_with_hooks(tc_name, tc_input)
+                    output = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
                 else:
                     tool_status_ctx = (
                         status(f"[bright_black]Running {tc_name}…[/]")
@@ -1722,7 +1774,7 @@ You are now live. Await instructions and begin the loop.""",
                         else nullcontext()
                     )
                     with tool_status_ctx:
-                        output = await self._execute_tool_with_hooks(tc_name, tc_input)
+                        output = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
 
                 if parse_note:
                     output = f"Warning: {parse_note}\n{output}"
