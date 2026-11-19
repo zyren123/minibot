@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
+from .tools.result import ToolStatus
+
 
 EventType = Literal[
     "assistant_start",
@@ -59,6 +61,10 @@ class StreamEvent(TypedDict, total=False):
     tool_args: dict[str, Any]
     tool_output: str
     is_error: bool
+    tool_status: ToolStatus
+    tool_exit_code: int
+    tool_hook_error: str
+    tool_hook_phase: Literal["pre", "post"]
     note: str
 
     # System / status

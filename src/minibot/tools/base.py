@@ -1,9 +1,11 @@
 """Base tool class."""
 
 from abc import ABC, abstractmethod
+import inspect
 from typing import Any
 
 from ..core.types import ToolDefinition
+from .result import ToolOutcome
 
 
 class BaseTool(ABC):
@@ -23,6 +25,13 @@ class BaseTool(ABC):
         """Execute the tool with given arguments."""
         pass
 
+    def validate_arguments(self, args: dict[str, Any]) -> None:
+        inspect.signature(self.execute).bind(**args)
+
+    async def execute_result(self, **kwargs) -> ToolOutcome:
+        """Adapt existing text-returning tools without interpreting their text."""
+        return ToolOutcome(await self.execute(**kwargs))
+
     def get_definition(self) -> ToolDefinition:
         """Get tool definition for API."""
         return ToolDefinition(
@@ -34,3 +43,17 @@ class BaseTool(ABC):
     def to_dict(self) -> dict:
         """Convert to API-compatible dict."""
         return self.get_definition().to_dict()
+
+
+class ResultTool(BaseTool):
+    """Built-in tools with explicit outcomes and a compatible text entrypoint."""
+
+    async def execute(self, *args, **kwargs) -> str:
+        return (await self.execute_result(*args, **kwargs)).text
+
+    def validate_arguments(self, args: dict[str, Any]) -> None:
+        inspect.signature(self.execute_result).bind(**args)
+
+    @abstractmethod
+    async def execute_result(self, **kwargs) -> ToolOutcome:
+        pass

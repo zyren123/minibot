@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from src.minibot.agent import Agent
+from src.minibot.tools.result import ToolOutcome
 from src.minibot.config.schema import Config, LLMConfig, TeamsConfig
 from src.minibot.events import AsyncQueueEventSink
 
@@ -355,9 +356,9 @@ async def test_stream_tool_call_arguments_are_merged(tmp_path):
     agent = _make_agent(tmp_path)
     executed: list[tuple[str, dict[str, str]]] = []
 
-    async def fake_execute(name: str, args: dict[str, str]) -> str:
+    async def fake_execute(name: str, args: dict[str, str]) -> ToolOutcome:
         executed.append((name, args))
-        return "ok"
+        return ToolOutcome("ok")
 
     agent._execute_tool_with_hooks = fake_execute  # type: ignore[assignment]
 
@@ -459,8 +460,8 @@ async def test_whitespace_before_tool_call_does_not_start_stream_render(tmp_path
     monkeypatch.setattr("src.minibot.agent.stream_assistant_write", lambda *_a, **_k: None)
     monkeypatch.setattr("src.minibot.agent.stream_assistant_end", lambda *_a, **_k: None)
 
-    async def fake_execute(name: str, args: dict[str, str]) -> str:
-        return "ok"
+    async def fake_execute(name: str, args: dict[str, str]) -> ToolOutcome:
+        return ToolOutcome("ok")
 
     agent._execute_tool_with_hooks = fake_execute  # type: ignore[assignment]
 

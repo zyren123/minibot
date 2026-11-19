@@ -66,7 +66,8 @@ async def test_custom_sdk_tool_named_like_builtin_unchanged(tmp_path, name):
     agent.tool_registry.register(FunctionTool(custom, name=name))
     queue = asyncio.Queue()
     queue.put_nowait(None)
-    assert await agent._execute_interruptible_tool(name, {}, queue) == "custom"
+    result = await agent._execute_interruptible_tool(name, {}, queue)
+    assert result.text == "custom" and result.status == "success"
     assert queue.qsize() == 1
 
 

@@ -78,6 +78,8 @@ class HookManager:
         for result in results:
             if result.blocked:
                 return True, result.block_reason
+            if not result.success:
+                raise RuntimeError(result.error or "Pre-tool hook failed")
 
         return False, None
 
@@ -98,7 +100,10 @@ class HookManager:
             tool_result=tool_result,
         )
 
-        await self.trigger(HookEvent.POST_TOOL_CALL, context)
+        results = await self.trigger(HookEvent.POST_TOOL_CALL, context)
+        for result in results:
+            if not result.success or result.blocked:
+                raise RuntimeError(result.error or result.block_reason or "Post-tool hook failed")
 
     async def trigger_session_start(self, session_id: str = "") -> list[HookResult]:
         """Trigger session start hooks."""

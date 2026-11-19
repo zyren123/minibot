@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 from ...teams.context import TeamExecutionContext, get_team_execution_context
 from ...teams.runtime import TeamRuntime
 
@@ -29,7 +30,7 @@ def _actor_id(ctx: TeamExecutionContext) -> tuple[str | None, str | None]:
     return None, "Error: Missing member_id for teammate"
 
 
-class TeamCreateTool(BaseTool):
+class TeamCreateTool(ResultTool):
     """Create a team and spawn teammates."""
 
     name = "TeamCreate"
@@ -58,26 +59,26 @@ class TeamCreateTool(BaseTool):
             "required": [],
         }
 
-    async def execute(
+    async def execute_result(
         self,
         team_name: str = "default-team",
         member_count: int | None = None,
-    ) -> str:
+    ) -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             info = await self.runtime.create_team(
                 actor_role=ctx.role,
                 team_name=team_name,
                 member_count=member_count if member_count is not None else self.default_members,
             )
-            return _json(info)
+            return ToolOutcome(_json(info), "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamMembersTool(BaseTool):
+class TeamMembersTool(ResultTool):
     """List team members and statuses."""
 
     name = "TeamMembers"
@@ -90,15 +91,15 @@ class TeamMembersTool(BaseTool):
     def input_schema(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}, "required": []}
 
-    async def execute(self) -> str:
+    async def execute_result(self) -> ToolOutcome:
         try:
             members = await self.runtime.list_members()
-            return _json(members)
+            return ToolOutcome(_json(members), "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamTaskTool(BaseTool):
+class TeamTaskTool(ResultTool):
     """Operate on team task board."""
 
     name = "TeamTask"
@@ -128,7 +129,7 @@ class TeamTaskTool(BaseTool):
             "required": ["action"],
         }
 
-    async def execute(
+    async def execute_result(
         self,
         action: str,
         title: str = "",
@@ -136,18 +137,18 @@ class TeamTaskTool(BaseTool):
         task_id: str = "",
         assignee_id: str = "",
         note: str = "",
-    ) -> str:
+    ) -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             actor_role = ctx.role
             actor, err = _actor_id(ctx)
             if err:
-                return err
+                return ToolOutcome(err, "error")
 
             if action == "list":
-                return _json(await self.runtime.list_tasks())
+                return ToolOutcome(_json(await self.runtime.list_tasks()), "success")
 
             if action == "create":
                 task = await self.runtime.create_task(
@@ -157,7 +158,7 @@ class TeamTaskTool(BaseTool):
                     details=details,
                     assignee_id=assignee_id or None,
                 )
-                return _json(task)
+                return ToolOutcome(_json(task), "success")
 
             if action == "assign":
                 task = await self.runtime.assign_task(
@@ -165,7 +166,7 @@ class TeamTaskTool(BaseTool):
                     task_id=task_id,
                     assignee_id=assignee_id,
                 )
-                return _json(task)
+                return ToolOutcome(_json(task), "success")
 
             if action == "claim":
                 task = await self.runtime.claim_task(
@@ -173,7 +174,7 @@ class TeamTaskTool(BaseTool):
                     actor_id=actor,
                     task_id=task_id or None,
                 )
-                return _json(task)
+                return ToolOutcome(_json(task), "success")
 
             if action == "complete":
                 task = await self.runtime.complete_task(
@@ -182,14 +183,14 @@ class TeamTaskTool(BaseTool):
                     task_id=task_id,
                     note=note or None,
                 )
-                return _json(task)
+                return ToolOutcome(_json(task), "success")
 
-            return f"Error: Unknown action '{action}'"
+            return ToolOutcome(f"Error: Unknown action '{action}'", "error")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamMessageTool(BaseTool):
+class TeamMessageTool(ResultTool):
     """Send a direct team message."""
 
     name = "TeamMessage"
@@ -209,25 +210,25 @@ class TeamMessageTool(BaseTool):
             "required": ["to_member_id", "content"],
         }
 
-    async def execute(self, to_member_id: str, content: str) -> str:
+    async def execute_result(self, to_member_id: str, content: str) -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             sender_id, err = _actor_id(ctx)
             if err:
-                return err
+                return ToolOutcome(err, "error")
             msg = await self.runtime.send_message(
                 sender_id=sender_id,
                 recipient_id=to_member_id,
                 content=content,
             )
-            return _json(msg)
+            return ToolOutcome(_json(msg), "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamBroadcastTool(BaseTool):
+class TeamBroadcastTool(ResultTool):
     """Broadcast message to all team members."""
 
     name = "TeamBroadcast"
@@ -246,24 +247,24 @@ class TeamBroadcastTool(BaseTool):
             "required": ["content"],
         }
 
-    async def execute(self, content: str) -> str:
+    async def execute_result(self, content: str) -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             sender_id, err = _actor_id(ctx)
             if err:
-                return err
+                return ToolOutcome(err, "error")
             result = await self.runtime.broadcast(
                 sender_id=sender_id,
                 content=content,
             )
-            return _json(result)
+            return ToolOutcome(_json(result), "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamWaitTool(BaseTool):
+class TeamWaitTool(ResultTool):
     """Wait for teammate/runtime events."""
 
     name = "TeamWait"
@@ -284,23 +285,23 @@ class TeamWaitTool(BaseTool):
             "required": [],
         }
 
-    async def execute(self, timeout_sec: int | None = None, max_events: int = 20) -> str:
+    async def execute_result(self, timeout_sec: int | None = None, max_events: int = 20) -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             if ctx.role != "lead":
-                return "Error: TeamWait is lead-only"
+                return ToolOutcome("Error: TeamWait is lead-only", "refused")
             events = await self.runtime.wait_events(
                 timeout_sec=timeout_sec or self.default_timeout_sec,
                 max_events=max_events,
             )
-            return _json(events)
+            return ToolOutcome(_json(events), "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")
 
 
-class TeamShutdownTool(BaseTool):
+class TeamShutdownTool(ResultTool):
     """Shutdown one teammate or cleanup team."""
 
     name = "TeamShutdown"
@@ -319,17 +320,17 @@ class TeamShutdownTool(BaseTool):
             "required": [],
         }
 
-    async def execute(self, member_id: str = "") -> str:
+    async def execute_result(self, member_id: str = "") -> ToolOutcome:
         try:
             ctx, err = _ctx()
             if err:
-                return err
+                return ToolOutcome(err, "error")
             if ctx.role != "lead":
-                return "Error: TeamShutdown is lead-only"
+                return ToolOutcome("Error: TeamShutdown is lead-only", "refused")
             if member_id:
                 await self.runtime.shutdown_member(actor_role="lead", member_id=member_id)
-                return f"Shutdown request completed for {member_id}"
+                return ToolOutcome(f"Shutdown request completed for {member_id}", "success")
             await self.runtime.cleanup_team(actor_role="lead")
-            return "Team cleaned up."
+            return ToolOutcome("Team cleaned up.", "success")
         except Exception as exc:
-            return f"Error: {exc}"
+            return ToolOutcome(f"Error: {exc}", "error")

@@ -3,6 +3,7 @@
 from typing import Any
 
 from .base import BaseTool
+from .result import ToolOutcome
 
 
 class ToolRegistry:
@@ -38,14 +39,35 @@ class ToolRegistry:
         return [t for t in self._tools.values() if t.name in names]
 
     async def execute(self, name: str, args: dict[str, Any]) -> str:
-        """Execute a tool by name."""
+        """Execute a tool through the compatible text API."""
+        return (await self.execute_result(name, args)).text
+
+    async def execute_result(self, name: str, args: dict[str, Any]) -> ToolOutcome:
+        """Execute a tool without discarding its outcome or cancellation."""
         tool = self.get(name)
         if tool is None:
-            return f"Unknown tool: {name}"
+            return ToolOutcome(f"Unknown tool: {name}", "unknown_tool")
+        if not isinstance(args, dict):
+            return ToolOutcome("Error: Tool arguments must be an object", "invalid_arguments")
         try:
-            return await tool.execute(**args)
-        except Exception as e:
-            return f"Error: {e}"
+            schema = tool.input_schema
+            required = schema.get("required", [])
+            missing = [key for key in required if key not in args]
+            if missing:
+                return ToolOutcome(f"Error: Missing required arguments: {', '.join(missing)}", "invalid_arguments")
+            if schema.get("additionalProperties") is False:
+                unexpected = args.keys() - schema.get("properties", {}).keys()
+                if unexpected:
+                    return ToolOutcome(f"Error: Unexpected arguments: {', '.join(sorted(unexpected))}", "invalid_arguments")
+            tool.validate_arguments(args)
+        except (TypeError, ValueError) as exc:
+            return ToolOutcome(f"Error: {exc}", "invalid_arguments")
+        try:
+            return await tool.execute_result(**args)
+        except TimeoutError as exc:
+            return ToolOutcome(f"Error: {exc}", "timeout")
+        except Exception as exc:
+            return ToolOutcome(f"Error: {exc}", "error")
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

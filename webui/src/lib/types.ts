@@ -1,3 +1,11 @@
+export type ToolStatus =
+  | "success"
+  | "refused"
+  | "timeout"
+  | "error"
+  | "unknown_tool"
+  | "invalid_arguments";
+
 export type StreamEventType =
   | "assistant_start"
   | "assistant_reasoning_delta"
@@ -54,6 +62,10 @@ export type StreamEvent = {
 
   tool_call_id?: string;
   tool_name?: string | null;
+  tool_status?: ToolStatus | null;
+  tool_exit_code?: number | null;
+  tool_hook_error?: string | null;
+  tool_hook_phase?: "pre" | "post" | null;
   tool_args?: Record<string, unknown>;
   tool_output?: string;
   is_error?: boolean;
@@ -97,6 +109,10 @@ export type Message = {
   message_id?: string | null;
   tool_call_id?: string;
   tool_name?: string | null;
+  tool_status?: ToolStatus | null;
+  tool_exit_code?: number | null;
+  tool_hook_error?: string | null;
+  tool_hook_phase?: "pre" | "post" | null;
   tool_args?: Record<string, unknown> | null;
   is_error?: boolean | null;
   is_compaction?: boolean;

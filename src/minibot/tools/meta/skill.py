@@ -2,13 +2,14 @@
 
 from typing import Any, TYPE_CHECKING
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 
 if TYPE_CHECKING:
     from ...skills.loader import SkillLoader
 
 
-class SkillTool(BaseTool):
+class SkillTool(ResultTool):
     """Load a skill to gain specialized knowledge for a task."""
 
     name = "Skill"
@@ -44,16 +45,16 @@ detailed instructions and access to resources."""
             "required": ["skill"],
         }
 
-    async def execute(self, skill: str) -> str:
+    async def execute_result(self, skill: str) -> ToolOutcome:
         """Load a skill and inject it into the conversation."""
         content = self.skill_loader.get_skill_content(skill)
 
         if content is None:
             available = ", ".join(self.skill_loader.list_skills()) or "none"
-            return f"Error: Unknown skill '{skill}'. Available: {available}"
+            return ToolOutcome(f"Error: Unknown skill '{skill}'. Available: {available}", "error")
 
-        return f"""<skill-loaded name="{skill}">
+        return ToolOutcome(f"""<skill-loaded name="{skill}">
 {content}
 </skill-loaded>
 
-Follow the instructions in the skill above to complete the user's task."""
+Follow the instructions in the skill above to complete the user's task.""", "success")

@@ -137,6 +137,9 @@ class FunctionTool(BaseTool):
     def input_schema(self) -> dict[str, Any]:
         return self._input_schema
 
+    def validate_arguments(self, args: dict[str, Any]) -> None:
+        inspect.signature(self._func).bind(**args)
+
     async def execute(self, **kwargs) -> str:
         if self._is_async:
             result = await self._func(**kwargs)

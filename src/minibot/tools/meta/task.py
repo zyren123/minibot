@@ -2,14 +2,15 @@
 
 from typing import Any, TYPE_CHECKING
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 
 if TYPE_CHECKING:
     from ...subagents.executor import SubagentExecutor
     from ...subagents.registry import AgentRegistry
 
 
-class TaskTool(BaseTool):
+class TaskTool(ResultTool):
     """Spawn a subagent for a focused subtask."""
 
     name = "Task"
@@ -51,11 +52,16 @@ Agent types:
             "required": ["description", "prompt", "agent_type"],
         }
 
-    async def execute(
+    async def execute_result(
         self,
         description: str,
         prompt: str,
         agent_type: str,
-    ) -> str:
+    ) -> ToolOutcome:
         """Execute a subagent task."""
-        return await self.subagent_executor.execute(description, prompt, agent_type)
+        agent = self.agent_registry.get(agent_type)
+        if agent is None:
+            return ToolOutcome(f"Error: Unknown agent type '{agent_type}'", "invalid_arguments")
+        if not agent.enabled:
+            return ToolOutcome(f"Error: Subagent '{agent_type}' is disabled", "refused")
+        return ToolOutcome(await self.subagent_executor.execute(description, prompt, agent_type))

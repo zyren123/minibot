@@ -4,7 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 from ...teams.context import get_team_execution_context
 
 
@@ -16,7 +17,7 @@ def safe_path(workdir: Path, path: str) -> Path:
     return resolved
 
 
-class ReadFileTool(BaseTool):
+class ReadFileTool(ResultTool):
     """Read file contents."""
 
     name = "read_file"
@@ -42,21 +43,21 @@ class ReadFileTool(BaseTool):
             "required": ["path"],
         }
 
-    async def execute(self, path: str, limit: int | None = None) -> str:
+    async def execute_result(self, path: str, limit: int | None = None) -> ToolOutcome:
         """Read a file."""
         try:
             fp = safe_path(self.workdir, path)
             loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(None, fp.read_text)
+            content = await loop.run_in_executor(None, lambda: fp.read_text(encoding="utf-8"))
             lines = content.splitlines()
             if limit:
                 lines = lines[:limit]
-            return "\n".join(lines)[:50000]
+            return ToolOutcome("\n".join(lines)[:50000], "success")
         except Exception as e:
-            return f"Error: {e}"
+            return ToolOutcome(f"Error: {e}", "error")
 
 
-class WriteFileTool(BaseTool):
+class WriteFileTool(ResultTool):
     """Write content to file."""
 
     name = "write_file"
@@ -82,7 +83,7 @@ class WriteFileTool(BaseTool):
             "required": ["path", "content"],
         }
 
-    async def execute(self, path: str, content: str) -> str:
+    async def execute_result(self, path: str, content: str) -> ToolOutcome:
         """Write content to a file."""
         try:
             fp = safe_path(self.workdir, path)
@@ -99,19 +100,19 @@ class WriteFileTool(BaseTool):
                     path=str(fp),
                 )
                 if not ok:
-                    return (
-                        f"Error: File lock conflict for '{path}'. "
-                        f"Current owner: {owner}"
+                    return ToolOutcome(
+                        f"Error: File lock conflict for '{path}'. Current owner: {owner}",
+                        "refused",
                     )
 
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: fp.write_text(content))
-            return f"Wrote {len(content)} bytes to {path}"
+            await loop.run_in_executor(None, lambda: fp.write_text(content, encoding="utf-8"))
+            return ToolOutcome(f"Wrote {len(content)} bytes to {path}", "success")
         except Exception as e:
-            return f"Error: {e}"
+            return ToolOutcome(f"Error: {e}", "error")
 
 
-class EditFileTool(BaseTool):
+class EditFileTool(ResultTool):
     """Replace text in file."""
 
     name = "edit_file"
@@ -141,7 +142,7 @@ class EditFileTool(BaseTool):
             "required": ["path", "old_text", "new_text"],
         }
 
-    async def execute(self, path: str, old_text: str, new_text: str) -> str:
+    async def execute_result(self, path: str, old_text: str, new_text: str) -> ToolOutcome:
         """Replace text in a file."""
         try:
             fp = safe_path(self.workdir, path)
@@ -157,19 +158,19 @@ class EditFileTool(BaseTool):
                     path=str(fp),
                 )
                 if not ok:
-                    return (
-                        f"Error: File lock conflict for '{path}'. "
-                        f"Current owner: {owner}"
+                    return ToolOutcome(
+                        f"Error: File lock conflict for '{path}'. Current owner: {owner}",
+                        "refused",
                     )
 
             loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(None, fp.read_text)
+            content = await loop.run_in_executor(None, lambda: fp.read_text(encoding="utf-8"))
 
             if old_text not in content:
-                return f"Error: Text not found in {path}"
+                return ToolOutcome(f"Error: Text not found in {path}", "error")
 
             new_content = content.replace(old_text, new_text, 1)
-            await loop.run_in_executor(None, lambda: fp.write_text(new_content))
-            return f"Edited {path}"
+            await loop.run_in_executor(None, lambda: fp.write_text(new_content, encoding="utf-8"))
+            return ToolOutcome(f"Edited {path}", "success")
         except Exception as e:
-            return f"Error: {e}"
+            return ToolOutcome(f"Error: {e}", "error")

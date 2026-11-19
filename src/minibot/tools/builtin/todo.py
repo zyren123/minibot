@@ -3,7 +3,8 @@
 from datetime import datetime, UTC
 from typing import Any
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 
 
 class TodoManager:
@@ -101,7 +102,7 @@ class TodoManager:
         }
 
 
-class TodoWriteTool(BaseTool):
+class TodoWriteTool(ResultTool):
     """Update task list."""
 
     name = "TodoWrite"
@@ -134,9 +135,9 @@ class TodoWriteTool(BaseTool):
             "required": ["items"],
         }
 
-    async def execute(self, items: list[dict]) -> str:
+    async def execute_result(self, items: list[dict]) -> ToolOutcome:
         """Update the todo list."""
         try:
-            return self.todo_manager.update(items)
+            return ToolOutcome(self.todo_manager.update(items), "success")
         except Exception as e:
-            return f"Error: {e}"
+            return ToolOutcome(f"Error: {e}", "error")

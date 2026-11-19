@@ -4,13 +4,14 @@ from pathlib import Path
 import math
 from typing import Any
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 from ...config.schema import BashConfig
 from .bash_execution import LocalBackend, DockerBackend
 from ...teams.context import get_team_execution_context
 
 
-class BashTool(BaseTool):
+class BashTool(ResultTool):
     """Execute shell commands."""
 
     name = "bash"
@@ -40,14 +41,14 @@ class BashTool(BaseTool):
             "required": ["command"],
         }
 
-    async def execute(self, command: str) -> str:
+    async def execute_result(self, command: str) -> ToolOutcome:
         """Execute a shell command."""
         if self.config.backend == "disabled":
-            return "Error: Bash execution is disabled"
+            return ToolOutcome("Error: Bash execution is disabled", "refused")
         # Safety check
         for pattern in self.DANGEROUS_PATTERNS:
             if pattern in command:
-                return f"Error: Dangerous command pattern detected: {pattern}"
+                return ToolOutcome(f"Error: Dangerous command pattern detected: {pattern}", "refused")
 
         try:
             team_ctx = get_team_execution_context()
@@ -61,16 +62,21 @@ class BashTool(BaseTool):
                     member_id=team_ctx.member_id
                 )
                 if not ok:
-                    return (
+                    return ToolOutcome(
                         "Error: Workspace lock conflict for bash execution. "
-                        f"Current owner: {owner}"
+                        f"Current owner: {owner}",
+                        "refused",
                     )
 
             result = await self._backend.run(command, timeout=self.timeout)
             output = (result.stdout + result.stderr).strip()
             prefix = f"Error: Command exited with code {result.exit_code}\n" if result.exit_code else ""
-            return (prefix + (output or "(no output)"))[:50000]
+            return ToolOutcome(
+                (prefix + (output or "(no output)"))[:50000],
+                "error" if result.exit_code else "success",
+                exit_code=result.exit_code,
+            )
         except TimeoutError:
-            return f"Error: Command timed out after {self.timeout}s"
+            return ToolOutcome(f"Error: Command timed out after {self.timeout}s", "timeout")
         except Exception as e:
-            return f"Error: {e}"
+            return ToolOutcome(f"Error: {e}", "error")

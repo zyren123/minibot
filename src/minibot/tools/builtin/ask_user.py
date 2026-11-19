@@ -6,7 +6,8 @@ import json
 import re
 from typing import Any
 
-from ..base import BaseTool
+from ..base import ResultTool
+from ..result import ToolOutcome
 
 _NUMBERED_OPTION_RE = re.compile(r"(?:(?<=^)|(?<=[\s\n]))(\d+)[\.\)、．]\s*")
 
@@ -74,7 +75,7 @@ def normalize_ask_user_prompt_and_options(prompt: str, raw_options: Any) -> tupl
     return normalized_prompt, []
 
 
-class AskUserQuestionTool(BaseTool):
+class AskUserQuestionTool(ResultTool):
     """Request a user answer from an interactive client."""
 
     name = "askuserquestion"
@@ -125,10 +126,10 @@ class AskUserQuestionTool(BaseTool):
             "additionalProperties": False,
         }
 
-    async def execute(self, **kwargs) -> str:
+    async def execute_result(self, **kwargs) -> ToolOutcome:
         prompt = str(kwargs.get("prompt") or "").strip()
         if not prompt:
-            return json.dumps({"error": "prompt is required"}, ensure_ascii=False)
+            return ToolOutcome(json.dumps({"error": "prompt is required"}, ensure_ascii=False), "invalid_arguments")
 
         prompt, options = normalize_ask_user_prompt_and_options(prompt, kwargs.get("options") or [])
 
@@ -138,4 +139,4 @@ class AskUserQuestionTool(BaseTool):
             "allow_free_text": bool(kwargs.get("allow_free_text", True)),
             "required": bool(kwargs.get("required", True)),
         }
-        return json.dumps(payload, ensure_ascii=False)
+        return ToolOutcome(json.dumps(payload, ensure_ascii=False), "success")

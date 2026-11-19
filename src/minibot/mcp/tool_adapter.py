@@ -2,12 +2,13 @@
 
 from typing import Any
 
-from ..tools.base import BaseTool
+from ..tools.base import ResultTool
+from ..tools.result import ToolOutcome
 from .client import MCPClient
 from .protocol import MCPTool
 
 
-class MCPToolAdapter(BaseTool):
+class MCPToolAdapter(ResultTool):
     """Adapts an MCP tool to the BaseTool interface."""
 
     def __init__(self, mcp_tool: MCPTool, client: MCPClient):
@@ -23,10 +24,10 @@ class MCPToolAdapter(BaseTool):
     def input_schema(self) -> dict[str, Any]:
         return self._mcp_tool.input_schema
 
-    async def execute(self, **kwargs) -> str:
+    async def execute_result(self, **kwargs) -> ToolOutcome:
         """Execute the MCP tool."""
         result = await self._client.call_tool(
             name=self._mcp_tool.name,
             arguments=kwargs,
         )
-        return result.content
+        return ToolOutcome(result.content, "error" if result.is_error else "success")

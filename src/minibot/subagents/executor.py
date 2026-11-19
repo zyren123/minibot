@@ -8,6 +8,8 @@ from typing import Any
 from ..core.client import LLMClient
 from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
+from ..tools.result import ToolOutcome
+from ..tools.execution import execute_with_hooks
 from ..hooks.manager import HookManager
 from .registry import AgentRegistry
 from ..utils.rich_utils import get_console, rich_enabled
@@ -161,7 +163,7 @@ Complete the task and return a clear, concise summary."""
                 if not tool_calls:
                     break
 
-                results: list[dict[str, str]] = []
+                results: list[dict[str, Any]] = []
 
                 for tc in tool_calls:
                     tool_count += 1
@@ -177,24 +179,19 @@ Complete the task and return a clear, concise summary."""
                             f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
                             f"raw={tc.function.arguments!r}"
                         )[:50000]
-                        results.append({"tool_call_id": tc.id, "output": output})
+                        outcome = ToolOutcome(output, "invalid_arguments")
+                        results.append({"tool_call_id": tc.id, "output": output, "metadata": outcome.metadata()})
                         if status is None:
                             _fallback_status_line()
                         continue
 
-                    blocked, reason = await self.hook_manager.trigger_pre_tool_call(
-                        tc_name, tc_input
+                    outcome = await execute_with_hooks(
+                        self.tool_registry, self.hook_manager, tc_name, tc_input,
                     )
-                    if blocked:
-                        output = f"Blocked by hook: {reason}"
-                    else:
-                        output = await self.tool_registry.execute(tc_name, tc_input)
-                        await self.hook_manager.trigger_post_tool_call(
-                            tc_name, tc_input, output
-                        )
+                    output = outcome.text
                     if parse_note:
                         output = f"Warning: {parse_note}\n{output}"
-                    results.append({"tool_call_id": tc.id, "output": output})
+                    results.append({"tool_call_id": tc.id, "output": output, "metadata": outcome.metadata()})
 
                     if status is None:
                         _fallback_status_line()
@@ -218,6 +215,7 @@ Complete the task and return a clear, concise summary."""
                             "role": "tool",
                             "tool_call_id": r["tool_call_id"],
                             "content": r["output"],
+                            **r["metadata"],
                         }
                     )
         except Exception as e:

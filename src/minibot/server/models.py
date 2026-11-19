@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..tools.result import ToolStatus
+
 
 class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Session id to use (optional).")
@@ -26,6 +28,11 @@ class MessageResponse(BaseModel):
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, object] | None = None
+    is_error: bool | None = None
+    tool_status: ToolStatus | None = None
+    tool_exit_code: int | None = None
+    tool_hook_error: str | None = None
+    tool_hook_phase: Literal["pre", "post"] | None = None
     is_compaction: bool | None = None
     parent_user_message_id: str | None = None
     completion_state: str | None = None

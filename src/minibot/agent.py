@@ -14,6 +14,8 @@ from .config import Config, get_config
 from .core.client import LLMClient
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
+from .tools.result import ToolOutcome
+from .tools.execution import execute_with_hooks
 from .tools.builtin.bash_execution import ExecutionCleanupCancelledError
 from .tools.builtin.ask_user import normalize_ask_user_prompt_and_options
 from .tools.builtin import (
@@ -646,12 +648,8 @@ You are now live. Await instructions and begin the loop.""",
         self,
         name: str,
         args: dict[str, Any],
-    ) -> str:
+    ) -> ToolOutcome:
         """Execute a tool with pre/post hooks."""
-        blocked, reason = await self.hook_manager.trigger_pre_tool_call(name, args)
-        if blocked:
-            return f"Blocked by hook: {reason}"
-
         ctx = TeamExecutionContext(
             role=self.team_role,
             team_id=self.team_id,
@@ -659,14 +657,11 @@ You are now live. Await instructions and begin the loop.""",
             runtime=self.team_runtime,
         )
         with team_execution_context(ctx):
-            result = await self.tool_registry.execute(name, args)
-
-        await self.hook_manager.trigger_post_tool_call(name, args, result)
-        return result
+            return await execute_with_hooks(self.tool_registry, self.hook_manager, name, args)
 
     async def _execute_interruptible_tool(
         self, name: str, args: dict[str, Any], interrupt_queue: "asyncio.Queue[None] | None",
-    ) -> str:
+    ) -> ToolOutcome:
         tool = self.tool_registry.get(name)
         if interrupt_queue is None or not isinstance(tool, (BashTool, TaskTool)):
             return await self._execute_tool_with_hooks(name, args)
@@ -1648,6 +1643,7 @@ You are now live. Await instructions and begin the loop.""",
                         f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
                         f"raw={tc_args_raw!r}"
                     )[:50000]
+                    outcome = ToolOutcome(output, "invalid_arguments")
                     await self._emit(
                         {
                             "type": "tool_call",
@@ -1665,7 +1661,7 @@ You are now live. Await instructions and begin the loop.""",
                             "tool_name": tc_name,
                             "tool_args": {},
                             "tool_output": output,
-                            "is_error": True,
+                            **outcome.metadata(),
                         }
                     )
                     if self._ui_enabled():
@@ -1678,6 +1674,7 @@ You are now live. Await instructions and begin the loop.""",
                             "tool_name": tc_name,
                             "tool_args": {},
                             "output": output,
+                            "metadata": outcome.metadata(),
                         }
                     )
                     continue
@@ -1708,11 +1705,11 @@ You are now live. Await instructions and begin the loop.""",
                         print()
                         print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({args_preview})")
 
+                outcome = None
                 if self._is_ask_user_tool(tc_name):
-                    output = await self._execute_tool_with_hooks(tc_name, tc_input)
-                    if parse_note:
-                        output = f"Warning: {parse_note}\n{output}"
-                    raw_payload = json.loads(output)
+                    outcome = await self._execute_tool_with_hooks(tc_name, tc_input)
+                if self._is_ask_user_tool(tc_name) and not outcome.is_error:
+                    raw_payload = json.loads(outcome.text)
                     question = self._normalize_ask_user_payload(raw_payload, question_id=tc_id)
                     question["message_id"] = assistant_message_id
 
@@ -1765,17 +1762,16 @@ You are now live. Await instructions and begin the loop.""",
                     )
                     continue
 
-                if tc_name == "Task":
-                    output = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
-                else:
+                if outcome is None:
                     tool_status_ctx = (
                         status(f"[bright_black]Running {tc_name}…[/]")
-                        if self.status_enabled and self._ui_enabled()
+                        if tc_name != "Task" and self.status_enabled and self._ui_enabled()
                         else nullcontext()
                     )
                     with tool_status_ctx:
-                        output = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
+                        outcome = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
 
+                output = outcome.text
                 if parse_note:
                     output = f"Warning: {parse_note}\n{output}"
                 await self._emit(
@@ -1785,11 +1781,11 @@ You are now live. Await instructions and begin the loop.""",
                         "tool_name": tc_name,
                         "tool_args": tc_input,
                         "tool_output": output,
-                        "is_error": False,
+                        **outcome.metadata(),
                         "note": parse_note or "",
                     }
                 )
-                if tc_name == "TodoWrite" and not output.startswith("Error:"):
+                if tc_name == "TodoWrite" and outcome.status == "success":
                     await self._emit_todo_snapshot()
                 if self._ui_enabled():
                     print_tool_output(self._tool_output_name(tc_name), output)
@@ -1799,6 +1795,7 @@ You are now live. Await instructions and begin the loop.""",
                         "tool_name": tc_name,
                         "tool_args": tc_input,
                         "output": output,
+                        "metadata": outcome.metadata(),
                     }
                 )
 
@@ -1815,6 +1812,7 @@ You are now live. Await instructions and begin the loop.""",
                         "tool_name": result["tool_name"],
                         "tool_args": result["tool_args"],
                         "content": result["output"],
+                        **result["metadata"],
                     }
                 )
 
