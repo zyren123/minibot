@@ -400,6 +400,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [ ] **Aislamiento de otras herramientas además de Bash**.
 - [ ] **Trazas de llamadas para equipos, manejadores personalizados y bots adjuntos**.
 - [x] **Control del contexto y límites de salida de herramientas**. Ajusta los turnos recientes y los resultados al límite del modelo. [Configurar el contexto](docs/model-context.md)
+- [x] **Almacenamiento de resultados extensos**. Guarda el texto completo para leer rangos y buscar palabras dentro de una sesión. [Configurar el almacenamiento](docs/context-offloading.md)
 - [x] **Transporte Streamable HTTP para MCP**. Conecta con servidores remotos que usan las revisiones de protocolo de 2025. [Configuración](docs/mcp-streamable-http.md)
 - [x] **[Puntos de control y reversión de cambios en archivos](docs/file-checkpoints.md)**.
 - [ ] **Recuperación general de tareas tras reiniciar un proceso**.

@@ -39,6 +39,11 @@ def _limit_tool_output(message: dict, limit: int) -> dict:
     content = message.get("content")
     if message.get("role") != "tool" or not isinstance(content, str) or len(content) <= limit:
         return message
+    artifact_id = message.get("tool_artifact_id")
+    if isinstance(artifact_id, str):
+        reference = f"Artifact {artifact_id}"
+        if len(reference) <= limit and content.startswith(reference):
+            return {**message, "content": reference}
     marker = "\n[Tool output truncated]"
     return {**message, "content": content[:max(0, limit - len(marker))] + marker}
 

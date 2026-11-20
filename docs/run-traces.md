@@ -40,6 +40,7 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 | `subagent_tool_start` | Child and parent IDs, `invocation_id`, `tool_call_id`, `tool_name` |
 | `subagent_tool_end` | Same child tool fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
 | `subagent_end` | Child and parent IDs, `status`, `duration_ms`, optional `budget_limit` |
+| `artifact_created`, `artifact_search`, `artifact_read` | Invocation ID, artifact ID, source run ID and tool name, size in bytes, content type, and optional child and parent IDs |
 | `tool_approval` | `approval_id`, `tool_name`, `approved`, `source` |
 | `run_waiting` | None |
 | `run_resumed` | None |

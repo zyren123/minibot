@@ -22,6 +22,28 @@ class LLMConfig:
             raise ValueError("llm.max_tool_output_chars must be an integer of at least 32")
 
 
+MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ContextOffloadingConfig:
+    """Local storage limits for large text tool results."""
+
+    enabled: bool = True
+    threshold_chars: int | None = None
+    max_artifact_bytes: int = 8 * 1024 * 1024
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError("context_offloading.enabled must be a boolean")
+        threshold = self.threshold_chars
+        if threshold is not None and (type(threshold) is not int or threshold < 1):
+            raise ValueError("context_offloading.threshold_chars must be a positive integer or null")
+        maximum = self.max_artifact_bytes
+        if type(maximum) is not int or not 1 <= maximum <= MAX_ARTIFACT_BYTES:
+            raise ValueError("context_offloading.max_artifact_bytes must be between 1 byte and 64 MiB")
+
+
 @dataclass(frozen=True)
 class RuntimeBudgetConfig:
     """Cumulative limits for one active execution segment."""
@@ -220,8 +242,11 @@ class Config:
     runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
     tool_permissions: ToolPermissionsConfig = field(default_factory=ToolPermissionsConfig)
     file_checkpoints: bool = False
+    context_offloading: ContextOffloadingConfig = field(default_factory=ContextOffloadingConfig)
 
     def __post_init__(self):
+        if not isinstance(self.context_offloading, ContextOffloadingConfig):
+            raise ValueError("context_offloading must be a ContextOffloadingConfig")
         if type(self.file_checkpoints) is not bool:
             raise ValueError("file_checkpoints must be a boolean")
         if not isinstance(self.tool_permissions, ToolPermissionsConfig):

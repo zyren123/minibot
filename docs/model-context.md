@@ -25,9 +25,12 @@ same request differently.
 
 ## How MiniBot fits a request
 
-MiniBot clips text tool results to `max_tool_output_chars` in the messages sent
-to the model. The limit includes the truncation marker and must be at least 32
-characters. Saved history and tool-result events retain the original output.
+The `max_tool_output_chars` limit applies to each tool result in a model
+request. It must be at least 32 characters. By default, MiniBot stores large
+results as [session artifacts](context-offloading.md) and puts a reference and
+short preview in the tool result. The request builder clips oversized results
+from legacy history or when artifact offloading is disabled. The clip includes
+the truncation marker and leaves the saved history intact.
 
 MiniBot reserves space up to the configured completion cap and remaining
 [run output budget](runtime-budget.md). If the request needs more space, it

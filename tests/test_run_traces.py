@@ -40,7 +40,9 @@ def records(directory):
         assert all(row["elapsed_ms"] >= 0 for row in run)
         common = {"version", "event", "run_id", "session_id", "sequence", "elapsed_ms"}
         child = {"child_run_id", "parent_invocation_id"}
+        artifact = child | {"invocation_id", "artifact_id", "artifact_run_id", "artifact_tool_name", "size_bytes", "content_type"}
         allowed = {
+            "artifact_created": artifact, "artifact_read": artifact, "artifact_search": artifact,
             "run_start": {"scope", "parent_run_id", "started_at"},
             "run_end": {"status", "duration_ms", "budget_limit"},
             "run_waiting": set(), "run_resumed": set(),

@@ -15,6 +15,11 @@ llm:
   max_tool_output_chars: 16000
   stream_enabled: true
 
+context_offloading:
+  enabled: true
+  threshold_chars: null
+  max_artifact_bytes: 8388608
+
 # Tools configuration
 runtime_budget:
   max_llm_calls: 30

@@ -16,6 +16,7 @@ from typing import Any, Literal
 from .config import Config, get_config
 from .file_checkpoints import GitFileCheckpoints
 from .traces import RunTrace, RunStatus
+from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
 from .core.model_context import ContextWindowExceeded, prepare_model_request
 from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
@@ -27,6 +28,7 @@ from .tools.permissions import (
     ApprovalSource, PermissionRun, ReviewDecision, ToolApprovalHandler, ToolApprovalRequest,
     current_permissions, parse_review,
 )
+from .tools.builtin.artifact import ReadArtifactTool, SearchArtifactTool
 from .tools.builtin.bash_execution import ExecutionCleanupCancelledError
 from .tools.builtin.ask_user import normalize_ask_user_prompt_and_options
 from .tools.builtin import (
@@ -338,6 +340,10 @@ class Agent:
                 self.workdir, self.config.tools.timeout, config=self.config.tools.bash,
             ))
         self.tool_registry.register(ReadFileTool(self.workdir))
+        if self.config.context_offloading.enabled:
+            output_chars = self.config.llm.max_tool_output_chars
+            self.tool_registry.register(ReadArtifactTool(output_chars))
+            self.tool_registry.register(SearchArtifactTool(output_chars))
         self.tool_registry.register(WriteFileTool(self.workdir, checkpoints=self.file_checkpoints))
         self.tool_registry.register(EditFileTool(self.workdir, checkpoints=self.file_checkpoints))
         self.tool_registry.register(TodoWriteTool(self.todo_manager))
@@ -1496,7 +1502,25 @@ You are now live. Await instructions and begin the loop.""",
         permissions_token = current_permissions.set(permissions)
         status: RunStatus = "failed"
         budget_limit = None
+        artifact_token = current_artifacts.set(None)
         try:
+            offloading = self.config.context_offloading
+            if offloading.enabled:
+                store = ArtifactStore(
+                    self.config.app_home, self.workdir, Path(self.config.session.sessions_dir),
+                    self.session_id, offloading.max_artifact_bytes,
+                )
+                async with budget.time_limit():
+                    catalog = await asyncio.to_thread(store.recent)
+                output_chars = self.config.llm.max_tool_output_chars
+                current_artifacts.set(ArtifactRun(
+                    store=store,
+                    run_id=trace.run_id if trace is not None else run_id or uuid.uuid4().hex,
+                    threshold_chars=min(offloading.threshold_chars or output_chars, output_chars),
+                    output_chars=output_chars,
+                    observe=trace.observe_artifact if trace is not None else None,
+                    catalog=catalog,
+                ))
             result = await self._run_loop(
                 messages, budget=budget, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
             )
@@ -1536,6 +1560,7 @@ You are now live. Await instructions and begin the loop.""",
                 self._permission_run = None
             current_permissions.reset(permissions_token)
             current_budget.reset(budget_token)
+            current_artifacts.reset(artifact_token)
             self._trace_context.reset(token)
             if trace is not None:
                 trace.close(status, budget_limit=budget_limit)
@@ -1549,8 +1574,10 @@ You are now live. Await instructions and begin the loop.""",
         reasoning_effort: str | None = None,
     ) -> list[dict]:
         """Run the main agent loop."""
+        artifact_run = current_artifacts.get()
         while True:
             tools = self.tool_registry.get_definitions()
+            system = self.system_prompt + (artifact_run.context() if artifact_run is not None else "")
             content = ""
             reasoning = ""
             finish_reason = "stop"
@@ -1568,14 +1595,14 @@ You are now live. Await instructions and begin the loop.""",
             if self._streaming_active():
                 try:
                     request = prepare_model_request(
-                        messages, self.system_prompt, tools, budget.output_headroom(self.config.llm.max_tokens),
+                        messages, system, tools, budget.output_headroom(self.config.llm.max_tokens),
                         window_tokens=max_context_tokens, tool_output_chars=self.config.llm.max_tool_output_chars,
                     )
                     allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
                     async with budget.time_limit():
                         stream_result = await self._create_message_stream_with_interrupt(
                             messages=request.messages,
-                            system=self.system_prompt,
+                            system=system,
                             tools=tools,
                             budget=budget,
                             allowance=allowance,
@@ -1616,7 +1643,7 @@ You are now live. Await instructions and begin the loop.""",
                 )
                 with status_ctx:
                     response = await self._budgeted_message(
-                        budget, messages, self.system_prompt, tools,
+                        budget, messages, system, tools,
                         interrupt_queue=interrupt_queue,
                         reasoning_effort=reasoning_effort,
                     )
@@ -2002,7 +2029,7 @@ You are now live. Await instructions and begin the loop.""",
                     continue
 
                 output = outcome.text
-                if parse_note:
+                if parse_note and outcome.artifact_id is None and outcome.artifact_eligible:
                     output = f"Warning: {parse_note}\n{output}"
                 await self._emit(
                     {

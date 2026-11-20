@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.minibot.agent import Agent
-from src.minibot.config.schema import RuntimeBudgetConfig, SessionConfig
+from src.minibot.config.schema import ContextOffloadingConfig, RuntimeBudgetConfig, SessionConfig
 from src.minibot.core.model_context import ContextWindowExceeded, estimate_payload_tokens
 from src.minibot.core.runtime_budget import current_budget
 from src.minibot.sdk import Minibot
@@ -166,8 +166,9 @@ async def test_stream_and_fallback_both_cap_legacy_tool_output(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sdk_stream_caps_new_tool_output_only_for_the_provider(tmp_path):
+async def test_sdk_stream_caps_new_tool_output_only_for_the_provider_when_offloading_disabled(tmp_path):
     cfg = config(tmp_path, backend="disabled")
+    cfg.context_offloading = ContextOffloadingConfig(enabled=False)
     cfg.llm.max_tool_output_chars = 80
     cfg.session = SessionConfig(enabled=True, sessions_dir=str(tmp_path / "sessions"))
     bot = Minibot(config=cfg, session_id="context-session")
@@ -237,7 +238,7 @@ async def test_builtin_task_caps_child_tool_output_and_uses_configured_output_li
 
     assert [request["max_tokens"] for request in child.requests] == [47, 47]
     result = child.requests[-1]["messages"][-1]
-    assert result["content"].endswith("[Tool output truncated]")
+    assert result["content"].startswith(f'Artifact {result["tool_artifact_id"]}')
     assert len(result["content"]) == 96
 
 

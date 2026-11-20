@@ -31,6 +31,7 @@ class MessageResponse(BaseModel):
     is_error: bool | None = None
     tool_status: ToolStatus | None = None
     tool_exit_code: int | None = None
+    tool_artifact_id: str | None = None
     tool_hook_error: str | None = None
     tool_hook_phase: Literal["pre", "post"] | None = None
     is_compaction: bool | None = None

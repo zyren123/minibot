@@ -15,6 +15,8 @@ class ToolOutcome:
     exit_code: int | None = None
     hook_error: str | None = None
     hook_phase: Literal["pre", "post"] | None = None
+    artifact_id: str | None = None
+    artifact_eligible: bool = True
 
     @property
     def is_error(self) -> bool:
@@ -27,4 +29,6 @@ class ToolOutcome:
         if self.hook_error is not None:
             data["tool_hook_error"] = self.hook_error
             data["tool_hook_phase"] = self.hook_phase
+        if self.artifact_id is not None and self.artifact_eligible:
+            data["tool_artifact_id"] = self.artifact_id
         return data

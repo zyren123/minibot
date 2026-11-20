@@ -326,6 +326,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [ ] **Isolation for tools beyond Bash**.
 - [ ] **Call tracing for Teams, custom handlers, and attached bots**.
 - [x] **Pre-request context checks and tool output limits**. Fit recent turns and tool results within the configured model window. [Configure model context](model-context.md)
+- [x] **Large tool output offloading**. Store complete text for range reads and keyword searches within a session. [Configure context offloading](context-offloading.md)
 - [x] **MCP Streamable HTTP transport**. Connect to remote endpoints using the 2025 protocol revisions. [Configuration](mcp-streamable-http.md)
 - [x] **[File checkpoints and rollback](file-checkpoints.md)**.
 - [ ] **General task recovery after a process restart**.

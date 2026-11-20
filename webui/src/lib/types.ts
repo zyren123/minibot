@@ -64,6 +64,7 @@ export type ChatStreamEvent = {
   tool_name?: string | null;
   tool_status?: ToolStatus | null;
   tool_exit_code?: number | null;
+  tool_artifact_id?: string | null;
   tool_hook_error?: string | null;
   tool_hook_phase?: "pre" | "post" | null;
   tool_args?: Record<string, unknown>;
@@ -132,6 +133,7 @@ export type Message = {
   tool_name?: string | null;
   tool_status?: ToolStatus | null;
   tool_exit_code?: number | null;
+  tool_artifact_id?: string | null;
   tool_hook_error?: string | null;
   tool_hook_phase?: "pre" | "post" | null;
   tool_args?: Record<string, unknown> | null;

@@ -7,6 +7,7 @@ from typing import Any
 from ..base import ResultTool
 from ..result import ToolOutcome
 from ...config.schema import BashConfig
+from ...core.artifacts import current_artifacts
 from .bash_execution import LocalBackend, DockerBackend
 from ...teams.context import get_team_execution_context
 
@@ -68,13 +69,26 @@ class BashTool(ResultTool):
                         "refused",
                     )
 
-            result = await self._backend.run(command, timeout=self.timeout)
-            output = (result.stdout + result.stderr).strip()
+            scope = current_artifacts.get()
+            output_limit = scope.capture_bytes if scope is not None else None
+            result = await self._backend.run(command, timeout=self.timeout, output_limit=output_limit)
+            if scope is not None and (result.output_exceeded or result.incomplete_output):
+                detail = (
+                    f"Output exceeds the {scope.store.max_bytes}-byte artifact limit."
+                    if result.output_exceeded else "Output collection was incomplete."
+                )
+                return ToolOutcome(scope.failure(detail), "error", exit_code=result.exit_code, artifact_eligible=False)
+
+            raw = result.stdout + result.stderr
             prefix = f"Error: Command exited with code {result.exit_code}\n" if result.exit_code else ""
+            if scope is None:
+                output = (prefix + (raw.strip() or "(no output)"))[:50000]
+            elif len(prefix) + len(raw) > scope.threshold_chars:
+                output = prefix + raw
+            else:
+                output = prefix + (raw.strip() or "(no output)")
             return ToolOutcome(
-                (prefix + (output or "(no output)"))[:50000],
-                "error" if result.exit_code else "success",
-                exit_code=result.exit_code,
+                output, "error" if result.exit_code else "success", exit_code=result.exit_code,
             )
         except TimeoutError:
             return ToolOutcome(f"Error: Command timed out after {self.timeout}s", "timeout")

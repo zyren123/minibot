@@ -12,6 +12,7 @@ from .schema import (
     Config,
     LLMConfig,
     RuntimeBudgetConfig,
+    ContextOffloadingConfig,
     ToolsConfig,
     ToolPermissionsConfig,
     BashConfig,
@@ -44,6 +45,11 @@ llm:
   max_context_tokens: 100000
   max_tool_output_chars: 16000
   stream_enabled: true
+
+context_offloading:
+  enabled: true
+  threshold_chars: null
+  max_artifact_bytes: 8388608
 
 runtime_budget:
   max_llm_calls: 30
@@ -418,12 +424,22 @@ def load_config(
         subagents=_parse_subagents_config(default_config.get("subagents")),
         session=_parse_session_config(default_config.get("session"), app_home),
         trace_dir=default_config.get("trace_dir"),
+        context_offloading=_parse_context_offloading(default_config.get("context_offloading", {})),
         runtime_budget=_parse_runtime_budget(default_config.get("runtime_budget", {})),
         tool_permissions=_parse_tool_permissions(default_config.get("tool_permissions", {})),
         file_checkpoints=default_config.get("file_checkpoints", False),
     )
 
     return _config
+
+
+def _parse_context_offloading(data: Any) -> ContextOffloadingConfig:
+    if not isinstance(data, dict):
+        raise ValueError("context_offloading must be a mapping")
+    try:
+        return ContextOffloadingConfig(**data)
+    except TypeError as exc:
+        raise ValueError(f"Invalid context_offloading configuration: {exc}") from exc
 
 
 def _parse_runtime_budget(data: Any) -> RuntimeBudgetConfig:

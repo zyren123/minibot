@@ -65,6 +65,7 @@ class StreamEvent(TypedDict, total=False):
     is_error: bool
     tool_status: ToolStatus
     tool_exit_code: int
+    tool_artifact_id: str
     tool_hook_error: str
     tool_hook_phase: Literal["pre", "post"]
     note: str

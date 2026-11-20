@@ -1,10 +1,14 @@
 """Shared tool dispatch with text-compatible hooks."""
 
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
+from ..core.artifacts import ArtifactError, current_artifacts
 from ..hooks.manager import HookManager
+from .builtin.artifact import ReadArtifactTool, SearchArtifactTool
+from .builtin.ask_user import AskUserQuestionTool
 from .permissions import current_permissions
 from .registry import ToolRegistry
 from .result import ToolOutcome
@@ -16,8 +20,8 @@ async def execute_with_hooks(
 ) -> ToolOutcome:
     permissions = current_permissions.get()
     call = None
+    tool = registry.get(name)
     if permissions is not None and permissions.policy.mode != "off":
-        tool = registry.get(name)
         if tool is None:
             return ToolOutcome(f"Unknown tool: {name}", "unknown_tool")
         call = await permissions.authorize(name, args, tool, actor)
@@ -44,5 +48,24 @@ async def execute_with_hooks(
     try:
         await hooks.trigger_post_tool_call(name, args, outcome.text)
     except Exception as exc:
-        return replace(outcome, hook_error=str(exc), hook_phase="post")
-    return outcome
+        outcome = replace(outcome, hook_error=str(exc), hook_phase="post")
+
+    scope = current_artifacts.get()
+    if scope is None or not outcome.artifact_eligible or isinstance(
+        tool, (ReadArtifactTool, SearchArtifactTool, AskUserQuestionTool),
+    ):
+        return outcome
+    if len(outcome.text) <= scope.threshold_chars:
+        return outcome
+    try:
+        artifact = await asyncio.to_thread(scope.store.save, outcome.text, scope.run_id, name)
+    except ArtifactError as exc:
+        return replace(outcome, text=scope.failure(str(exc)), status="error", artifact_eligible=False)
+    scope.record("artifact_created", artifact)
+    reference = f"Artifact {artifact.artifact_id}"
+    size = f" ({artifact.size_bytes} bytes)"
+    if scope.output_chars >= len(reference) + len(size):
+        reference += size
+    if scope.output_chars >= len(reference) + 4:
+        reference += "\n" + outcome.text[:min(512, scope.output_chars - len(reference) - 1)]
+    return replace(outcome, text=reference, artifact_id=artifact.artifact_id)

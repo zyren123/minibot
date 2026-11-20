@@ -402,6 +402,7 @@ teams:
 - [ ] **将隔离扩展到 Bash 之外的工具**。
 - [ ] **Team、自定义处理器和附加 Bot 的调用链追踪**。
 - [x] **请求前的上下文检查和工具输出上限**。按模型窗口保留近期对话，限制发给模型的工具输出。[上下文说明](docs/model-context.md)
+- [x] **大型工具输出卸载**。保存完整文本，支持同一会话内按范围读取及关键词搜索。[配置和使用](docs/context-offloading.md)
 - [x] **MCP Streamable HTTP 传输**。支持采用 2025 协议版本的远程端点。[配置说明](docs/mcp-streamable-http.md)
 - [x] **[文件检查点和回滚](docs/file-checkpoints.md)**。
 - [ ] **进程重启后的通用任务恢复**。

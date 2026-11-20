@@ -217,6 +217,11 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
         """
 skills_dir: custom-skills
 file_checkpoints: true
+# 保存完整的工具输出
+context_offloading:
+  enabled: false
+  threshold_chars: 234
+  max_artifact_bytes: 262144
 llm:
   model: 模型😀
   max_context_tokens: 4000
@@ -259,6 +264,9 @@ tools:
     )
 
     assert config.file_checkpoints is True
+    assert config.context_offloading.enabled is False
+    assert config.context_offloading.threshold_chars == 234
+    assert config.context_offloading.max_artifact_bytes == 262144
     assert config.llm.model == "模型😀"
     assert config.llm.max_context_tokens == 4000
     assert config.llm.max_tool_output_chars == 256

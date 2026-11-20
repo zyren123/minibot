@@ -15,6 +15,7 @@ from typing import Any, Literal, TextIO
 import uuid
 
 from .events import StreamEvent
+from .core.artifacts import ArtifactEvent, ArtifactMetadata
 from .core.model_context import ContextWindowExceeded
 from .core.runtime_budget import RuntimeBudgetExceeded
 from .tools.result import ToolOutcome
@@ -44,13 +45,24 @@ class SubagentTrace:
 
     def __init__(self, trace: RunTrace, parent: Invocation, agent_type: str) -> None:
         self._trace = trace
-        self._identity = {"child_run_id": uuid.uuid4().hex, "parent_invocation_id": parent.id}
+        self.run_id = uuid.uuid4().hex
+        self._identity = {"child_run_id": self.run_id, "parent_invocation_id": parent.id}
         self._started = time.monotonic()
         self._pending: Invocation | _ModelAttempt | None = None
         self._write("subagent_start", agent_type=agent_type)
 
     def _write(self, event: str, **fields: Any) -> None:
         self._trace._write(event, **self._identity, **fields)
+
+    def observe_artifact(self, event: ArtifactEvent, metadata: ArtifactMetadata) -> None:
+        invocation = self._pending
+        if not isinstance(invocation, Invocation):
+            return
+        self._write(
+            event, invocation_id=invocation.id, artifact_id=metadata.artifact_id,
+            artifact_run_id=metadata.run_id, artifact_tool_name=metadata.tool_name,
+            size_bytes=metadata.size_bytes, content_type=metadata.content_type,
+        )
 
     def start_model(self) -> None:
         attempt = _ModelAttempt(uuid.uuid4().hex, time.monotonic())
@@ -211,6 +223,16 @@ class RunTrace:
             raise
         else:
             self._finish_subagent("completed")
+
+    def observe_artifact(self, event: ArtifactEvent, metadata: ArtifactMetadata) -> None:
+        invocation = self.pending
+        if not isinstance(invocation, Invocation):
+            return
+        self._write(
+            event, invocation_id=invocation.id, artifact_id=metadata.artifact_id,
+            artifact_run_id=metadata.run_id, artifact_tool_name=metadata.tool_name,
+            size_bytes=metadata.size_bytes, content_type=metadata.content_type,
+        )
 
     def observe(self, event: StreamEvent) -> None:
         kind = event.get("type")

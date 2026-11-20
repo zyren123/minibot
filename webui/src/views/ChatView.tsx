@@ -907,6 +907,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           is_error: ev.is_error ?? null,
           tool_status: ev.tool_status,
           tool_exit_code: ev.tool_exit_code,
+          tool_artifact_id: ev.tool_artifact_id,
           tool_hook_error: ev.tool_hook_error,
           tool_hook_phase: ev.tool_hook_phase,
         },

@@ -77,7 +77,7 @@ class LLMClient:
         if system:
             chat_messages.append({"role": "system", "content": system})
 
-        outcome_fields = {"tool_status", "tool_exit_code", "tool_hook_error", "tool_hook_phase", "is_error"}
+        outcome_fields = {"tool_status", "tool_exit_code", "tool_artifact_id", "tool_hook_error", "tool_hook_phase", "is_error"}
         chat_messages.extend(
             {key: value for key, value in message.items() if key not in outcome_fields}
             for message in messages

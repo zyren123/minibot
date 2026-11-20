@@ -1,11 +1,14 @@
 """File operation tools."""
 
 import asyncio
+import codecs
 from pathlib import Path
+import re
 from typing import Any
 
 from ..base import ResultTool
 from ..result import ToolOutcome
+from ...core.artifacts import ArtifactError, current_artifacts
 from ...file_checkpoints import GitFileCheckpoints, finish_file_operation
 from ...teams.context import get_team_execution_context
 
@@ -16,6 +19,30 @@ def safe_path(workdir: Path, path: str) -> Path:
     if not resolved.is_relative_to(workdir):
         raise ValueError(f"Path escapes workspace: {path}")
     return resolved
+
+
+_LINE_BREAK = re.compile(r"\r\n|[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def _bounded_file_text(path: Path, limit: int | None, max_bytes: int) -> str:
+    with path.open("rb") as file:
+        data = file.read(max_bytes + 1)
+    overflow = len(data) > max_bytes
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    text = decoder.decode(data, final=not overflow)
+    if limit and not isinstance(limit, int):
+        raise ValueError("Limit must be an integer.")
+    if limit and limit > 0:
+        for line, match in enumerate(_LINE_BREAK.finditer(text), start=1):
+            if line == limit:
+                text = text[:match.end()]
+                overflow = len(text.encode("utf-8")) > max_bytes
+                break
+    if overflow:
+        raise ArtifactError("File output exceeded the capture limit.")
+    if limit and limit < 0:
+        text = "".join(text.splitlines(keepends=True)[:limit])
+    return text
 
 
 class ReadFileTool(ResultTool):
@@ -48,12 +75,21 @@ class ReadFileTool(ResultTool):
         """Read a file."""
         try:
             fp = safe_path(self.workdir, path)
-            loop = asyncio.get_event_loop()
-            content = await loop.run_in_executor(None, lambda: fp.read_text(encoding="utf-8"))
-            lines = content.splitlines()
-            if limit:
-                lines = lines[:limit]
-            return ToolOutcome("\n".join(lines)[:50000], "success")
+            scope = current_artifacts.get()
+            if scope is None:
+                content = await asyncio.to_thread(fp.read_text, encoding="utf-8")
+                lines = content.splitlines()
+                if limit:
+                    lines = lines[:limit]
+                return ToolOutcome("\n".join(lines)[:50000], "success")
+            try:
+                text = await asyncio.to_thread(_bounded_file_text, fp, limit, scope.capture_bytes)
+            except ArtifactError:
+                detail = f"File output exceeds the {scope.store.max_bytes}-byte artifact limit."
+                return ToolOutcome(scope.failure(detail), "error", artifact_eligible=False)
+            if len(text) <= scope.threshold_chars:
+                text = "\n".join(text.splitlines())
+            return ToolOutcome(text, "success")
         except Exception as e:
             return ToolOutcome(f"Error: {e}", "error")
 

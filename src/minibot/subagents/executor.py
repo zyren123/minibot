@@ -6,8 +6,10 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..config.schema import LLMConfig, RuntimeBudgetConfig
+from ..core.artifacts import current_artifacts
 from ..core.client import LLMClient
 from ..core.model_context import prepare_model_request
 from ..core.runtime_budget import RuntimeBudget, current_budget
@@ -87,7 +89,16 @@ class SubagentExecutor:
             return await agent.handler(description, prompt, agent)
 
         with trace.subagent(agent_type) if trace is not None else nullcontext() as child:
-            return await self._execute_llm(description, prompt, agent_type, agent, child)
+            scope = current_artifacts.get()
+            child_scope = replace(
+                scope, run_id=child.run_id if child is not None else uuid4().hex,
+                observe=child.observe_artifact if child is not None else None,
+            ) if scope is not None else None
+            token = current_artifacts.set(child_scope)
+            try:
+                return await self._execute_llm(description, prompt, agent_type, agent, child)
+            finally:
+                current_artifacts.reset(token)
 
     async def _execute_llm(
         self,
@@ -225,7 +236,7 @@ Complete the task and return a clear, concise summary."""
                                 outcome = await execute_with_hooks(
                                     self.tool_registry, self.hook_manager, tc_name, tc_input, actor=f"subagent:{agent_type}",
                                 )
-                            if parse_note:
+                            if parse_note and outcome.artifact_id is None and outcome.artifact_eligible:
                                 outcome = replace(outcome, text=f"Warning: {parse_note}\n{outcome.text}")
                     if child is not None:
                         child.finish_tool(outcome)

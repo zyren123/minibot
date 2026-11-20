@@ -26,6 +26,15 @@ class ExecutionResult:
     stdout: str
     stderr: str
     exit_code: int
+    output_exceeded: bool = False
+    incomplete_output: bool = False
+
+
+@dataclass(frozen=True)
+class _DrainedOutput:
+    data: bytes
+    exceeded: bool
+    incomplete: bool
 
 
 async def _settle(task: asyncio.Task):
@@ -46,15 +55,19 @@ async def _settle(task: asyncio.Task):
     return result
 
 
-async def _drain(reader: asyncio.StreamReader) -> bytes:
+async def _drain(reader: asyncio.StreamReader, limit: int) -> _DrainedOutput:
     output = bytearray()
+    exceeded = False
     try:
         while chunk := await reader.read(65536):
-            output.extend(chunk[:max(0, _OUTPUT_LIMIT - len(output))])
+            spare = limit - len(output)
+            if len(chunk) > spare:
+                exceeded = True
+            output.extend(chunk[:spare])
     except asyncio.CancelledError:
         # Only the owning supervisor cancels drainers after its bounded drain.
-        pass
-    return bytes(output)
+        return _DrainedOutput(bytes(output), exceeded, True)
+    return _DrainedOutput(bytes(output), exceeded, False)
 
 
 async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
@@ -87,7 +100,10 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
-async def _process(*args: str, cwd: Path, env: dict[str, str] | None = None) -> ExecutionResult:
+async def _process(
+    *args: str, cwd: Path, env: dict[str, str] | None = None, output_limit: int | None = None,
+) -> ExecutionResult:
+    per_stream_limit = _OUTPUT_LIMIT if output_limit is None else output_limit
     spawn = asyncio.create_task(asyncio.create_subprocess_exec(
         *args, cwd=cwd, env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -98,7 +114,10 @@ async def _process(*args: str, cwd: Path, env: dict[str, str] | None = None) -> 
     readers = []
     try:
         proc = await asyncio.shield(spawn)
-        readers = [asyncio.create_task(_drain(proc.stdout)), asyncio.create_task(_drain(proc.stderr))]
+        readers = [
+            asyncio.create_task(_drain(proc.stdout, per_stream_limit)),
+            asyncio.create_task(_drain(proc.stderr, per_stream_limit)),
+        ]
         # Process.wait can wait for inherited pipes after the shell has exited.
         while proc.returncode is None:
             await asyncio.sleep(0.01)
@@ -110,7 +129,10 @@ async def _process(*args: str, cwd: Path, env: dict[str, str] | None = None) -> 
             if proc is None:
                 proc = await spawn
             if not readers:
-                readers = [asyncio.create_task(_drain(proc.stdout)), asyncio.create_task(_drain(proc.stderr))]
+                readers = [
+                    asyncio.create_task(_drain(proc.stdout, per_stream_limit)),
+                    asyncio.create_task(_drain(proc.stderr, per_stream_limit)),
+                ]
             await _kill_tree(proc)
             # Detached sessions are outside local ownership and may retain pipes.
             done, pending = await asyncio.wait(readers, timeout=1)
@@ -128,19 +150,33 @@ async def _process(*args: str, cwd: Path, env: dict[str, str] | None = None) -> 
                 logging.getLogger(__name__).error(diagnostic)
                 raise ExecutionCleanupCancelledError(diagnostic) from exc
             raise
-    data = [reader.result() if not reader.cancelled() else b"" for reader in readers]
-    return ExecutionResult(data[0].decode("utf-8", "replace"), data[1].decode("utf-8", "replace"), proc.returncode)
+    stdout, stderr = [
+        reader.result() if not reader.cancelled() else _DrainedOutput(b"", False, True)
+        for reader in readers
+    ]
+    exceeded = output_limit is not None and (
+        stdout.exceeded or stderr.exceeded or len(stdout.data) + len(stderr.data) > output_limit
+    )
+    return ExecutionResult(
+        stdout.data.decode("utf-8", "replace"), stderr.data.decode("utf-8", "replace"), proc.returncode,
+        output_exceeded=exceeded, incomplete_output=stdout.incomplete or stderr.incomplete,
+    )
 
 
 @dataclass(frozen=True)
 class LocalBackend:
     workdir: Path
 
-    async def run(self, command: str, *, timeout: float) -> ExecutionResult:
+    async def run(
+        self, command: str, *, timeout: float, output_limit: int | None = None,
+    ) -> ExecutionResult:
         async with asyncio.timeout(timeout):
             if os.name == "nt":
-                return await _process(os.environ.get("COMSPEC", "cmd.exe"), "/c", command, cwd=self.workdir)
-            return await _process("/bin/sh", "-c", command, cwd=self.workdir)
+                return await _process(
+                    os.environ.get("COMSPEC", "cmd.exe"), "/c", command,
+                    cwd=self.workdir, output_limit=output_limit,
+                )
+            return await _process("/bin/sh", "-c", command, cwd=self.workdir, output_limit=output_limit)
 
 
 @dataclass(frozen=True)
@@ -148,7 +184,9 @@ class DockerBackend:
     workdir: Path
     config: BashConfig
 
-    async def run(self, command: str, *, timeout: float) -> ExecutionResult:
+    async def run(
+        self, command: str, *, timeout: float, output_limit: int | None = None,
+    ) -> ExecutionResult:
         name = f"minibot-bash-{uuid.uuid4().hex}"
         env = dict(os.environ)
         create_task = None
@@ -214,13 +252,15 @@ class DockerBackend:
                 may_exist = True
                 create_task = asyncio.create_task(checked(*args))
                 await asyncio.shield(create_task)
-                result = await _process("docker", "start", "--attach", name, cwd=self.workdir, env=env)
+                result = await _process(
+                    "docker", "start", "--attach", name, cwd=self.workdir, env=env, output_limit=output_limit,
+                )
                 state = json.loads(await checked("inspect", "--format", "{{json .State}}", name))
                 if state["Running"] or state.get("Error"):
                     raise RuntimeError(f"Docker command did not finish: {state.get('Error') or 'still running'}")
                 if result.exit_code != state["ExitCode"]:
                     raise RuntimeError(f"Docker attach failed: {result.stderr.strip()}")
-                return ExecutionResult(result.stdout, result.stderr, state["ExitCode"])
+                return result
         finally:
             interrupted = isinstance(sys.exception(), asyncio.CancelledError)
             if may_exist:
