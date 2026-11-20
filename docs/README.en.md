@@ -322,8 +322,9 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [x] **Run traces and offline task regression checks**. JSONL traces and repeatable task checks. [Traces and regression checks](run-traces.md)
 - [x] **Model task evaluations**. Opt in to run fixed tasks repeatedly with a model provider. [Run model evaluations](model-evals.md)
 - [x] **Unified tool permissions and approvals**. Supports one-time human approval and AI review for configured file paths. [Configure approvals](tool-approvals.md)
+- [x] **Built-in `Task` tracing**. One JSONL file links the parent invocation to child model calls, tool outcomes, and terminal status. [Follow a Task subagent](run-traces.md#follow-a-task-subagent)
 - [ ] **Isolation for tools beyond Bash**.
-- [ ] **Parent-child agent call tracing**.
+- [ ] **Call tracing for Teams, custom handlers, and attached bots**.
 - [ ] **Pre-request context checks and unified tool-output management**.
 - [ ] **MCP Streamable HTTP transport**.
 - [ ] **File checkpoints and rollback**.

@@ -8,16 +8,20 @@ from types import SimpleNamespace
 import pytest
 
 from src.minibot.agent import Agent, UserInterruptedError
-from src.minibot.config import load_config
+from src.minibot.config import RuntimeBudgetConfig, load_config
 from src.minibot.config.schema import SessionConfig
+from src.minibot.core.runtime_budget import RuntimeBudgetExceeded
 from src.minibot.mcp.protocol import MCPTool, MCPToolResult
 from src.minibot.mcp.tool_adapter import MCPToolAdapter
 from src.minibot.sdk import Minibot
+from src.minibot.subagents.registry import AgentType
 from src.minibot.tools.function import FunctionTool
 from src.minibot.tools.registry import ToolRegistry
 from src.minibot.traces import RunTrace
+from tests.task_regression import ExpectedTask, Segment, ToolStep, evaluate_task
 from tests.test_agent_streaming import _response
 from tests.test_bash_interrupt import config
+from tests.test_task_regression import ScriptedProvider, tool_turn
 from tests.test_tool_outcomes import TurnClient, call
 
 SECRET = "secret-credential-never-log-7f392"
@@ -35,13 +39,24 @@ def records(directory):
         assert all(row["run_id"] == path.stem for row in run)
         assert all(row["elapsed_ms"] >= 0 for row in run)
         common = {"version", "event", "run_id", "session_id", "sequence", "elapsed_ms"}
+        child = {"child_run_id", "parent_invocation_id"}
         allowed = {
             "run_start": {"scope", "parent_run_id", "started_at"},
-            "run_end": {"status", "duration_ms"},
+            "run_end": {"status", "duration_ms", "budget_limit"},
             "run_waiting": set(), "run_resumed": set(),
             "tool_start": {"invocation_id", "tool_call_id", "tool_name"},
             "tool_end": {"invocation_id", "tool_call_id", "tool_name", "status", "is_error",
                          "duration_ms", "exit_code", "hook_phase"},
+            "tool_approval": {"approval_id", "tool_name", "approved", "source"},
+            "subagent_start": child | {"agent_type"},
+            "subagent_end": child | {"status", "duration_ms", "budget_limit"},
+            "subagent_model_start": child | {"invocation_id"},
+            "subagent_model_end": child | {"invocation_id", "status", "duration_ms", "usage"},
+            "subagent_tool_start": child | {"invocation_id", "tool_call_id", "tool_name"},
+            "subagent_tool_end": child | {
+                "invocation_id", "tool_call_id", "tool_name", "status", "is_error", "duration_ms",
+                "exit_code", "hook_phase",
+            },
         }
         assert all(set(row) <= common | allowed[row["event"]] for row in run)
         starts = [row for row in run if row["event"] == "tool_start"]
@@ -366,26 +381,144 @@ def test_trace_and_config_text_io_explicit_utf8(tmp_path, monkeypatch):
     assert run[0]["session_id"] == "中文-session"
 
 
+def _task_call(agent_type="code"):
+    return call("Task", json.dumps({
+        "description": SECRET, "prompt": SECRET, "agent_type": agent_type,
+    }))
+
+
 @pytest.mark.asyncio
-async def test_task_records_parent_only_without_duplicate_child_calls(tmp_path, monkeypatch):
+async def test_task_links_each_child_to_the_exact_parent_invocation(tmp_path, monkeypatch):
     agent = make_agent(tmp_path)
     monkeypatch.setattr("src.minibot.subagents.executor.rich_enabled", lambda: False)
     effects = []
 
-    def child_effect() -> str:
-        effects.append(True)
+    def child_effect(text: str) -> str:
+        effects.append(text)
         return SECRET
 
     agent.tool_registry.register(FunctionTool(child_effect))
-    agent.client = TurnClient([call("Task", json.dumps({
-        "description": SECRET, "prompt": SECRET, "agent_type": "code",
-    }))])
-    agent.subagent_executor.client = TurnClient([call("child_effect")])
-    await agent.run_loop([{"role": "user", "content": "run"}])
-    assert effects == [True]
+    agent.client = TurnClient([_task_call(), _task_call()])
+    request = tool_turn(call("child_effect", json.dumps({"text": SECRET})), call("not_registered"))
+    request.usage = SimpleNamespace(prompt_tokens=17, completion_tokens=6, total_tokens=23, extra=SECRET)
+    child_done = _response(content=SECRET)
+    child_done.choices[0].message.reasoning_content = SECRET
+    agent.subagent_executor.client = ScriptedProvider(request, child_done, request, child_done)
+    await agent.run_loop([{"role": "user", "content": SECRET}])
+    assert effects == [SECRET, SECRET]
     run, = records(agent.config.trace_dir)
     assert run[0]["scope"] == "agent_tools"
-    assert [row["tool_name"] for row in run if row["event"] == "tool_start"] == ["Task"]
+    parents = [row for row in run if row["event"] == "tool_start"]
+    children = [row for row in run if row["event"] == "subagent_start"]
+    parent_ends = [row for row in run if row["event"] == "tool_end"]
+    assert [row["tool_name"] for row in parents] == ["Task", "Task"]
+    assert [row["tool_call_id"] for row in parents] == ["call-1", "call-1"]
+    assert len({row["child_run_id"] for row in children}) == 2
+    assert len({row["invocation_id"] for row in run if row["event"] in {
+        "subagent_model_start", "subagent_tool_start",
+    }}) == 8
+    assert len(children) == len(parents)
+    for parent, child, parent_end in zip(parents, children, parent_ends):
+        assert child["agent_type"] == "code"
+        entries = [row for row in run if row.get("child_run_id") == child["child_run_id"]]
+        assert all(row["parent_invocation_id"] == parent["invocation_id"] for row in entries)
+        assert parent["sequence"] < entries[0]["sequence"] < entries[-1]["sequence"] < parent_end["sequence"]
+        assert entries[-1]["event"] == "subagent_end"
+        assert entries[-1]["status"] == "completed"
+        for kind in ("subagent_model", "subagent_tool"):
+            starts = [row for row in entries if row["event"] == f"{kind}_start"]
+            ends = [row for row in entries if row["event"] == f"{kind}_end"]
+            assert [row["invocation_id"] for row in starts] == [row["invocation_id"] for row in ends]
+            assert len(starts) == len(ends) == 2
+            assert all(row["duration_ms"] >= 0 for row in ends)
+        child_tools = [row for row in entries if row["event"] == "subagent_tool_end"]
+        assert [row["tool_call_id"] for row in child_tools] == ["call-1", "call-1"]
+        assert [(row["status"], row["is_error"]) for row in child_tools] == [("success", False), ("refused", True)]
+        model_ends = [row for row in entries if row["event"] == "subagent_model_end"]
+        assert model_ends[0]["usage"] == {"prompt_tokens": 17, "completion_tokens": 6, "total_tokens": 23}
+        assert "usage" not in model_ends[1]
+    assert evaluate_task(
+        tmp_path, agent.config.trace_dir, agent.session_id,
+        ExpectedTask(segments=(Segment((ToolStep("Task"), ToolStep("Task"))),), operations=(), files={}),
+    ) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provider_failure", "budget", "interrupt", "wall"])
+async def test_task_trace_terminates_when_child_cannot_continue(tmp_path, kind):
+    agent = make_agent(tmp_path)
+    agent.client = TurnClient([_task_call()])
+    entered = asyncio.Event()
+    finalized = asyncio.Event()
+
+    class Child:
+        async def create_message_async(self, **kwargs):
+            if kind == "provider_failure":
+                raise RuntimeError(SECRET)
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                finalized.set()
+
+    agent.subagent_executor.client = Child()
+    if kind == "budget":
+        agent.config.runtime_budget = RuntimeBudgetConfig(max_llm_calls=1)
+    if kind == "wall":
+        agent.config.runtime_budget = RuntimeBudgetConfig(max_wall_time=0.4)
+    interrupt = asyncio.Queue()
+    history = [{"role": "user", "content": SECRET}]
+    task = asyncio.create_task(agent.run_loop(history, interrupt_queue=interrupt))
+    if kind == "interrupt":
+        await asyncio.wait_for(entered.wait(), 3)
+        interrupt.put_nowait(None)
+        with pytest.raises(UserInterruptedError):
+            await asyncio.wait_for(task, 3)
+    elif kind in ("budget", "wall"):
+        with pytest.raises(RuntimeBudgetExceeded):
+            await asyncio.wait_for(task, 3)
+    else:
+        await asyncio.wait_for(task, 3)
+
+    run, = records(agent.config.trace_dir)
+    child_end, = [row for row in run if row["event"] == "subagent_end"]
+    parent_end, = [row for row in run if row["event"] == "tool_end"]
+    expected = {
+        "provider_failure": ("failed", None), "interrupt": ("interrupted", None),
+        "budget": ("budget_exceeded", "max_llm_calls"), "wall": ("budget_exceeded", "max_wall_time"),
+    }
+    assert (child_end["status"], child_end.get("budget_limit")) == expected[kind]
+    assert child_end["sequence"] < parent_end["sequence"]
+    model_ends = [row for row in run if row["event"] == "subagent_model_end"]
+    assert [row["status"] for row in model_ends] == ([] if kind == "budget" else [expected[kind][0]])
+    if kind in ("interrupt", "wall"):
+        assert finalized.is_set()
+
+
+@pytest.mark.asyncio
+async def test_traced_task_does_not_open_a_scope_for_custom_handlers(tmp_path):
+    agent = make_agent(tmp_path)
+
+    async def handler(*args):
+        return SECRET
+
+    agent.agent_registry.register(AgentType("custom", "custom", [], "", handler=handler))
+    agent.client = TurnClient([_task_call("custom")])
+    result = await agent.run_loop([{"role": "user", "content": "run"}])
+    assert [row["content"] for row in result if row["role"] == "tool"] == [SECRET]
+    run, = records(agent.config.trace_dir)
+    assert [row["event"] for row in run] == ["run_start", "tool_start", "tool_end", "run_end"]
+
+
+@pytest.mark.asyncio
+async def test_task_still_runs_when_trace_is_disabled(tmp_path):
+    agent = make_agent(tmp_path)
+    agent.config.trace_dir = None
+    agent.client = TurnClient([_task_call()])
+    agent.subagent_executor.client = ScriptedProvider(_response(content=SECRET))
+    result = await agent.run_loop([{"role": "user", "content": "run"}])
+    assert [row["content"] for row in result if row["role"] == "tool"] == [SECRET]
+    assert not list(tmp_path.rglob("*.jsonl"))
 
 
 @pytest.mark.asyncio

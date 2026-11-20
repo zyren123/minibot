@@ -34,6 +34,12 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 | `run_start` | `scope`, `parent_run_id`, `started_at` |
 | `tool_start` | `invocation_id`, `tool_call_id`, `tool_name` |
 | `tool_end` | Same invocation fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
+| `subagent_start` | `child_run_id`, `parent_invocation_id`, `agent_type` |
+| `subagent_model_start` | Child and parent IDs, `invocation_id` |
+| `subagent_model_end` | Same model invocation fields, `status`, `duration_ms`, optional `usage` |
+| `subagent_tool_start` | Child and parent IDs, `invocation_id`, `tool_call_id`, `tool_name` |
+| `subagent_tool_end` | Same child tool fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
+| `subagent_end` | Child and parent IDs, `status`, `duration_ms`, optional `budget_limit` |
 | `tool_approval` | `approval_id`, `tool_name`, `approved`, `source` |
 | `run_waiting` | None |
 | `run_resumed` | None |
@@ -51,9 +57,27 @@ A live question emits `run_waiting`. Its answer emits `run_resumed` in the same 
 
 SDK streaming runs reuse the producer's ownership UUID. Detaching or closing an asynchronous reader leaves its producer and recorder alive. SDK cancellation and synchronous iterator shutdown retain existing producer cleanup. Terminal records follow owned tool finalizers. Run end describes Agent execution before subsequent SDK message persistence, so it is not a message-store durability acknowledgment.
 
+## Follow a Task subagent
+
+Find the parent `tool_start` named `Task`. Its `invocation_id` matches
+`parent_invocation_id` on the child records. The records share the parent's
+JSONL file. Each child execution has a separate `child_run_id`. Each child
+model attempt or tool call has its own `invocation_id`, even when the provider
+reuses a call ID.
+
+`subagent_end` reports `completed`, `failed`, `interrupted`, or
+`budget_exceeded`. A budget stop reports the limit in `budget_limit`.
+A model attempt completes when the provider returns a response. The child can
+subsequently fail while processing that response. The model record includes
+provider-reported token counts when available.
+
 ## Scope and output policy
 
-`scope` is `agent_tools`. Records cover tools in the owning Agent loop. A `Task` call is one invocation. Its subagent's internal tool calls are excluded. Team activity has no parent-child trace graph. Separately invoked Agents with tracing enabled create their own runs. Direct `Agent.run_loop`, SDK chat, streaming and synchronous wrappers all support recording.
+`scope` is `agent_tools`. Records cover tools in the owning Agent loop and
+child operations for the built-in model-driven `Task` path. Team workers and
+custom or attached-bot handlers have no child records in this format.
+Separately invoked Agents with tracing enabled create their own runs. Direct
+`Agent.run_loop`, SDK chat, streaming and synchronous wrappers support recording.
 
 [Tool approval](tool-approvals.md) decisions are recorded in the trace of the Agent
 run that owns the decision, including decisions requested by a delegated Agent.

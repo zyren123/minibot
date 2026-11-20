@@ -2,6 +2,7 @@
 
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,8 @@ from ..tools.registry import ToolRegistry
 from ..tools.result import ToolOutcome
 from ..tools.execution import execute_with_hooks
 from ..hooks.manager import HookManager
-from .registry import AgentRegistry
+from .registry import AgentRegistry, AgentType
+from ..traces import RunTrace, SubagentTrace
 from ..utils.rich_utils import get_console, rich_enabled
 
 from typing import TYPE_CHECKING
@@ -69,6 +71,8 @@ class SubagentExecutor:
         description: str,
         prompt: str,
         agent_type: str,
+        *,
+        trace: RunTrace | None = None,
     ) -> str:
         """Execute a subagent task."""
         agent = self.agent_registry.get(agent_type)
@@ -79,6 +83,17 @@ class SubagentExecutor:
         if agent.handler is not None:
             return await agent.handler(description, prompt, agent)
 
+        with trace.subagent(agent_type) if trace is not None else nullcontext() as child:
+            return await self._execute_llm(description, prompt, agent_type, agent, child)
+
+    async def _execute_llm(
+        self,
+        description: str,
+        prompt: str,
+        agent_type: str,
+        agent: AgentType,
+        child: SubagentTrace | None,
+    ) -> str:
         skills_section = ""
         if agent.skills_enabled and self.skill_loader:
             skills_desc = self.skill_loader.get_descriptions()
@@ -145,6 +160,8 @@ Complete the task and return a clear, concise summary."""
                     status.tick()
 
                 allowance = budget.start_model(sub_messages, sub_system, sub_tools, 8000)
+                if child is not None:
+                    child.start_model()
                 async with budget.time_limit():
                     response = await self.client.create_message_async(
                         messages=sub_messages,
@@ -153,12 +170,15 @@ Complete the task and return a clear, concise summary."""
                         max_tokens=allowance.max_tokens,
                     )
 
+                usage = getattr(response, "usage", None)
+                if child is not None:
+                    child.finish_model(usage)
                 choice = response.choices[0]
                 assistant_message = choice.message
                 finish_reason = choice.finish_reason
                 content = assistant_message.content or ""
                 tool_calls = assistant_message.tool_calls or []
-                budget.finish_model(allowance, getattr(response, "usage", None), (
+                budget.finish_model(allowance, usage, (
                     str(content), str(getattr(assistant_message, "reasoning_content", None) or ""), tool_calls,
                 ))
 
@@ -174,6 +194,8 @@ Complete the task and return a clear, concise summary."""
                     budget.start_tool()
                     tool_count += 1
                     tc_name = tc.function.name
+                    if child is not None:
+                        child.start_tool(tc.id, tc_name)
                     if status is not None:
                         status.phase = "tool"
                         status.current_tool = tc_name
@@ -197,6 +219,8 @@ Complete the task and return a clear, concise summary."""
                                 )
                             if parse_note:
                                 outcome = replace(outcome, text=f"Warning: {parse_note}\n{outcome.text}")
+                    if child is not None:
+                        child.finish_tool(outcome)
                     results.append({"tool_call_id": tc.id, "output": outcome.text, "metadata": outcome.metadata()})
 
                     if status is None:

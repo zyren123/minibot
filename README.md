@@ -398,8 +398,9 @@ teams:
 - [x] **执行追踪和离线任务回归**。JSONL 追踪与可重复的任务检查。[追踪和回归说明](docs/run-traces.md)
 - [x] **模型任务评估**。可选择接入真实模型提供方，重复运行固定任务。[运行评估](docs/model-evals.md)
 - [x] **统一工具权限和审批**。支持单次人工确认和限定路径的 AI 代审。[审批配置](docs/tool-approvals.md)
+- [x] **内置 `Task` 父子追踪**。在同一个 JSONL 文件中关联父调用、子代理的模型调用、工具结果和终止状态。[追踪说明](docs/run-traces.md#follow-a-task-subagent)
 - [ ] **将隔离扩展到 Bash 之外的工具**。
-- [ ] **父子 Agent 调用链追踪**。
+- [ ] **Team、自定义处理器和附加 Bot 的调用链追踪**。
 - [ ] **请求前的上下文检查和统一工具输出管理**。
 - [ ] **MCP Streamable HTTP 传输**。
 - [ ] **文件检查点和回滚**。

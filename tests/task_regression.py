@@ -116,6 +116,22 @@ def _read_segment(path: Path, session_id: str) -> tuple[str | None, Segment]:
                      location, f"unexpected {event} in the current segment state")
             waiting = event == "run_waiting"
             steps.append(event)
+        elif event == "tool_approval":
+            _require(
+                isinstance(row.get("approval_id"), str) and bool(row["approval_id"])
+                and isinstance(row.get("tool_name"), str)
+                and type(row.get("approved")) is bool and row.get("source") in ("policy", "human", "auto_review"),
+                location, "invalid tool approval metadata",
+            )
+        elif event in (
+            "subagent_start", "subagent_end", "subagent_model_start", "subagent_model_end",
+            "subagent_tool_start", "subagent_tool_end",
+        ):
+            _require(
+                active is not None and active[2] == "Task" and row.get("parent_invocation_id") == active[0]
+                and isinstance(row.get("child_run_id"), str) and bool(row["child_run_id"]),
+                location, "subagent record has no matching parent Task invocation",
+            )
         else:
             raise _UnusableTrace(f"{location}: unexpected event {event!r}")
 

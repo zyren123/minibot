@@ -396,8 +396,9 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [x] **Trazas de ejecución y pruebas de regresión sin conexión**. Trazas JSONL y pruebas repetibles de tareas. [Trazas y pruebas de regresión](docs/run-traces.md)
 - [x] **Evaluación de tareas con modelos**. Puedes ejecutar tareas fijas varias veces con un proveedor de modelos. [Ejecutar evaluaciones](docs/model-evals.md)
 - [x] **Permisos y aprobaciones unificados para herramientas**. Permite la aprobación humana por llamada y la revisión con IA para rutas de archivos configuradas. [Configurar las aprobaciones](docs/tool-approvals.md)
+- [x] **Trazas de `Task` integrado**. Un archivo JSONL vincula la llamada principal con las llamadas al modelo, los resultados de herramientas y el estado final del subagente. [Seguir un subagente de Task](docs/run-traces.md#follow-a-task-subagent)
 - [ ] **Aislamiento de otras herramientas además de Bash**.
-- [ ] **Trazas de llamadas entre agentes principales y subagentes**.
+- [ ] **Trazas de llamadas para equipos, manejadores personalizados y bots adjuntos**.
 - [ ] **Control del contexto antes de cada solicitud y gestión unificada de la salida de las herramientas**.
 - [ ] **Transporte Streamable HTTP para MCP**.
 - [ ] **Puntos de control y reversión de cambios en archivos**.

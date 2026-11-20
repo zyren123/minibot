@@ -339,7 +339,9 @@ class Agent:
 
         # Teammates are explicitly blocked from recursive delegation.
         if self.allow_subagent_delegation:
-            self.tool_registry.register(TaskTool(self.agent_registry, self.subagent_executor))
+            self.tool_registry.register(TaskTool(
+                self.agent_registry, self.subagent_executor, trace_for_run=self._trace_context.get,
+            ))
 
         if self.memory_manager is not None:
             self.tool_registry.register(CreateMemoryTool(self.memory_manager))

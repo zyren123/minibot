@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -12,8 +15,11 @@ from typing import Any, Literal, TextIO
 import uuid
 
 from .events import StreamEvent
+from .core.runtime_budget import RuntimeBudgetExceeded
+from .tools.result import ToolOutcome
 
 RunStatus = Literal["completed", "failed", "interrupted", "waiting_for_user", "budget_exceeded"]
+SubagentStatus = Literal["completed", "failed", "interrupted", "budget_exceeded"]
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,90 @@ class Invocation:
     call_id: str
     name: str
     started: float
+
+
+@dataclass(frozen=True)
+class _ModelAttempt:
+    id: str
+    started: float
+
+
+class SubagentTrace:
+    """Sequential operations within one built-in Task invocation."""
+
+    def __init__(self, trace: RunTrace, parent: Invocation, agent_type: str) -> None:
+        self._trace = trace
+        self._identity = {"child_run_id": uuid.uuid4().hex, "parent_invocation_id": parent.id}
+        self._started = time.monotonic()
+        self._pending: Invocation | _ModelAttempt | None = None
+        self._write("subagent_start", agent_type=agent_type)
+
+    def _write(self, event: str, **fields: Any) -> None:
+        self._trace._write(event, **self._identity, **fields)
+
+    def start_model(self) -> None:
+        attempt = _ModelAttempt(uuid.uuid4().hex, time.monotonic())
+        self._pending = attempt
+        self._write("subagent_model_start", invocation_id=attempt.id)
+
+    def finish_model(self, usage: Any = None, *, status: SubagentStatus = "completed") -> None:
+        attempt = self._pending
+        if not isinstance(attempt, _ModelAttempt):
+            return
+        self._pending = None
+        counts = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+            if type(value) is int and value >= 0:
+                counts[key] = value
+        fields = {"usage": counts} if counts else {}
+        self._write(
+            "subagent_model_end", invocation_id=attempt.id, status=status,
+            duration_ms=(time.monotonic() - attempt.started) * 1000, **fields,
+        )
+
+    def start_tool(self, call_id: str, name: str) -> None:
+        invocation = Invocation(
+            uuid.uuid4().hex,
+            call_id if isinstance(call_id, str) else "",
+            name if isinstance(name, str) else "",
+            time.monotonic(),
+        )
+        self._pending = invocation
+        self._write(
+            "subagent_tool_start", invocation_id=invocation.id,
+            tool_call_id=invocation.call_id, tool_name=invocation.name,
+        )
+
+    def finish_tool(self, outcome: ToolOutcome | None = None, *, status: str = "error") -> None:
+        invocation = self._pending
+        if not isinstance(invocation, Invocation):
+            return
+        self._pending = None
+        fields: dict[str, Any] = {}
+        if outcome is not None:
+            if type(outcome.exit_code) is int:
+                fields["exit_code"] = outcome.exit_code
+            if outcome.hook_error is not None and outcome.hook_phase in ("pre", "post"):
+                fields["hook_phase"] = outcome.hook_phase
+        self._write(
+            "subagent_tool_end", invocation_id=invocation.id,
+            tool_call_id=invocation.call_id, tool_name=invocation.name,
+            status=outcome.status if outcome is not None else status,
+            is_error=outcome.is_error if outcome is not None else True,
+            duration_ms=(time.monotonic() - invocation.started) * 1000, **fields,
+        )
+
+    def close(self, status: SubagentStatus, *, budget_limit: str | None = None) -> None:
+        self.finish_model(status=status)
+        tool_status = "timeout" if budget_limit == "max_wall_time" else (
+            "interrupted" if status == "interrupted" else "error"
+        )
+        self.finish_tool(status=tool_status)
+        fields = {"budget_limit": budget_limit} if budget_limit is not None else {}
+        self._write(
+            "subagent_end", status=status, duration_ms=(time.monotonic() - self._started) * 1000, **fields,
+        )
 
 
 class RunTrace:
@@ -36,6 +126,7 @@ class RunTrace:
         self.started = time.monotonic()
         self.sequence = 0
         self.pending: Invocation | None = None
+        self._subagent: SubagentTrace | None = None
         self.waiting = False
         self._file: TextIO | None = None
         try:
@@ -77,11 +168,43 @@ class RunTrace:
         invocation, self.pending = self.pending, None
         if invocation is None:
             return
+        if self._subagent is not None:
+            if status == "timeout":
+                self._finish_subagent("budget_exceeded", budget_limit="max_wall_time")
+            else:
+                self._finish_subagent("interrupted")
         self._write(
             "tool_end", invocation_id=invocation.id, tool_call_id=invocation.call_id,
             tool_name=invocation.name, status=status, is_error=is_error,
             duration_ms=(time.monotonic() - invocation.started) * 1000, **fields,
         )
+
+    def _finish_subagent(self, status: SubagentStatus, *, budget_limit: str | None = None) -> None:
+        child, self._subagent = self._subagent, None
+        if child is not None:
+            child.close(status, budget_limit=budget_limit)
+
+    @contextmanager
+    def subagent(self, agent_type: str) -> Iterator[SubagentTrace | None]:
+        parent = self.pending
+        if self._file is None or parent is None or parent.name != "Task" or self._subagent is not None:
+            yield None
+            return
+        child = SubagentTrace(self, parent, agent_type)
+        self._subagent = child
+        try:
+            yield child
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # The enclosing Task can distinguish a shared wall timeout from user cancellation.
+            raise
+        except RuntimeBudgetExceeded as exc:
+            self._finish_subagent("budget_exceeded", budget_limit=exc.limit)
+            raise
+        except BaseException:
+            self._finish_subagent("failed")
+            raise
+        else:
+            self._finish_subagent("completed")
 
     def observe(self, event: StreamEvent) -> None:
         kind = event.get("type")
