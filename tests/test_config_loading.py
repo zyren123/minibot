@@ -216,6 +216,7 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
         target_path,
         """
 skills_dir: custom-skills
+file_checkpoints: true
 llm:
   model: 模型😀
   max_context_tokens: 4000
@@ -257,6 +258,7 @@ tools:
         project_root=project_root,
     )
 
+    assert config.file_checkpoints is True
     assert config.llm.model == "模型😀"
     assert config.llm.max_context_tokens == 4000
     assert config.llm.max_tool_output_chars == 256

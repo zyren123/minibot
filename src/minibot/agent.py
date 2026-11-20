@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Literal
 
 from .config import Config, get_config
+from .file_checkpoints import GitFileCheckpoints
 from .traces import RunTrace, RunStatus
 from .core.client import LLMClient
 from .core.model_context import ContextWindowExceeded, prepare_model_request
@@ -174,6 +175,9 @@ class Agent:
         self.agent_registry = AgentRegistry()
         self.agent_registry.apply_config(self.config.subagents)
         self.tool_registry = ToolRegistry()
+        self.file_checkpoints = (
+            GitFileCheckpoints(self.workdir, self.config.app_home) if self.config.file_checkpoints else None
+        )
 
         self.hook_manager = HookManager(self.config.hooks, self.workdir)
         self.mcp_manager = MCPManager(self.config.mcp, self.workdir)
@@ -334,8 +338,8 @@ class Agent:
                 self.workdir, self.config.tools.timeout, config=self.config.tools.bash,
             ))
         self.tool_registry.register(ReadFileTool(self.workdir))
-        self.tool_registry.register(WriteFileTool(self.workdir))
-        self.tool_registry.register(EditFileTool(self.workdir))
+        self.tool_registry.register(WriteFileTool(self.workdir, checkpoints=self.file_checkpoints))
+        self.tool_registry.register(EditFileTool(self.workdir, checkpoints=self.file_checkpoints))
         self.tool_registry.register(TodoWriteTool(self.todo_manager))
         self.tool_registry.register(SkillTool(self.skill_loader))
 

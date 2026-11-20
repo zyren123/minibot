@@ -2,6 +2,7 @@
 
 # Skills directory (relative to this config file directory when not absolute).
 skills_dir: ../skills
+file_checkpoints: false
 
 # LLM configuration
 llm:

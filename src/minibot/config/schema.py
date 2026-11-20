@@ -219,8 +219,11 @@ class Config:
     trace_dir: str | Path | None = None
     runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
     tool_permissions: ToolPermissionsConfig = field(default_factory=ToolPermissionsConfig)
+    file_checkpoints: bool = False
 
     def __post_init__(self):
+        if type(self.file_checkpoints) is not bool:
+            raise ValueError("file_checkpoints must be a boolean")
         if not isinstance(self.tool_permissions, ToolPermissionsConfig):
             raise ValueError("tool_permissions must be a ToolPermissionsConfig")
         if isinstance(self.workdir, str):

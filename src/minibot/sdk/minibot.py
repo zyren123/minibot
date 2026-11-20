@@ -13,6 +13,7 @@ from ..config import Config, load_config
 from ..core.model_context import ContextWindowExceeded
 from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
+from ..file_checkpoints import FileCheckpoint, FileCheckpointError, GitFileCheckpoints, finish_file_operation
 from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
 from ..tools.base import BaseTool
@@ -473,6 +474,25 @@ class Minibot:
                     lambda current: {**current, "completion_state": "interrupted"},
                 )
         self._session_manager.delete_runtime_state(state.session_id, expected=saved)
+
+    def _file_checkpoint_store(self) -> GitFileCheckpoints:
+        if self.agent.file_checkpoints is None:
+            raise FileCheckpointError("File checkpoints are disabled.")
+        return self.agent.file_checkpoints
+
+    async def list_file_checkpoints(self) -> list[FileCheckpoint]:
+        """List retained file checkpoints for this workspace and app home."""
+        return await asyncio.to_thread(self._file_checkpoint_store().list)
+
+    async def diff_file_checkpoint(self, checkpoint_id: str) -> str:
+        """Show the recorded change for one file."""
+        store = self._file_checkpoint_store()
+        return await asyncio.to_thread(store.diff, checkpoint_id)
+
+    async def rollback_file_checkpoint(self, checkpoint_id: str) -> bool:
+        """Restore one unchanged target or return False for a consumed checkpoint."""
+        store = self._file_checkpoint_store()
+        return await finish_file_operation(lambda: store.rollback(checkpoint_id))
 
     def list_sessions(self) -> list[dict[str, Any]]:
         if self._session_manager is None:

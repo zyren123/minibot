@@ -401,7 +401,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [ ] **Trazas de llamadas para equipos, manejadores personalizados y bots adjuntos**.
 - [x] **Control del contexto y límites de salida de herramientas**. Ajusta los turnos recientes y los resultados al límite del modelo. [Configurar el contexto](docs/model-context.md)
 - [x] **Transporte Streamable HTTP para MCP**. Conecta con servidores remotos que usan las revisiones de protocolo de 2025. [Configuración](docs/mcp-streamable-http.md)
-- [ ] **Puntos de control y reversión de cambios en archivos**.
+- [x] **[Puntos de control y reversión de cambios en archivos](docs/file-checkpoints.md)**.
 - [ ] **Recuperación general de tareas tras reiniciar un proceso**.
 - [ ] **Visión**. Soporte nativo para la comprensión de imágenes multimodales.
 

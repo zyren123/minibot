@@ -14,6 +14,7 @@ from .utils.rich_utils import rich_enabled, get_console
 from .utils.prompt_toolkit import SlashCommand, PromptToolkitInput, prompt_toolkit_enabled
 from .utils.path import resolve_app_home, resolve_project_root
 from .ui.cmd_memory import handle_memory_cmd
+from .ui.cmd_checkpoint import handle_checkpoint_cmd
 from .ui.cmd_agent import handle_agent_cmd
 from .ui.cmd_mcp import handle_mcp_cmd
 from .ui.cmd_model import handle_model_cmd
@@ -36,6 +37,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/model": "Model management: /model [config]",
     "/team": "Team tools: /team [status|on|off]",
     "/session": "Session management: /session [list|new|load|delete|info]",
+    "/checkpoint": "File checkpoints: /checkpoint [list|diff ID|rollback ID]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
     "/clear": "Clear the screen",
@@ -330,6 +332,9 @@ async def repl(agent: Agent) -> None:
                         agent,
                         global_enabled=bool(getattr(agent, "team_tools_global_enabled", True)),
                     )
+                    continue
+                if cmd == "/checkpoint":
+                    await handle_checkpoint_cmd(user_input.split()[1:], agent.file_checkpoints, _confirm)
                     continue
                 if cmd == "/session":
                     cmd_args = user_input.strip()[len("/session"):].strip()

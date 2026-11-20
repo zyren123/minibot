@@ -6,6 +6,7 @@ from typing import Any
 
 from ..base import ResultTool
 from ..result import ToolOutcome
+from ...file_checkpoints import GitFileCheckpoints, finish_file_operation
 from ...teams.context import get_team_execution_context
 
 
@@ -63,8 +64,9 @@ class WriteFileTool(ResultTool):
     name = "write_file"
     description = "Write to file."
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, *, checkpoints: GitFileCheckpoints | None = None):
         self.workdir = workdir
+        self.checkpoints = checkpoints
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -87,7 +89,6 @@ class WriteFileTool(ResultTool):
         """Write content to a file."""
         try:
             fp = safe_path(self.workdir, path)
-            fp.parent.mkdir(parents=True, exist_ok=True)
             team_ctx = get_team_execution_context()
             if (
                 team_ctx is not None
@@ -105,8 +106,12 @@ class WriteFileTool(ResultTool):
                         "refused",
                     )
 
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: fp.write_text(content, encoding="utf-8"))
+            if self.checkpoints is not None:
+                await finish_file_operation(lambda: self.checkpoints.write(fp, content))
+            else:
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: fp.write_text(content, encoding="utf-8"))
             return ToolOutcome(f"Wrote {len(content)} bytes to {path}", "success")
         except Exception as e:
             return ToolOutcome(f"Error: {e}", "error")
@@ -118,8 +123,9 @@ class EditFileTool(ResultTool):
     name = "edit_file"
     description = "Replace text in file."
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, *, checkpoints: GitFileCheckpoints | None = None):
         self.workdir = workdir
+        self.checkpoints = checkpoints
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -162,6 +168,12 @@ class EditFileTool(ResultTool):
                         f"Error: File lock conflict for '{path}'. Current owner: {owner}",
                         "refused",
                     )
+
+            if self.checkpoints is not None:
+                edited = await finish_file_operation(lambda: self.checkpoints.edit(fp, old_text, new_text))
+                if not edited:
+                    return ToolOutcome(f"Error: Text not found in {path}", "error")
+                return ToolOutcome(f"Edited {path}", "success")
 
             loop = asyncio.get_event_loop()
             content = await loop.run_in_executor(None, lambda: fp.read_text(encoding="utf-8"))
