@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
 
@@ -31,9 +32,9 @@ class AgentRegistry:
     DEFAULT_AGENTS = {
         "explore": AgentType(
             name="explore",
-            description="Read-only agent for exploring code, finding files, searching",
-            tools=["bash", "read_file"],
-            prompt="You are an exploration agent. Search and analyze, but never modify files. Return a concise summary.",
+            description="Read-only agent for inspecting workspace files",
+            tools=["read_file"],
+            prompt="You are an exploration agent. Read the relevant workspace files and return a concise summary.",
         ),
         "code": AgentType(
             name="code",
@@ -44,7 +45,7 @@ class AgentRegistry:
         "plan": AgentType(
             name="plan",
             description="Planning agent for designing implementation strategies",
-            tools=["bash", "read_file"],
+            tools=["read_file"],
             prompt="You are a planning agent. Analyze the codebase and output a numbered implementation plan. Do NOT make changes.",
         ),
     }
@@ -52,7 +53,7 @@ class AgentRegistry:
     DEFAULT_AGENT_NAMES: frozenset[str] = frozenset(DEFAULT_AGENTS.keys())
 
     def __init__(self):
-        self._agents: dict[str, AgentType] = dict(self.DEFAULT_AGENTS)
+        self._agents: dict[str, AgentType] = deepcopy(self.DEFAULT_AGENTS)
 
     def apply_config(self, config: "SubagentsConfig") -> None:
         """Apply configuration overrides to registered agents."""
@@ -61,10 +62,11 @@ class AgentRegistry:
             if agent is None:
                 # Register custom agent from config if it has enough info
                 if agent_cfg.description is not None and agent_cfg.prompt is not None:
+                    tools = agent_cfg.tools if agent_cfg.tools is not None else ["bash", "read_file"]
                     agent = AgentType(
                         name=name,
                         description=agent_cfg.description,
-                        tools=agent_cfg.tools or ["bash", "read_file"],
+                        tools=tools,
                         prompt=agent_cfg.prompt,
                         skills_enabled=agent_cfg.skills_enabled,
                         enabled=agent_cfg.enabled,
@@ -135,11 +137,12 @@ class AgentRegistry:
         result: dict[str, dict] = {}
         for name, agent in self._agents.items():
             entry: dict = {"enabled": agent.enabled, "skills_enabled": agent.skills_enabled}
-            if name not in self.DEFAULT_AGENT_NAMES:
+            default = self.DEFAULT_AGENTS.get(name)
+            if default is None or agent.description != default.description:
                 entry["description"] = agent.description
+            if default is None or agent.tools != default.tools:
                 entry["tools"] = agent.tools
+            if default is None or agent.prompt != default.prompt:
                 entry["prompt"] = agent.prompt
-            elif agent.description != self.DEFAULT_AGENTS.get(name, agent).description:
-                entry["description"] = agent.description
             result[name] = entry
         return result

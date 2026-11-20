@@ -15,7 +15,7 @@ from src.minibot.mcp.tool_adapter import MCPToolAdapter
 from src.minibot.server.models import MessageResponse
 from src.minibot.session.store import SessionStore
 from src.minibot.subagents.executor import SubagentExecutor
-from src.minibot.subagents.registry import AgentRegistry
+from src.minibot.subagents.registry import AgentRegistry, AgentType
 from src.minibot.tools.base import BaseTool
 from src.minibot.tools.builtin.ask_user import AskUserQuestionTool
 from src.minibot.tools.builtin.bash import BashTool
@@ -242,10 +242,50 @@ async def test_main_and_subagent_keep_outcomes_and_model_text(tmp_path, monkeypa
         assert await executor.execute("test", "run", "code") == "done"
         history = client.requests[-1]
     results = [message for message in history if message["role"] == "tool"]
-    assert [message["tool_status"] for message in results] == ["unknown_tool", "success", "invalid_arguments"]
+    missing_status = "unknown_tool" if target == "main" else "refused"
+    assert [message["tool_status"] for message in results] == [missing_status, "success", "invalid_arguments"]
     assert [message["is_error"] for message in results] == [True, False, True]
-    assert results[0]["content"] == "Unknown tool: absent"
+    assert "absent" in results[0]["content"]
     assert results[1]["content"] == "Error: payload"
+
+
+@pytest.mark.asyncio
+async def test_subagent_enforces_advertised_tool_list_before_hooks(tmp_path, monkeypatch):
+    client = TurnClient([call("allowed"), call("unlisted", id="call-2")])
+    agent_registry = AgentRegistry()
+    agent_registry.register(AgentType("restricted", "Use one tool", ["allowed"], "Use the allowed tool."))
+    tool_registry = ToolRegistry()
+    manager = hooks(tmp_path)
+    effects = []
+
+    def allowed() -> str:
+        effects.append("allowed tool")
+        return "allowed result"
+
+    def unlisted() -> str:
+        effects.append("unlisted tool")
+        return "unexpected result"
+
+    async def pre_hook(name, _args):
+        effects.append(f"pre {name}")
+        return False, None
+
+    async def post_hook(name, _args, _output):
+        effects.append(f"post {name}")
+
+    tool_registry.register(FunctionTool(allowed))
+    tool_registry.register(FunctionTool(unlisted))
+    monkeypatch.setattr(manager, "trigger_pre_tool_call", pre_hook)
+    monkeypatch.setattr(manager, "trigger_post_tool_call", post_hook)
+    executor = SubagentExecutor(client, tool_registry, agent_registry, manager, tmp_path)
+
+    assert await executor.execute("test", "run", "restricted") == "done"
+
+    results = [message for message in client.requests[-1] if message["role"] == "tool"]
+    assert [message["tool_status"] for message in results] == ["success", "refused"]
+    assert results[0]["content"] == "allowed result"
+    assert results[1]["is_error"] is True
+    assert effects == ["pre allowed", "allowed tool", "post allowed"]
 
 
 @pytest.mark.asyncio

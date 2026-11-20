@@ -2,12 +2,15 @@
 
 from pathlib import Path
 
+import pytest
+
 from src.minibot.config.schema import SubagentConfig, SubagentsConfig
 from src.minibot.config.settings import load_config
 from src.minibot.subagents.registry import AgentRegistry
 from src.minibot.tools.registry import ToolRegistry
 from src.minibot.tools.base import BaseTool
 from src.minibot.subagents.executor import SubagentExecutor
+from src.minibot.ui.cmd_agent import handle_agent_cmd
 
 
 def _write(path: Path, content: str) -> None:
@@ -115,17 +118,72 @@ def test_get_tools_includes_skill_when_enabled():
     tools = executor._get_tools_for_agent("explore")
     names = {t["function"]["name"] for t in tools}
     assert "Skill" in names
-    assert "bash" in names
-    assert "read_file" in names
+    assert names == {"read_file", "Skill"}
 
 
 def test_get_tools_excludes_skill_when_disabled():
     executor = _build_executor(skills_enabled=False)
     tools = executor._get_tools_for_agent("explore")
     names = {t["function"]["name"] for t in tools}
-    assert "Skill" not in names
-    assert "bash" in names
-    assert "read_file" in names
+    assert names == {"read_file"}
+
+
+@pytest.mark.parametrize("agent_type", ["explore", "plan"])
+def test_builtin_read_only_tools_and_explicit_override_are_isolated(agent_type):
+    executor = _build_executor(skills_enabled=False)
+    override = SubagentsConfig(agents={
+        agent_type: SubagentConfig(tools=["bash", "read_file", "Skill", "Task", "TeamTask"]),
+    })
+    executor.agent_registry.apply_config(override)
+    executor.tool_registry.register(_FakeTool("Task"))
+    executor.tool_registry.register(_FakeTool("TeamTask"))
+
+    overridden = executor._get_tools_for_agent(agent_type)
+    assert {tool["function"]["name"] for tool in overridden} == {"bash", "read_file"}
+
+    fresh = _build_executor(skills_enabled=False)
+    defaults = fresh._get_tools_for_agent(agent_type)
+    assert {tool["function"]["name"] for tool in defaults} == {"read_file"}
+
+
+def test_custom_subagent_honors_empty_tool_list():
+    executor = _build_executor(skills_enabled=False)
+    executor.agent_registry.apply_config(SubagentsConfig(agents={
+        "no_tools": SubagentConfig(description="Respond without tools", tools=[], prompt="Answer directly."),
+    }))
+
+    assert executor._get_tools_for_agent("no_tools") == []
+
+
+@pytest.mark.asyncio
+async def test_cli_toggle_preserves_builtin_tool_overrides(tmp_path):
+    app_home = tmp_path / "app"
+    project = tmp_path / "project"
+    project.mkdir()
+    path = app_home / "config" / "default.yaml"
+    _write(path, """\
+subagents:
+  explore:
+    tools: [bash, read_file]
+  plan:
+    tools: []
+""")
+
+    def read_registry():
+        registry = AgentRegistry()
+        config = load_config(workdir=project, app_home=app_home, project_root=project)
+        registry.apply_config(config.subagents)
+        return registry
+
+    async def unexpected_prompt(*_args):
+        pytest.fail("Toggling a subagent must not prompt")
+
+    await handle_agent_cmd("disable code", read_registry(), path, unexpected_prompt)
+
+    reloaded = read_registry()
+    assert reloaded.get("explore").tools == ["bash", "read_file"]
+    assert reloaded.get("plan").tools == []
+    assert not reloaded.get("code").enabled
 
 
 def test_get_tools_wildcard_agent_with_skills():

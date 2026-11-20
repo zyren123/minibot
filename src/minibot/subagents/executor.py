@@ -2,6 +2,7 @@
 
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -49,21 +50,14 @@ class SubagentExecutor:
         if not agent.skills_enabled:
             excluded.add("Skill")
 
-        if agent.tools == "*":
-            return [
-                t.to_dict()
-                for t in self.tool_registry.get_all()
-                if t.name not in excluded
-            ]
-
-        allowed_names = set(agent.tools)
-        if agent.skills_enabled:
+        allowed_names = None if agent.tools == "*" else set(agent.tools)
+        if allowed_names is not None and agent.skills_enabled:
             allowed_names.add("Skill")
 
         return [
-            t.to_dict()
-            for t in self.tool_registry.get_all()
-            if t.name in allowed_names
+            tool.to_dict()
+            for tool in self.tool_registry.get_all()
+            if tool.name not in excluded and (allowed_names is None or tool.name in allowed_names)
         ]
 
     async def execute(
@@ -93,6 +87,7 @@ class SubagentExecutor:
 Complete the task and return a clear, concise summary."""
 
         sub_tools = self._get_tools_for_agent(agent_type)
+        allowed_tool_names = frozenset(tool["function"]["name"] for tool in sub_tools)
         sub_messages = [{"role": "user", "content": prompt}]
 
         start = time.time()
@@ -168,30 +163,29 @@ Complete the task and return a clear, concise summary."""
                 for tc in tool_calls:
                     tool_count += 1
                     tc_name = tc.function.name
-                    tc_input, parse_note = parse_tool_arguments(tc.function.arguments)
                     if status is not None:
                         status.phase = "tool"
                         status.current_tool = tc_name
                         status.tool_count = tool_count
                         status.tick()
-                    if tc_input is None:
-                        output = (
-                            f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
-                            f"raw={tc.function.arguments!r}"
-                        )[:50000]
-                        outcome = ToolOutcome(output, "invalid_arguments")
-                        results.append({"tool_call_id": tc.id, "output": output, "metadata": outcome.metadata()})
-                        if status is None:
-                            _fallback_status_line()
-                        continue
 
-                    outcome = await execute_with_hooks(
-                        self.tool_registry, self.hook_manager, tc_name, tc_input,
-                    )
-                    output = outcome.text
-                    if parse_note:
-                        output = f"Warning: {parse_note}\n{output}"
-                    results.append({"tool_call_id": tc.id, "output": output, "metadata": outcome.metadata()})
+                    if tc_name not in allowed_tool_names:
+                        outcome = ToolOutcome(f"Tool '{tc_name}' is not available to this subagent.", "refused")
+                    else:
+                        tc_input, parse_note = parse_tool_arguments(tc.function.arguments)
+                        if tc_input is None:
+                            output = (
+                                f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
+                                f"raw={tc.function.arguments!r}"
+                            )[:50000]
+                            outcome = ToolOutcome(output, "invalid_arguments")
+                        else:
+                            outcome = await execute_with_hooks(
+                                self.tool_registry, self.hook_manager, tc_name, tc_input,
+                            )
+                            if parse_note:
+                                outcome = replace(outcome, text=f"Warning: {parse_note}\n{outcome.text}")
+                    results.append({"tool_call_id": tc.id, "output": outcome.text, "metadata": outcome.metadata()})
 
                     if status is None:
                         _fallback_status_line()
