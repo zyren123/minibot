@@ -325,7 +325,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [x] **Built-in `Task` tracing**. One JSONL file links the parent invocation to child model calls, tool outcomes, and terminal status. [Follow a Task subagent](run-traces.md#follow-a-task-subagent)
 - [ ] **Isolation for tools beyond Bash**.
 - [ ] **Call tracing for Teams, custom handlers, and attached bots**.
-- [ ] **Pre-request context checks and unified tool-output management**.
+- [x] **Pre-request context checks and tool output limits**. Fit recent turns and tool results within the configured model window. [Configure model context](model-context.md)
 - [ ] **MCP Streamable HTTP transport**.
 - [ ] **File checkpoints and rollback**.
 - [ ] **General task recovery after a process restart**.

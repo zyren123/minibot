@@ -72,7 +72,7 @@ def mock_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "dummy-key")
     config = Config(
         workdir=tmp_path,
-        llm=LLMConfig(max_context_tokens=1000, stream_enabled=False),  # Set low threshold
+        llm=LLMConfig(max_context_tokens=20000, stream_enabled=False),
     )
     agent = Agent(config=config, role="solo")
     agent.client = MockLLMClient()
@@ -87,8 +87,8 @@ def mock_agent(tmp_path, monkeypatch):
 async def test_agent_run_loop_triggers_compaction(mock_agent):
     # Set up the mock client to return a high token usage to trigger compaction
     mock_agent.client.responses = [
-        # 1. Normal response but with extremely high token usage (850 > 80% of 1000)
-        MockResponse("This message makes the context very long.", total_tokens=850),
+        # 1. Normal response but with extremely high token usage (17,000 > 80% of 20,000)
+        MockResponse("This message makes the context very long.", total_tokens=17000),
         # 2. Compaction summarization response
         MockResponse("This is the compacted summary."),
     ]
@@ -116,7 +116,7 @@ async def test_agent_run_loop_triggers_compaction(mock_agent):
         if event.get("type") == "system" and event.get("data", {}).get("context_compacted") is True
     )
     assert compaction_event["data"]["context_usage"]["total_tokens"] > 0
-    assert compaction_event["data"]["auto_compact_threshold_tokens"] == 800
+    assert compaction_event["data"]["auto_compact_threshold_tokens"] == 16000
 
 
 @pytest.mark.asyncio

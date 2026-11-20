@@ -103,9 +103,9 @@ async def test_partial_stream_output_is_charged_before_fallback(tmp_path):
 @pytest.mark.asyncio
 async def test_optional_compaction_preserves_finished_reply_at_model_cap(tmp_path):
     agent = make_agent(tmp_path, max_llm_calls=1)
-    agent.config.llm.max_context_tokens = 10
+    agent.config.llm.max_context_tokens = 20000
     response = _response(content="finished")
-    response.usage = SimpleNamespace(prompt_tokens=10, completion_tokens=1, total_tokens=11)
+    response.usage = SimpleNamespace(prompt_tokens=16000, completion_tokens=1, total_tokens=16001)
     agent.client = RepeatingClient(response)
     history = await agent.run_loop([user_message()])
     assert history[-1]["content"] == "finished"

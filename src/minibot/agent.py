@@ -16,6 +16,7 @@ from typing import Any, Literal
 from .config import Config, get_config
 from .traces import RunTrace, RunStatus
 from .core.client import LLMClient
+from .core.model_context import ContextWindowExceeded, prepare_model_request
 from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
@@ -212,6 +213,7 @@ class Agent:
             workdir=self.workdir,
             skill_loader=self.skill_loader,
             budget_limits=self.config.runtime_budget,
+            llm_config=self.config.llm,
         )
 
         self._register_tools()
@@ -1385,11 +1387,18 @@ You are now live. Await instructions and begin the loop.""",
         interrupt_queue: asyncio.Queue[None] | None,
         reasoning_effort: str | None = None,
         max_tokens: int | None = None,
+        trim_history: bool = True,
     ) -> Any:
-        allowance = budget.start_model(messages, system, tools, max_tokens or self.config.llm.max_tokens)
+        llm = self.config.llm
+        request = prepare_model_request(
+            messages, system, tools, budget.output_headroom(max_tokens if max_tokens is not None else llm.max_tokens),
+            window_tokens=int(llm.max_context_tokens), tool_output_chars=llm.max_tool_output_chars,
+            trim_history=trim_history,
+        )
+        allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
         async with budget.time_limit():
             response = await self._create_message_with_interrupt(
-                messages=messages,
+                messages=request.messages,
                 system=system,
                 tools=tools,
                 max_tokens=allowance.max_tokens,
@@ -1489,6 +1498,18 @@ You are now live. Await instructions and begin the loop.""",
             )
             status = "completed"
             return result
+        except ContextWindowExceeded as exc:
+            status = "context_window_exceeded"
+            await self._emit({
+                "type": "system",
+                "message": str(exc),
+                "data": {
+                    "code": "context_window_exceeded",
+                    "estimated_input_tokens": exc.input_tokens,
+                    "max_context_tokens": exc.window_tokens,
+                },
+            })
+            raise
         except RuntimeBudgetExceeded as exc:
             status = "budget_exceeded"
             budget_limit = exc.limit
@@ -1542,10 +1563,14 @@ You are now live. Await instructions and begin the loop.""",
 
             if self._streaming_active():
                 try:
-                    allowance = budget.start_model(messages, self.system_prompt, tools, self.config.llm.max_tokens)
+                    request = prepare_model_request(
+                        messages, self.system_prompt, tools, budget.output_headroom(self.config.llm.max_tokens),
+                        window_tokens=max_context_tokens, tool_output_chars=self.config.llm.max_tool_output_chars,
+                    )
+                    allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
                     async with budget.time_limit():
                         stream_result = await self._create_message_stream_with_interrupt(
-                            messages=messages,
+                            messages=request.messages,
                             system=self.system_prompt,
                             tools=tools,
                             budget=budget,
@@ -1565,7 +1590,7 @@ You are now live. Await instructions and begin the loop.""",
                     stream_rendered = bool(stream_result["stream_rendered"])
                     usage = stream_result.get("usage")
                     stream_success = True
-                except (UserInterruptedError, RuntimeBudgetExceeded):
+                except (UserInterruptedError, RuntimeBudgetExceeded, ContextWindowExceeded):
                     raise
                 except Exception as exc:
                     self.stream_degraded = True
@@ -1657,7 +1682,7 @@ You are now live. Await instructions and begin the loop.""",
                         with status_ctx:
                             compaction_resp = await self._budgeted_message(
                                 budget, messages, compaction_system, None,
-                                interrupt_queue=interrupt_queue,
+                                interrupt_queue=interrupt_queue, trim_history=False,
                             )
                         compaction_choice = self._first_choice(compaction_resp)
                         compaction_payload = (

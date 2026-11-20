@@ -51,7 +51,7 @@ Tool duration starts before delivery of `tool_call` and ends before delivery of 
 
 ## Lifecycle
 
-Run end states are `completed`, `failed`, `interrupted`, `waiting_for_user`, and `budget_exceeded`. A budget stop records the configured limit name in `budget_limit`. See [Runtime budgets](runtime-budget.md). `completed` means the execution loop returned. It does not judge whether the user's task succeeded. Tool failures can occur inside a completed run. An `assistant_end` event does not close a run because more tools or model rounds can follow it.
+Run end states are `completed`, `failed`, `interrupted`, `waiting_for_user`, `budget_exceeded`, and `context_window_exceeded`. A [context window stop](model-context.md) means MiniBot could not fit the request before dispatch. A budget stop records the configured limit name in `budget_limit`. See [Runtime budgets](runtime-budget.md). `completed` means the execution loop returned. It does not judge whether the user's task succeeded. Tool failures can occur inside a completed run. An `assistant_end` event does not close a run because more tools or model rounds can follow it.
 
 A live question emits `run_waiting`. Its answer emits `run_resumed` in the same run. A persisted pause ends with `waiting_for_user`. The runtime sidecar stores `trace_run_id`; the server answer-stream route passes it into the resumed segment's `parent_run_id`, including after bot-cache eviction or restart. Existing sidecars without this field produce unlinked segments. These links do not provide checkpoint replay or deduplication of side effects. The SDK's `resume_pending_question_stream` continues prepared history, as before; persisting the answer remains the caller's responsibility outside the server route.
 
@@ -65,8 +65,8 @@ JSONL file. Each child execution has a separate `child_run_id`. Each child
 model attempt or tool call has its own `invocation_id`, even when the provider
 reuses a call ID.
 
-`subagent_end` reports `completed`, `failed`, `interrupted`, or
-`budget_exceeded`. A budget stop reports the limit in `budget_limit`.
+`subagent_end` reports `completed`, `failed`, `interrupted`,
+`budget_exceeded`, or `context_window_exceeded`. A budget stop reports the limit in `budget_limit`.
 A model attempt completes when the provider returns a response. The child can
 subsequently fail while processing that response. The model record includes
 provider-reported token counts when available.

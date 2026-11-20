@@ -218,6 +218,8 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
 skills_dir: custom-skills
 llm:
   model: 模型😀
+  max_context_tokens: 4000
+  max_tool_output_chars: 256
 runtime_budget:
   max_llm_calls: 4
   max_wall_time: 12.5
@@ -256,6 +258,8 @@ tools:
     )
 
     assert config.llm.model == "模型😀"
+    assert config.llm.max_context_tokens == 4000
+    assert config.llm.max_tool_output_chars == 256
     assert config.runtime_budget.max_llm_calls == 4
     assert config.runtime_budget.max_wall_time == 12.5
     assert config.runtime_budget.max_output_tokens == 900

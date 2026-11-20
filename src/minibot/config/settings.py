@@ -40,6 +40,8 @@ llm:
   api_key: ${OPENAI_API_KEY}
   model: ${MODEL_ID:gpt-4.1-mini}
   max_tokens: 8000
+  max_context_tokens: 100000
+  max_tool_output_chars: 16000
   stream_enabled: true
 
 runtime_budget:
@@ -252,6 +254,7 @@ def _parse_llm_config(data: dict, env_defaults: dict[str, str]) -> LLMConfig:
         ),
         max_tokens=data.get("max_tokens", 8000),
         max_context_tokens=data.get("max_context_tokens", 100000),
+        max_tool_output_chars=data.get("max_tool_output_chars", 16000),
         stream_enabled=data.get("stream_enabled", True),
     )
 

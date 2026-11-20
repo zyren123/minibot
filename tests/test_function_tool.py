@@ -501,7 +501,7 @@ async def test_minibot_stream_pause_question_preserves_compacted_context_usage(t
             base_url="http://localhost:8000/v1",
             api_key="test",
             model="test-model",
-            max_context_tokens=10,
+            max_context_tokens=20000,
             stream_enabled=False,
         ),
         memory=MemoryConfig(enabled=False),
@@ -530,7 +530,7 @@ async def test_minibot_stream_pause_question_preserves_compacted_context_usage(t
                         "allow_free_text": True,
                     },
                     tool_call_id="ask-call-context",
-                    usage=SimpleNamespace(prompt_tokens=6, completion_tokens=6, total_tokens=12),
+                    usage=SimpleNamespace(prompt_tokens=16000, completion_tokens=12, total_tokens=16012),
                 )
             return SimpleNamespace(
                 choices=[

@@ -10,6 +10,8 @@ llm:
   api_key: ${OPENAI_API_KEY}
   model: ${MODEL_ID:gpt-4.1-mini}
   max_tokens: 8000
+  max_context_tokens: 100000
+  max_tool_output_chars: 16000
   stream_enabled: true
 
 # Tools configuration

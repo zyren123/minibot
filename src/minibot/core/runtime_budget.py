@@ -4,10 +4,10 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-import json
 from typing import Any
 
 from ..config.schema import RuntimeBudgetConfig
+from .model_context import estimate_payload_tokens, estimate_text_tokens
 
 
 class RuntimeBudgetExceeded(RuntimeError):
@@ -22,17 +22,6 @@ class RuntimeBudgetExceeded(RuntimeError):
 class ModelAllowance:
     input_estimate: int
     max_tokens: int
-
-
-def _estimate_text_tokens(text: str) -> int:
-    if text.isascii():
-        return (len(text) + 3) // 4
-    ascii_chars = sum(char.isascii() for char in text)
-    return (ascii_chars + 3) // 4 + len(text) - ascii_chars
-
-
-def _estimate_payload_tokens(payload: Any) -> int:
-    return _estimate_text_tokens(json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":")))
 
 
 def _reported_tokens(usage: Any, field: str) -> int | None:
@@ -76,22 +65,23 @@ class RuntimeBudget:
         finally:
             self.deadline += self.loop.time() - started
 
-    def start_model(
-        self, messages: list[dict], system: str, tools: list[dict] | None, max_tokens: int,
-    ) -> ModelAllowance:
+    def output_headroom(self, requested: int) -> int:
+        remaining = self.limits.max_output_tokens - self.output_tokens
+        if remaining <= 0:
+            raise RuntimeBudgetExceeded("max_output_tokens")
+        return min(requested, remaining)
+
+    def start_model(self, *, input_estimate: int, max_tokens: int) -> ModelAllowance:
         self._check_time()
         if self.llm_calls >= self.limits.max_llm_calls:
             raise RuntimeBudgetExceeded("max_llm_calls")
         remaining_input = self.limits.max_input_tokens - self.input_tokens
-        input_estimate = _estimate_payload_tokens((system, messages, tools))
         if remaining_input < input_estimate:
             raise RuntimeBudgetExceeded("max_input_tokens")
-        remaining_output = self.limits.max_output_tokens - self.output_tokens
-        if remaining_output <= 0:
-            raise RuntimeBudgetExceeded("max_output_tokens")
+        output_tokens = self.output_headroom(max_tokens)
         self.llm_calls += 1
         self.input_tokens += input_estimate
-        return ModelAllowance(input_estimate, min(max_tokens, remaining_output))
+        return ModelAllowance(input_estimate, output_tokens)
 
     def finish_model(
         self,
@@ -107,9 +97,9 @@ class RuntimeBudget:
             text, reasoning, tool_calls = output
             # Compatible providers can surface the same text through both extractors.
             distinct_reasoning = reasoning if reasoning and reasoning != text else ""
-            completion_tokens = _estimate_text_tokens(text + distinct_reasoning)
+            completion_tokens = estimate_text_tokens(text + distinct_reasoning)
             if tool_calls:
-                completion_tokens += _estimate_payload_tokens(tool_calls)
+                completion_tokens += estimate_payload_tokens(tool_calls)
         self.output_tokens += completion_tokens
         if self.input_tokens > self.limits.max_input_tokens:
             raise RuntimeBudgetExceeded("max_input_tokens")

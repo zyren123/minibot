@@ -399,7 +399,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [x] **Trazas de `Task` integrado**. Un archivo JSONL vincula la llamada principal con las llamadas al modelo, los resultados de herramientas y el estado final del subagente. [Seguir un subagente de Task](docs/run-traces.md#follow-a-task-subagent)
 - [ ] **Aislamiento de otras herramientas además de Bash**.
 - [ ] **Trazas de llamadas para equipos, manejadores personalizados y bots adjuntos**.
-- [ ] **Control del contexto antes de cada solicitud y gestión unificada de la salida de las herramientas**.
+- [x] **Control del contexto y límites de salida de herramientas**. Ajusta los turnos recientes y los resultados al límite del modelo. [Configurar el contexto](docs/model-context.md)
 - [ ] **Transporte Streamable HTTP para MCP**.
 - [ ] **Puntos de control y reversión de cambios en archivos**.
 - [ ] **Recuperación general de tareas tras reiniciar un proceso**.

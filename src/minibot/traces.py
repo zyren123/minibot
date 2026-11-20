@@ -15,11 +15,14 @@ from typing import Any, Literal, TextIO
 import uuid
 
 from .events import StreamEvent
+from .core.model_context import ContextWindowExceeded
 from .core.runtime_budget import RuntimeBudgetExceeded
 from .tools.result import ToolOutcome
 
-RunStatus = Literal["completed", "failed", "interrupted", "waiting_for_user", "budget_exceeded"]
-SubagentStatus = Literal["completed", "failed", "interrupted", "budget_exceeded"]
+RunStatus = Literal[
+    "completed", "failed", "interrupted", "waiting_for_user", "budget_exceeded", "context_window_exceeded",
+]
+SubagentStatus = Literal["completed", "failed", "interrupted", "budget_exceeded", "context_window_exceeded"]
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,9 @@ class RunTrace:
             yield child
         except (asyncio.CancelledError, KeyboardInterrupt):
             # The enclosing Task can distinguish a shared wall timeout from user cancellation.
+            raise
+        except ContextWindowExceeded:
+            self._finish_subagent("context_window_exceeded")
             raise
         except RuntimeBudgetExceeded as exc:
             self._finish_subagent("budget_exceeded", budget_limit=exc.limit)

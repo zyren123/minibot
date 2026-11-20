@@ -15,6 +15,11 @@ class LLMConfig:
     max_tokens: int = 8000
     max_context_tokens: int = 100000
     stream_enabled: bool = True
+    max_tool_output_chars: int = 16000
+
+    def __post_init__(self):
+        if type(self.max_tool_output_chars) is not int or self.max_tool_output_chars < 32:
+            raise ValueError("llm.max_tool_output_chars must be an integer of at least 32")
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..config.schema import RuntimeBudgetConfig
+from ..config.schema import LLMConfig, RuntimeBudgetConfig
 from ..core.client import LLMClient
+from ..core.model_context import prepare_model_request
 from ..core.runtime_budget import RuntimeBudget, current_budget
 from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
@@ -37,6 +38,7 @@ class SubagentExecutor:
         workdir: Path,
         skill_loader: "SkillLoader | None" = None,
         budget_limits: RuntimeBudgetConfig | None = None,
+        llm_config: LLMConfig | None = None,
     ):
         self.client = client
         self.tool_registry = tool_registry
@@ -45,6 +47,7 @@ class SubagentExecutor:
         self.workdir = workdir
         self.skill_loader = skill_loader
         self.budget_limits = budget_limits or RuntimeBudgetConfig()
+        self.llm_config = llm_config or LLMConfig()
 
     def _get_tools_for_agent(self, agent_type: str) -> list[dict]:
         """Get tool definitions for an agent type."""
@@ -159,12 +162,17 @@ Complete the task and return a clear, concise summary."""
                     status.tool_count = tool_count
                     status.tick()
 
-                allowance = budget.start_model(sub_messages, sub_system, sub_tools, 8000)
+                request = prepare_model_request(
+                    sub_messages, sub_system, sub_tools, budget.output_headroom(self.llm_config.max_tokens),
+                    window_tokens=int(self.llm_config.max_context_tokens),
+                    tool_output_chars=self.llm_config.max_tool_output_chars,
+                )
+                allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
                 if child is not None:
                     child.start_model()
                 async with budget.time_limit():
                     response = await self.client.create_message_async(
-                        messages=sub_messages,
+                        messages=request.messages,
                         system=sub_system,
                         tools=sub_tools,
                         max_tokens=allowance.max_tokens,
