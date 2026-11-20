@@ -242,11 +242,14 @@ class Config:
     runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
     tool_permissions: ToolPermissionsConfig = field(default_factory=ToolPermissionsConfig)
     file_checkpoints: bool = False
+    durable_execution: bool = False
     context_offloading: ContextOffloadingConfig = field(default_factory=ContextOffloadingConfig)
 
     def __post_init__(self):
         if not isinstance(self.context_offloading, ContextOffloadingConfig):
             raise ValueError("context_offloading must be a ContextOffloadingConfig")
+        if type(self.durable_execution) is not bool:
+            raise ValueError("durable_execution must be a boolean")
         if type(self.file_checkpoints) is not bool:
             raise ValueError("file_checkpoints must be a boolean")
         if not isinstance(self.tool_permissions, ToolPermissionsConfig):

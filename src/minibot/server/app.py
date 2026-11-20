@@ -463,12 +463,14 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
-        ok = await manager.delete_session("default", session_id)
-        return {"deleted": ok}
+        return await delete_bot_session("default", session_id)
 
     @app.delete("/api/bots/{bot_id}/sessions/{session_id}")
     async def delete_bot_session(bot_id: str, session_id: str) -> dict[str, Any]:
-        ok = await manager.delete_session(bot_id, session_id)
+        try:
+            ok = await manager.delete_session(bot_id, session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"deleted": ok}
 
     @app.delete(

@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import copy
 from pathlib import Path
 import re
 import shutil
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 import uuid
 
 from openai import AsyncOpenAI
 
 from ..config import Config, load_config
 from ..config.writer import update_default_config, update_mcp_server_config, upsert_env_value
+from ..core.run_store import DurableRunError, RunStore
+from ..core.workspace import legacy_workspace_identity
 from ..memory.manager import MemoryManager
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
@@ -707,23 +710,25 @@ class AgentManager:
         if not assistant_message_id:
             raise ValueError("Persisted pending question is missing its assistant message id")
 
-        session_mgr.update_message(
-            session_id,
-            assistant_message_id,
-            lambda current: {**current, "question_pending": False},
-        )
-        session_mgr.append_message(
-            session_id,
-            {
-                "role": "user",
-                "content": answer_text,
-                "message_id": f"msg-{uuid.uuid4().hex[:12]}",
-                "answer_to_question_id": question_id,
-                "selected_option_value": selected_option_value,
-            },
-        )
-        session_mgr.delete_runtime_state(session_id)
-        self._clear_session_cache(bot_id, session_id, preserve_lock=True)
+        durable_run_id = runtime_state.get("durable_run_id")
+        if durable_run_id is None:
+            session_mgr.update_message(
+                session_id,
+                assistant_message_id,
+                lambda current: {**current, "question_pending": False},
+            )
+            session_mgr.append_message(
+                session_id,
+                {
+                    "role": "user",
+                    "content": answer_text,
+                    "message_id": f"msg-{uuid.uuid4().hex[:12]}",
+                    "answer_to_question_id": question_id,
+                    "selected_option_value": selected_option_value,
+                },
+            )
+            session_mgr.delete_runtime_state(session_id)
+            self._clear_session_cache(bot_id, session_id, preserve_lock=True)
 
         bot = await self.get_bot(bot_id, session_id)
         if hasattr(bot, "resume_pending_question_stream"):
@@ -737,6 +742,7 @@ class AgentManager:
                 selected_option_value=selected_option_value,
                 reasoning_effort=reasoning_effort,
                 **trace_options,
+                **({"durable_run_id": durable_run_id} if durable_run_id is not None else {}),
             ):
                 yield event
             return
@@ -747,20 +753,34 @@ class AgentManager:
         async for event in bot.stream_existing_messages(reasoning_effort=reasoning_effort):
             yield event
 
+    @contextmanager
+    def _guard_session_edit(self, bot_id: str, session_id: str, sessions: SessionManager) -> Iterator[None]:
+        home = self._bot_store.bot_home(bot_id)
+        if not self._base_config.durable_execution and not (home / "runs" / "journal.sqlite3").is_file():
+            yield
+            return
+        try:
+            store = RunStore(home, legacy_workspace_identity(self._base_config), sessions.sessions_dir)
+            with store.guard_session_mutation(session_id):
+                yield
+        except DurableRunError as exc:
+            raise ValueError(str(exc)) from exc
+
     async def delete_message_turn(self, bot_id: str, session_id: str, message_id: str) -> dict[str, Any]:
         session_mgr = self.sessions_for(bot_id)
         if not session_mgr.exists(session_id):
             raise ValueError("Session not found")
-        messages = session_mgr.load(session_id)
-        start, end, _user_index = self._assistant_turn_bounds(messages, message_id)
-        deleted_message_ids = [
-            str(item.get("message_id"))
-            for item in messages[start:end]
-            if isinstance(item.get("message_id"), str) and str(item.get("message_id")).strip()
-        ]
-        remaining = messages[:start] + messages[end:]
-        session_mgr.overwrite(session_id, remaining)
-        session_mgr.delete_runtime_state(session_id)
+        with self._guard_session_edit(bot_id, session_id, session_mgr):
+            messages = session_mgr.load(session_id)
+            start, end, _user_index = self._assistant_turn_bounds(messages, message_id)
+            deleted_message_ids = [
+                str(item.get("message_id"))
+                for item in messages[start:end]
+                if isinstance(item.get("message_id"), str) and str(item.get("message_id")).strip()
+            ]
+            remaining = messages[:start] + messages[end:]
+            session_mgr.overwrite(session_id, remaining)
+            session_mgr.delete_runtime_state(session_id)
         self._clear_session_cache(bot_id, session_id, preserve_lock=True)
         return {
             "session_id": session_id,
@@ -772,18 +792,19 @@ class AgentManager:
         session_mgr = self.sessions_for(bot_id)
         if not session_mgr.exists(session_id):
             raise ValueError("Session not found")
-        messages = session_mgr.load(session_id)
-        start, end, user_index = self._assistant_turn_bounds(messages, message_id)
-        if end != len(messages):
-            raise ValueError("Only the latest assistant turn can be regenerated")
-        user_message = messages[user_index]
-        prompt = str(user_message.get("content") or "").strip()
-        if not prompt:
-            raise ValueError("Cannot regenerate an empty user message")
+        with self._guard_session_edit(bot_id, session_id, session_mgr):
+            messages = session_mgr.load(session_id)
+            start, end, user_index = self._assistant_turn_bounds(messages, message_id)
+            if end != len(messages):
+                raise ValueError("Only the latest assistant turn can be regenerated")
+            user_message = messages[user_index]
+            prompt = str(user_message.get("content") or "").strip()
+            if not prompt:
+                raise ValueError("Cannot regenerate an empty user message")
 
-        preserved = messages[:start]
-        session_mgr.overwrite(session_id, preserved)
-        session_mgr.delete_runtime_state(session_id)
+            preserved = messages[:start]
+            session_mgr.overwrite(session_id, preserved)
+            session_mgr.delete_runtime_state(session_id)
         self._clear_session_cache(bot_id, session_id, preserve_lock=True)
         return prompt
 
@@ -1394,10 +1415,12 @@ class AgentManager:
 
     async def delete_session(self, bot_id: str, session_id: str) -> bool:
         key = (bot_id, session_id)
-        bot = self._bots.get(key)
-        if bot is not None:
-            bot.cancel()
-        ok = self.sessions_for(bot_id).delete(session_id)
+        sessions = self.sessions_for(bot_id)
+        with self._guard_session_edit(bot_id, session_id, sessions):
+            bot = self._bots.get(key)
+            if bot is not None:
+                bot.cancel()
+            ok = sessions.delete(session_id)
         async with self._global_lock:
             self._clear_session_cache(bot_id, session_id)
         return ok

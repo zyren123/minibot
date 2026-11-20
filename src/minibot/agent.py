@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import nullcontext
 from contextlib import suppress
 from contextvars import ContextVar
@@ -19,6 +19,8 @@ from .traces import RunTrace, RunStatus
 from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
 from .core.model_context import ContextWindowExceeded, prepare_model_request
+from .core.run_store import DurableRunError, DurableRunPaused, RunJournal, RunStore, StepState
+from .core.workspace import WorkspaceIdentity, legacy_workspace_identity
 from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
@@ -62,6 +64,7 @@ from .tools.meta import (
 from .skills.loader import SkillLoader
 from .subagents.registry import AgentRegistry
 from .subagents.executor import SubagentExecutor
+from .hooks.events import HookEvent
 from .hooks.manager import HookManager
 from .mcp.manager import MCPManager
 from .teams.context import TeamExecutionContext, team_execution_context
@@ -135,12 +138,18 @@ class Agent:
         allow_team_tools: bool = True,
         ask_user_handler: Any = None,
         tool_approval_handler: ToolApprovalHandler | None = None,
+        workspace_identity: WorkspaceIdentity | None = None,
     ):
         if role not in {"solo", "lead", "teammate"}:
             raise ValueError(f"Unknown role: {role}")
 
         self.config = config or get_config()
         self.workdir = self.config.workdir
+        self.workspace_identity = workspace_identity or legacy_workspace_identity(self.config)
+        self.run_store = (
+            RunStore(self.config.app_home, self.workspace_identity, Path(self.config.session.sessions_dir))
+            if self.config.durable_execution and role != "teammate" else None
+        )
         self.session_id = session_id or str(uuid.uuid4())[:8]
         self.extra_system_prompt = (extra_system_prompt or "").strip()
         self.event_sink = event_sink
@@ -679,10 +688,21 @@ You are now live. Await instructions and begin the loop.""",
         answer = await self.ask_user_handler(question)
         return self._normalize_ask_user_answer(answer, question=question)
 
+    def _durable_retry_allowed(self, name: str) -> bool:
+        if self.hook_manager.enabled and (
+            self.hook_manager.get_hooks(HookEvent.PRE_TOOL_CALL)
+            or self.hook_manager.get_hooks(HookEvent.POST_TOOL_CALL)
+        ):
+            return False
+        return type(self.tool_registry.get(name)) in {
+            ReadFileTool, ReadArtifactTool, SearchArtifactTool, AskUserQuestionTool,
+        }
+
     async def _execute_tool_with_hooks(
         self,
         name: str,
         args: dict[str, Any],
+        durable: tuple[RunJournal, StepState] | None = None,
     ) -> ToolOutcome:
         """Execute a tool with pre/post hooks."""
         ctx = TeamExecutionContext(
@@ -694,10 +714,18 @@ You are now live. Await instructions and begin the loop.""",
         default_actor = f"teammate:{self.member_id}" if self.role == "teammate" else self.role
         actor = self._permission_actor or default_actor
         with team_execution_context(ctx):
-            return await execute_with_hooks(self.tool_registry, self.hook_manager, name, args, actor=actor)
+            if durable is None:
+                return await execute_with_hooks(self.tool_registry, self.hook_manager, name, args, actor=actor)
+            journal, step = durable
+            return await execute_with_hooks(
+                self.tool_registry, self.hook_manager, name, args, actor=actor,
+                before_effects=lambda: journal.begin_step(step, retryable=self._durable_retry_allowed(name)),
+                wait_for_approval=lambda operation: journal.wait(step, "approval", operation),
+            )
 
     async def _execute_interruptible_tool(
         self, name: str, args: dict[str, Any], interrupt_queue: "asyncio.Queue[None] | None",
+        durable: tuple[RunJournal, StepState] | None = None,
     ) -> ToolOutcome:
         tool = self.tool_registry.get(name)
         permissions = current_permissions.get()
@@ -706,7 +734,7 @@ You are now live. Await instructions and begin the loop.""",
             and permissions.policy.rules.get(name, permissions.policy.default) == "ask"
         )
         if interrupt_queue is None or not (may_wait_for_approval or isinstance(tool, (BashTool, TaskTool))):
-            return await self._execute_tool_with_hooks(name, args)
+            return await self._execute_tool_with_hooks(name, args, **({"durable": durable} if durable else {}))
         try:
             interrupt_queue.get_nowait()
         except asyncio.QueueEmpty:
@@ -718,7 +746,7 @@ You are now live. Await instructions and begin the loop.""",
         async def run_owned():
             nonlocal cleanup_error
             try:
-                return await self._execute_tool_with_hooks(name, args)
+                return await self._execute_tool_with_hooks(name, args, **({"durable": durable} if durable else {}))
             except ExecutionCleanupCancelledError as exc:
                 cleanup_error = str(exc)
                 raise
@@ -1477,6 +1505,99 @@ You are now live. Await instructions and begin the loop.""",
         reasoning_effort: str | None = None,
         run_id: str | None = None,
         parent_run_id: str | None = None,
+        resume_run_id: str | None = None,
+        durable_answer: dict[str, Any] | None = None,
+        seed_messages: Callable[[], list[dict]] | None = None,
+        publish_messages: Callable[[list[dict]], None] | None = None,
+    ) -> list[dict]:
+        """Run a new turn or attach to a stored durable turn."""
+        if self.run_store is None:
+            if resume_run_id is not None:
+                raise DurableRunError("Durable execution is disabled.")
+            return await self._run_segment(
+                messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                run_id=run_id, parent_run_id=parent_run_id,
+            )
+        durable_id = resume_run_id or run_id or uuid.uuid4().hex
+        with self.run_store.claim(self.session_id, durable_id, new=resume_run_id is None) as journal:
+            if resume_run_id is None:
+                seed = seed_messages() if seed_messages is not None else messages
+                journal.create(seed, parent_run_id, reasoning_effort)
+                messages[:] = seed
+                if publish_messages is not None:
+                    publish_messages(messages)
+            else:
+                state = journal.recover(retry_allowed=self._durable_retry_allowed)
+                if state.status in {"failed", "abandoned", "recovery_required"}:
+                    raise DurableRunError(f"Durable run {journal.run_id} is {state.status}.")
+                checkpoint = journal.checkpoint()
+                if state.status == "completed":
+                    return checkpoint.messages
+                messages[:] = checkpoint.messages
+                if reasoning_effort is None:
+                    reasoning_effort = checkpoint.reasoning_effort
+                if checkpoint.finished:
+                    if publish_messages is not None:
+                        publish_messages(messages)
+                    journal.end_segment("completed")
+                    return messages
+                if durable_answer is not None:
+                    interaction = journal.question_step(durable_answer.get("question_id"))
+                    if interaction is None:
+                        raise DurableRunError("The answer does not match the durable run's pending question.")
+                    normalized = self._normalize_ask_user_answer(durable_answer, question=interaction.question)
+                    if interaction.result is not None and (
+                        normalized["answer_text"] != interaction.result["content"]
+                        or normalized["selected_option_value"] != interaction.result["selected_option_value"]
+                    ):
+                        raise DurableRunError("The durable run already recorded a different answer.")
+            segment = journal.start_segment()
+            try:
+                await self._emit({"type": "system", "data": {
+                    "code": "durable_run_started", "run_id": journal.run_id, "segment": segment,
+                }})
+                await self._run_segment(
+                    messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                    run_id=journal.run_id if segment == 1 else None,
+                    parent_run_id=parent_run_id if segment == 1 else journal.run_id,
+                    journal=journal, durable_answer=durable_answer,
+                    publish_messages=publish_messages,
+                )
+            except (DurableRunPaused, RuntimeBudgetExceeded, asyncio.CancelledError, KeyboardInterrupt):
+                journal.end_segment("interrupted")
+                if publish_messages is not None:
+                    publish_messages(messages)
+                raise
+            except UserInterruptedError:
+                status = "waiting" if journal.state().wait_reason == "user_question" else "interrupted"
+                journal.end_segment(status)
+                if publish_messages is not None:
+                    publish_messages(messages)
+                raise
+            except Exception as exc:
+                if journal.checkpoint().finished:
+                    journal.end_segment("interrupted")
+                else:
+                    journal.end_segment("failed", error=type(exc).__name__)
+                if publish_messages is not None:
+                    publish_messages(messages)
+                raise
+            if publish_messages is not None:
+                publish_messages(messages)
+            journal.end_segment("completed")
+            return messages
+
+    async def _run_segment(
+        self,
+        messages: list[dict],
+        *,
+        interrupt_queue: "asyncio.Queue[None] | None" = None,
+        reasoning_effort: str | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        journal: RunJournal | None = None,
+        durable_answer: dict[str, Any] | None = None,
+        publish_messages: Callable[[list[dict]], None] | None = None,
     ) -> list[dict]:
         """Run one execution segment, recording only allowlisted metadata when enabled."""
         trace = (
@@ -1490,7 +1611,13 @@ You are now live. Await instructions and begin the loop.""",
         inherited = self._inherited_permissions()
         permissions = inherited
         if permissions is None:
-            last_user = next((msg.get("content") for msg in reversed(messages) if msg.get("role") == "user"), None)
+            if journal is not None:
+                last_user = journal.checkpoint().user_intent
+            else:
+                last_user = next(
+                    (msg.get("content") for msg in reversed(messages) if msg.get("role") == "user"), None,
+                )
+
             async def observe(request: ToolApprovalRequest, approved: bool, source: ApprovalSource) -> None:
                 await self._observe_tool_permission(request, approved, source, trace=trace)
 
@@ -1515,14 +1642,20 @@ You are now live. Await instructions and begin the loop.""",
                 output_chars = self.config.llm.max_tool_output_chars
                 current_artifacts.set(ArtifactRun(
                     store=store,
-                    run_id=trace.run_id if trace is not None else run_id or uuid.uuid4().hex,
+                    run_id=journal.run_id if journal is not None else (
+                        trace.run_id if trace is not None else run_id or uuid.uuid4().hex
+                    ),
                     threshold_chars=min(offloading.threshold_chars or output_chars, output_chars),
                     output_chars=output_chars,
                     observe=trace.observe_artifact if trace is not None else None,
                     catalog=catalog,
                 ))
+            durable_options = {
+                "journal": journal, "durable_answer": durable_answer, "publish_messages": publish_messages,
+            } if journal is not None else {}
             result = await self._run_loop(
                 messages, budget=budget, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                **durable_options,
             )
             status = "completed"
             return result
@@ -1550,7 +1683,7 @@ You are now live. Await instructions and begin the loop.""",
         except UserInterruptedError:
             status = "waiting_for_user" if trace is not None and trace.waiting else "interrupted"
             raise
-        except (asyncio.CancelledError, KeyboardInterrupt):
+        except (DurableRunPaused, asyncio.CancelledError, KeyboardInterrupt):
             status = "interrupted"
             raise
         finally:
@@ -1572,10 +1705,26 @@ You are now live. Await instructions and begin the loop.""",
         budget: RuntimeBudget,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
         reasoning_effort: str | None = None,
+        journal: RunJournal | None = None,
+        durable_answer: dict[str, Any] | None = None,
+        publish_messages: Callable[[list[dict]], None] | None = None,
     ) -> list[dict]:
         """Run the main agent loop."""
+        if journal is not None:
+            checkpoint = journal.checkpoint()
+            if checkpoint.assistant_message is not None:
+                assistant = checkpoint.assistant_message
+                steps = journal.batch_steps(assistant["message_id"])
+                await self._dispatch_tool_batch(
+                    messages, assistant, [(step.provider_call_id, step.name, step.arguments) for step in steps],
+                    budget, interrupt_queue, journal=journal, steps=steps, durable_answer=durable_answer,
+                )
+                journal.save_messages(messages)
+
         artifact_run = current_artifacts.get()
         while True:
+            if journal is not None:
+                journal.check_pause()
             tools = self.tool_registry.get_definitions()
             system = self.system_prompt + (artifact_run.context() if artifact_run is not None else "")
             content = ""
@@ -1751,6 +1900,8 @@ You are now live. Await instructions and begin the loop.""",
                         compaction_context_usage = self._estimate_context_usage([compaction_msg, assistant_preview])
                         compaction_msg["context_usage"] = dict(compaction_context_usage)
                         # We clear the existing message list safely and append the summary
+                        if publish_messages is not None:
+                            publish_messages(messages)
                         messages.clear()
                         messages.append(compaction_msg)
                         
@@ -1791,20 +1942,42 @@ You are now live. Await instructions and begin the loop.""",
                         if self._ui_enabled():
                             print_system(f"Warning: Context compaction failed: {e}")
 
-            display_tool_calls = [
-                (i, tc) for i, tc in enumerate(tool_calls, start=1)
-                if not self._is_ask_user_tool(self._tool_call_name(tc))
+            calls = [
+                (self._tool_call_id(tc) or f"tool-call-{i}", self._tool_call_name(tc), self._tool_call_arguments(tc))
+                for i, tc in enumerate(tool_calls, start=1)
             ]
-
-            # Emit structured assistant end event for all non-interrupted responses.
             tool_call_summaries = [
-                {
-                    "id": self._tool_call_id(tc) or f"tool-call-{i}",
-                    "name": self._tool_call_name(tc),
-                    "arguments": self._tool_call_arguments(tc),
-                }
-                for i, tc in display_tool_calls
+                {"id": call_id, "name": name, "arguments": arguments}
+                for call_id, name, arguments in calls if not self._is_ask_user_tool(name)
             ]
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": content,
+                "message_id": assistant_message_id,
+                "parent_user_message_id": parent_user_message_id,
+            }
+            if reasoning:
+                assistant_msg["reasoning"] = reasoning
+            if usage:
+                assistant_msg["usage"] = usage
+            if compaction_context_usage:
+                assistant_msg["context_usage"] = dict(compaction_context_usage)
+            is_tool_batch = finish_reason == "tool_calls"
+            if is_tool_batch and tool_call_summaries:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {"name": call["name"], "arguments": call["arguments"]},
+                    }
+                    for call in tool_call_summaries
+                ]
+            steps = journal.plan_batch(messages, assistant_msg, calls) if journal and is_tool_batch else []
+            if not is_tool_batch:
+                messages.append(assistant_msg)
+                if journal is not None:
+                    journal.save_messages(messages, complete=True)
+
             await self._emit(
                 {
                     "type": "assistant_end",
@@ -1820,262 +1993,234 @@ You are now live. Await instructions and begin the loop.""",
 
             if content and self._ui_enabled() and not stream_rendered:
                 print_assistant(content, title=self._assistant_title())
-
-            if finish_reason != "tool_calls":
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": content,
-                    "message_id": assistant_message_id,
-                    "parent_user_message_id": parent_user_message_id,
-                }
-                if reasoning:
-                    assistant_msg["reasoning"] = reasoning
-                if usage:
-                    assistant_msg["usage"] = usage
-                if compaction_context_usage:
-                    assistant_msg["context_usage"] = dict(compaction_context_usage)
-                messages.append(assistant_msg)
+            if not is_tool_batch:
                 return messages
 
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": content,
-                "message_id": assistant_message_id,
-                "parent_user_message_id": parent_user_message_id,
+            await self._dispatch_tool_batch(
+                messages, assistant_msg, calls, budget, interrupt_queue, journal=journal, steps=steps,
+            )
+            if journal is not None:
+                journal.save_messages(messages)
+
+    async def _dispatch_tool_batch(
+        self,
+        messages: list[dict],
+        assistant_msg: dict[str, Any],
+        calls: list[tuple[str, str, str]],
+        budget: RuntimeBudget,
+        interrupt_queue: "asyncio.Queue[None] | None",
+        *,
+        journal: RunJournal | None,
+        steps: list[StepState],
+        durable_answer: dict[str, Any] | None = None,
+    ) -> None:
+        assistant_message_id = assistant_msg["message_id"]
+        parent_user_message_id = assistant_msg["parent_user_message_id"]
+        content = assistant_msg["content"]
+        usage = assistant_msg.get("usage")
+        compaction_context_usage = assistant_msg.get("context_usage")
+        assistant_msg_appended = False
+        tool_results: list[dict[str, Any]] = []
+        answered_calls: set[int] = set()
+        answer_messages: list[dict[str, Any]] = []
+        budget_stop: RuntimeBudgetExceeded | None = None
+
+        def result_message(
+            call_id: str, name: str, args: dict[str, Any], output: str, outcome: ToolOutcome,
+        ) -> dict[str, Any]:
+            return {
+                "role": "tool", "message_id": self._new_message_id(),
+                "parent_user_message_id": parent_user_message_id, "tool_call_id": call_id,
+                "tool_name": name, "tool_args": args, "content": output, **outcome.metadata(),
             }
-            if reasoning:
-                assistant_msg["reasoning"] = reasoning
-            if usage:
-                assistant_msg["usage"] = usage
-            if compaction_context_usage:
-                assistant_msg["context_usage"] = dict(compaction_context_usage)
-            if display_tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": self._tool_call_id(tc) or f"tool-call-{i}",
-                        "type": "function",
-                        "function": {
-                            "name": self._tool_call_name(tc),
-                            "arguments": self._tool_call_arguments(tc),
-                        },
-                    }
-                    for i, tc in display_tool_calls
-                ]
-            assistant_msg_appended = False
-            tool_results: list[dict[str, Any]] = []
-            budget_stop: RuntimeBudgetExceeded | None = None
-            for i, tc in enumerate(tool_calls, start=1):
-                tc_id = self._tool_call_id(tc) or f"tool-call-{i}"
-                tc_name = self._tool_call_name(tc)
-                is_question = self._is_ask_user_tool(tc_name)
+
+        def show_question(question: dict[str, Any]) -> None:
+            nonlocal assistant_msg_appended
+            if not assistant_msg_appended:
+                assistant_msg.update({
+                    "content": question["prompt"] if not content.strip() else content,
+                    "interaction_type": "askuserquestion",
+                    "question_id": question["question_id"],
+                    "question_prompt": question["prompt"],
+                    "question_options": list(question["options"]),
+                    "question_allow_free_text": question["allow_free_text"],
+                    "question_required": question["required"],
+                    "question_pending": True,
+                })
+                messages.append(assistant_msg)
+                assistant_msg_appended = True
+
+        for index, (tc_id, tc_name, tc_args_raw) in enumerate(calls):
+            step = steps[index] if journal is not None else None
+            is_question = self._is_ask_user_tool(tc_name)
+            if journal is not None:
+                journal.check_pause()
+                if step.status == "completed":
+                    if step.question is None:
+                        tool_results.append(step.result)
+                    else:
+                        show_question(step.question)
+                        assistant_msg["question_pending"] = False
+                        answered_calls.add(index)
+                        answer_messages.append(step.result)
+                    continue
+
+            question = step.question if step is not None else None
+            if question is None:
                 if budget_stop is None:
                     try:
                         budget.start_tool()
                     except RuntimeBudgetExceeded as exc:
+                        if journal is not None:
+                            raise
                         budget_stop = exc
                 if budget_stop is not None:
                     # The provider still expects a result for each advertised call ID.
                     if not is_question:
                         refusal = ToolOutcome(str(budget_stop), "refused")
-                        tool_results.append(
-                            {
-                                "tool_call_id": tc_id,
-                                "tool_name": tc_name,
-                                "tool_args": {},
-                                "output": refusal.text,
-                                "metadata": refusal.metadata(),
-                            }
-                        )
+                        tool_results.append(result_message(tc_id, tc_name, {}, refusal.text, refusal))
                     continue
-                tc_args_raw = self._tool_call_arguments(tc)
+
                 tc_input, parse_note = parse_tool_arguments(tc_args_raw)
-                if tc_input is None:
+                invalid = tc_input is None
+                tc_input = tc_input if tc_input is not None else {}
+                await self._emit({
+                    "type": "tool_call", "tool_call_id": tc_id, "tool_name": tc_name, "tool_args": tc_input,
+                    "note": parse_note or ("invalid_args" if invalid else ""),
+                    **({"is_error": True} if invalid else {}),
+                })
+                if self._ui_enabled():
+                    print()
+                    if invalid:
+                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}(invalid_args)")
+                    elif tc_name == "Task":
+                        print_tool_call(
+                            f"{self._tool_log_prefix()}> Task: {tc_input.get('description', 'subtask')}"
+                        )
+                    elif tc_name == "Skill":
+                        print_tool_call(
+                            f"{self._tool_log_prefix()}> Loading skill: {tc_input.get('skill', '?')}"
+                        )
+                    else:
+                        display_args = _format_tool_args(tc_input)
+                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({display_args})")
+
+                if invalid:
                     output = (
                         f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
                         f"raw={tc_args_raw!r}"
                     )[:50000]
                     outcome = ToolOutcome(output, "invalid_arguments")
-                    await self._emit(
-                        {
-                            "type": "tool_call",
-                            "tool_call_id": tc_id,
-                            "tool_name": tc_name,
-                            "tool_args": {},
-                            "is_error": True,
-                            "note": parse_note or "invalid_args",
-                        }
+                else:
+                    tool_status_ctx = (
+                        status(f"[bright_black]Running {tc_name}…[/]")
+                        if not is_question and tc_name != "Task" and self.status_enabled and self._ui_enabled()
+                        else nullcontext()
                     )
-                    await self._emit(
-                        {
-                            "type": "tool_result",
-                            "tool_call_id": tc_id,
-                            "tool_name": tc_name,
-                            "tool_args": {},
-                            "tool_output": output,
-                            **outcome.metadata(),
-                        }
-                    )
-                    if self._ui_enabled():
-                        print()
-                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}(invalid_args)")
-                        print_tool_output(self._tool_output_name(tc_name), output)
-                    tool_results.append(
-                        {
-                            "tool_call_id": tc_id,
-                            "tool_name": tc_name,
-                            "tool_args": {},
-                            "output": output,
-                            "metadata": outcome.metadata(),
-                        }
-                    )
-                    continue
+                    durable_opts = {"durable": (journal, step)} if journal is not None else {}
+                    try:
+                        with tool_status_ctx:
+                            async with budget.time_limit():
+                                if is_question:
+                                    outcome = await self._execute_tool_with_hooks(tc_name, tc_input, **durable_opts)
+                                else:
+                                    outcome = await self._execute_interruptible_tool(
+                                        tc_name, tc_input, interrupt_queue, **durable_opts,
+                                    )
+                    except RuntimeBudgetExceeded as exc:
+                        if journal is not None:
+                            raise
+                        budget_stop = exc
+                        status_on_stop = "timeout" if exc.limit == "max_wall_time" else "refused"
+                        outcome = ToolOutcome(str(exc), status_on_stop)
 
-                await self._emit(
-                    {
-                        "type": "tool_call",
-                        "tool_call_id": tc_id,
-                        "tool_name": tc_name,
-                        "tool_args": tc_input,
-                        "note": parse_note or "",
-                    }
-                )
-
-                if self._ui_enabled():
-                    if tc_name == "Task":
-                        print()
-                        print_tool_call(
-                            f"{self._tool_log_prefix()}> Task: {tc_input.get('description', 'subtask')}"
+                    if is_question and not outcome.is_error:
+                        question = self._normalize_ask_user_payload(
+                            json.loads(outcome.text), question_id=step.step_id if step is not None else tc_id,
                         )
-                    elif tc_name == "Skill":
-                        print()
-                        print_tool_call(
-                            f"{self._tool_log_prefix()}> Loading skill: {tc_input.get('skill', '?')}"
-                        )
-                    else:
-                        args_preview = _format_tool_args(tc_input)
-                        print()
-                        print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({args_preview})")
+                        question["message_id"] = assistant_message_id
 
-                tool_status_ctx = (
-                    status(f"[bright_black]Running {tc_name}…[/]")
-                    if not is_question and tc_name != "Task" and self.status_enabled and self._ui_enabled()
-                    else nullcontext()
-                )
-                try:
-                    with tool_status_ctx:
-                        async with budget.time_limit():
-                            if is_question:
-                                outcome = await self._execute_tool_with_hooks(tc_name, tc_input)
-                            else:
-                                outcome = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
-                except RuntimeBudgetExceeded as exc:
-                    budget_stop = exc
-                    status_on_stop = "timeout" if exc.limit == "max_wall_time" else "refused"
-                    outcome = ToolOutcome(str(exc), status_on_stop)
+            if question is not None:
+                show_question(question)
 
-                if is_question and not outcome.is_error:
-                    raw_payload = json.loads(outcome.text)
-                    question = self._normalize_ask_user_payload(raw_payload, question_id=tc_id)
-                    question["message_id"] = assistant_message_id
-
-                    if not assistant_msg_appended:
-                        assistant_msg["content"] = question["prompt"] if not content.strip() else content
-                        assistant_msg["interaction_type"] = "askuserquestion"
-                        assistant_msg["question_id"] = question["question_id"]
-                        assistant_msg["question_prompt"] = question["prompt"]
-                        assistant_msg["question_options"] = list(question["options"])
-                        assistant_msg["question_allow_free_text"] = question["allow_free_text"]
-                        assistant_msg["question_required"] = question["required"]
-                        assistant_msg["question_pending"] = True
-                        messages.append(assistant_msg)
-                        assistant_msg_appended = True
-
+                async def receive_answer() -> dict[str, Any]:
+                    if durable_answer is not None and durable_answer["question_id"] == question["question_id"]:
+                        return self._normalize_ask_user_answer(durable_answer, question=question)
                     question_event: dict[str, Any] = {
                         "type": "ask_user_question",
                         "message_id": assistant_message_id,
                         "parent_user_message_id": parent_user_message_id,
-                        "question_id": question["question_id"],
-                        "prompt": question["prompt"],
-                        "options": list(question["options"]),
-                        "allow_free_text": question["allow_free_text"],
-                        "required": question["required"],
+                        **question,
                     }
                     if usage:
                         question_event["usage"] = dict(usage)
                     if compaction_context_usage:
                         question_event["context_usage"] = dict(compaction_context_usage)
                         question_event["context_compacted"] = True
+                    if journal is not None:
+                        question_event["data"] = {"durable_run_id": journal.run_id}
                     await self._emit(question_event)
-                    with budget.pause():
-                        answer = await self._resolve_ask_user_answer(question)
-                    assistant_msg["question_pending"] = False
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": answer["answer_text"],
-                            "message_id": self._new_message_id(),
-                            "answer_to_question_id": question["question_id"],
-                            "selected_option_value": answer["selected_option_value"],
-                        }
-                    )
-                    await self._emit(
-                        {
-                            "type": "ask_user_answer_received",
-                            "question_id": question["question_id"],
-                            "answer_text": answer["answer_text"],
-                            "selected_option_value": answer["selected_option_value"],
-                        }
-                    )
-                    continue
+                    return await self._resolve_ask_user_answer(question)
 
-                output = outcome.text
-                if parse_note and outcome.artifact_id is None and outcome.artifact_eligible:
-                    output = f"Warning: {parse_note}\n{output}"
-                await self._emit(
-                    {
-                        "type": "tool_result",
-                        "tool_call_id": tc_id,
-                        "tool_name": tc_name,
-                        "tool_args": tc_input,
-                        "tool_output": output,
-                        **outcome.metadata(),
-                        "note": parse_note or "",
-                    }
-                )
-                if tc_name == "TodoWrite" and outcome.status == "success":
-                    await self._emit_todo_snapshot()
-                if self._ui_enabled():
-                    print_tool_output(self._tool_output_name(tc_name), output)
-                if not is_question or budget_stop is None:
-                    tool_results.append(
-                        {
-                            "tool_call_id": tc_id,
-                            "tool_name": tc_name,
-                            "tool_args": tc_input,
-                            "output": output,
-                            "metadata": outcome.metadata(),
-                        }
-                    )
+                with budget.pause():
+                    answer = await journal.wait(step, "user_question", receive_answer, question=question) if (
+                        journal is not None
+                    ) else await receive_answer()
+                assistant_msg["question_pending"] = False
+                answer_message = {
+                    "role": "user",
+                    "content": answer["answer_text"],
+                    "message_id": self._new_message_id(),
+                    "answer_to_question_id": question["question_id"],
+                    "selected_option_value": answer["selected_option_value"],
+                }
+                if journal is not None:
+                    journal.finish_step(step, answer_message)
+                    answered_calls.add(index)
+                    answer_messages.append(answer_message)
+                else:
+                    messages.append(answer_message)
+                await self._emit({
+                    "type": "ask_user_answer_received",
+                    "question_id": question["question_id"],
+                    "answer_text": answer["answer_text"],
+                    "selected_option_value": answer["selected_option_value"],
+                })
+                continue
 
-            if not assistant_msg_appended:
-                messages.append(assistant_msg)
+            output = outcome.text
+            if not invalid and parse_note and outcome.artifact_id is None and outcome.artifact_eligible:
+                output = f"Warning: {parse_note}\n{output}"
+            result = result_message(tc_id, tc_name, tc_input, output, outcome)
+            if journal is not None:
+                journal.finish_step(step, result, artifact_id=outcome.artifact_id,
+                                    error=(outcome.hook_error or outcome.text) if outcome.is_error else None)
+            await self._emit({
+                "type": "tool_result", "tool_call_id": tc_id, "tool_name": tc_name, "tool_args": tc_input,
+                "tool_output": output, **outcome.metadata(), **({"note": parse_note or ""} if not invalid else {}),
+            })
+            if tc_name == "TodoWrite" and outcome.status == "success":
+                await self._emit_todo_snapshot()
+            if self._ui_enabled():
+                print_tool_output(self._tool_output_name(tc_name), output)
+            if not is_question or budget_stop is None:
+                tool_results.append(result)
 
-            for result in tool_results:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "message_id": self._new_message_id(),
-                        "parent_user_message_id": parent_user_message_id,
-                        "tool_call_id": result["tool_call_id"],
-                        "tool_name": result["tool_name"],
-                        "tool_args": result["tool_args"],
-                        "content": result["output"],
-                        **result["metadata"],
-                    }
-                )
-
-            if budget_stop is not None:
-                raise budget_stop
+        if not assistant_msg_appended:
+            messages.append(assistant_msg)
+        if journal is not None:
+            assistant_msg.pop("tool_calls", None)
+            model_calls = [
+                {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+                for index, (call_id, name, arguments) in enumerate(calls) if index not in answered_calls
+            ]
+            if model_calls:
+                assistant_msg["tool_calls"] = model_calls
+        # Keep tool responses adjacent to the assistant call batch on the wire.
+        messages.extend(tool_results)
+        messages.extend(answer_messages)
+        if budget_stop is not None:
+            raise budget_stop
 
     async def start_session(self) -> None:
         """Start the agent session."""

@@ -36,6 +36,7 @@ _DEFAULT_CONFIG_TEMPLATE = """# Minibot Default Configuration
 skills_dir: ../skills
 trace_dir: null
 file_checkpoints: false
+durable_execution: false
 
 llm:
   base_url: ${OPENAI_BASE_URL}
@@ -428,6 +429,7 @@ def load_config(
         runtime_budget=_parse_runtime_budget(default_config.get("runtime_budget", {})),
         tool_permissions=_parse_tool_permissions(default_config.get("tool_permissions", {})),
         file_checkpoints=default_config.get("file_checkpoints", False),
+        durable_execution=default_config.get("durable_execution", False),
     )
 
     return _config

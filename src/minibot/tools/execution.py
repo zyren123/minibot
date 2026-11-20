@@ -1,6 +1,7 @@
 """Shared tool dispatch with text-compatible hooks."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any
@@ -9,7 +10,7 @@ from ..core.artifacts import ArtifactError, current_artifacts
 from ..hooks.manager import HookManager
 from .builtin.artifact import ReadArtifactTool, SearchArtifactTool
 from .builtin.ask_user import AskUserQuestionTool
-from .permissions import current_permissions
+from .permissions import ApprovedCall, current_permissions
 from .registry import ToolRegistry
 from .result import ToolOutcome
 
@@ -17,6 +18,8 @@ from .result import ToolOutcome
 async def execute_with_hooks(
     registry: ToolRegistry, hooks: HookManager, name: str, args: dict[str, Any],
     *, actor: str = "agent",
+    before_effects: Callable[[], None] | None = None,
+    wait_for_approval: Callable[[Callable[[], Awaitable[ApprovedCall | None]]], Awaitable[ApprovedCall | None]] | None = None,
 ) -> ToolOutcome:
     permissions = current_permissions.get()
     call = None
@@ -24,11 +27,17 @@ async def execute_with_hooks(
     if permissions is not None and permissions.policy.mode != "off":
         if tool is None:
             return ToolOutcome(f"Unknown tool: {name}", "unknown_tool")
-        call = await permissions.authorize(name, args, tool, actor)
+        async def authorize() -> ApprovedCall | None:
+            return await permissions.authorize(name, args, tool, actor)
+
+        choice = permissions.policy.rules.get(name, permissions.policy.default)
+        call = await wait_for_approval(authorize) if choice == "ask" and wait_for_approval else await authorize()
         if call is None:
             return ToolOutcome("Tool execution refused by permissions.", "refused")
         args = call.args
 
+    if before_effects is not None:
+        before_effects()
     try:
         blocked, reason = await hooks.trigger_pre_tool_call(name, deepcopy(args) if call is not None else args)
     except Exception as exc:

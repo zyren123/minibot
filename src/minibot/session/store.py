@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -81,6 +82,43 @@ class SessionStore:
         with path.open("w", encoding="utf-8") as f:
             for message in messages:
                 f.write(json.dumps(message, ensure_ascii=False) + "\n")
+
+    def project_durable_messages(self, session_id: str, messages: list[dict]) -> None:
+        """Publish a journal snapshot idempotently while the run owns the session."""
+        path = self._find_path(session_id)
+        if path is None:
+            path = self.create(session_id)
+        previous = self._read_jsonl(path)
+        positions = {
+            message["message_id"]: index for index, message in enumerate(previous) if message.get("message_id")
+        }
+        for message in messages:
+            message_id = message.get("message_id")
+            if not message_id:
+                continue
+            if message_id not in positions:
+                positions[message_id] = len(previous)
+                previous.append(message)
+            elif message.get("interaction_type") == "askuserquestion":
+                index = positions[message_id]
+                previous[index] = {**previous[index], **message}
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as tmp:
+            temp_path = Path(tmp.name)
+            try:
+                for message in previous:
+                    tmp.write(json.dumps(message, ensure_ascii=False) + "\n")
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            except BaseException:
+                tmp.close()
+                temp_path.unlink(missing_ok=True)
+                raise
+        try:
+            temp_path.replace(path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def update_message(
         self,

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, TypedDict
 
+from ..core.run_store import DurableRunError, RunStore
 from ..session.manager import SessionManager
 from ..utils.output import print_panel, print_system
 
@@ -19,6 +21,7 @@ async def handle_session_cmd(
     raw_args: str,
     session_manager: SessionManager | None,
     current_session_id: str,
+    *, run_store: RunStore | None = None,
 ) -> SessionAction | None:
     """Dispatch /session subcommands. Returns an action for the REPL, or None."""
     if session_manager is None:
@@ -37,7 +40,7 @@ async def handle_session_cmd(
     if sub == "load":
         return await _load_session(session_manager, rest, current_session_id)
     if sub == "delete":
-        return _delete_session(session_manager, rest, current_session_id)
+        return _delete_session(session_manager, rest, current_session_id, run_store)
     if sub == "info":
         _info_session(session_manager, current_session_id)
         return None
@@ -139,6 +142,7 @@ def _delete_session(
     manager: SessionManager,
     session_id: str,
     current_id: str,
+    run_store: RunStore | None,
 ) -> SessionAction | None:
     if not session_id:
         print_system("Usage: /session delete <id>")
@@ -146,7 +150,13 @@ def _delete_session(
     if session_id == current_id:
         print_system("Cannot delete the current active session.")
         return None
-    if not manager.delete(session_id):
+    try:
+        with run_store.guard_session_mutation(session_id) if run_store is not None else nullcontext():
+            deleted = manager.delete(session_id)
+    except DurableRunError as exc:
+        print_system(str(exc))
+        return None
+    if not deleted:
         print_system(f"Session '{session_id}' not found.")
         return None
     print_system(f"Session '{session_id}' deleted.")

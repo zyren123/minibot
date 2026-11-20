@@ -405,7 +405,7 @@ teams:
 - [x] **大型工具输出卸载**。保存完整文本，支持同一会话内按范围读取及关键词搜索。[配置和使用](docs/context-offloading.md)
 - [x] **MCP Streamable HTTP 传输**。支持采用 2025 协议版本的远程端点。[配置说明](docs/mcp-streamable-http.md)
 - [x] **[文件检查点和回滚](docs/file-checkpoints.md)**。
-- [ ] **进程重启后的通用任务恢复**。
+- [x] **单 Agent 持久执行**。可选择启用运行日志，在进程重启后继续任务，并人工核对结果未知的工具调用。[配置和使用](docs/durable-execution.md)
 - [ ] **Vision**。原生支持多模态图像理解。
 
 ---

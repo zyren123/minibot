@@ -329,7 +329,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [x] **Large tool output offloading**. Store complete text for range reads and keyword searches within a session. [Configure context offloading](context-offloading.md)
 - [x] **MCP Streamable HTTP transport**. Connect to remote endpoints using the 2025 protocol revisions. [Configuration](mcp-streamable-http.md)
 - [x] **[File checkpoints and rollback](file-checkpoints.md)**.
-- [ ] **General task recovery after a process restart**.
+- [x] **Single-agent durable execution**. Opt in to resume after a process restart and manually resolve tool calls with unknown outcomes. [Configure durable execution](durable-execution.md)
 - [ ] **Vision**. Native multimodal image understanding.
 
 ---

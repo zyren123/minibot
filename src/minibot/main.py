@@ -4,6 +4,7 @@ import asyncio
 import atexit
 from pathlib import Path
 import sys
+from uuid import uuid4
 
 from .config import load_config
 from .agent import Agent, UserInterruptedError
@@ -37,6 +38,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/model": "Model management: /model [config]",
     "/team": "Team tools: /team [status|on|off]",
     "/session": "Session management: /session [list|new|load|delete|info]",
+    "/run": "Durable execution: /run [list|resume ID|abandon ID]",
     "/checkpoint": "File checkpoints: /checkpoint [list|diff ID|rollback ID]",
     "/paste": "Multiline input (end with '.')",
     "/reset": "Clear conversation history",
@@ -222,6 +224,19 @@ async def repl(agent: Agent) -> None:
     agent.ask_user_handler = _ask_user_handler
     agent.tool_approval_handler = _approve_tool
 
+    async def _generate(**options) -> None:
+        nonlocal approval_monitor
+        async with EscInterruptMonitor() as esc_monitor:
+            approval_monitor = esc_monitor
+            try:
+                await agent.run_loop(history, interrupt_queue=esc_monitor.queue, **options)
+            finally:
+                approval_monitor = None
+
+    def _publish_durable(messages: list[dict]) -> None:
+        if session_mgr is not None:
+            session_mgr.store.project_durable_messages(current_session_id, messages)
+
     try:
         while True:
             try:
@@ -336,10 +351,35 @@ async def repl(agent: Agent) -> None:
                 if cmd == "/checkpoint":
                     await handle_checkpoint_cmd(user_input.split()[1:], agent.file_checkpoints, _confirm)
                     continue
+                if cmd == "/run":
+                    store = agent.run_store
+                    args = user_input.split()[1:]
+                    if store is None:
+                        print_system("Durable execution is disabled.")
+                        continue
+                    try:
+                        if not args or args == ["list"]:
+                            runs = store.list_runs(current_session_id, incomplete_only=True)
+                            for run in runs:
+                                print_system(f"{run.run_id}  {run.status}  segment={run.segment}")
+                            if not runs:
+                                print_system("No unfinished durable runs in this session.")
+                        elif len(args) == 2 and args[0] == "resume":
+                            await _generate(resume_run_id=args[1], publish_messages=_publish_durable)
+                        elif len(args) == 2 and args[0] == "abandon":
+                            with store.claim(current_session_id, args[1]) as journal:
+                                journal.abandon()
+                        else:
+                            print_system("Usage: /run [list|resume ID|abandon ID]")
+                    except UserInterruptedError:
+                        print_system("Interrupted (ESC).")
+                    except Exception as exc:
+                        print_system(str(exc))
+                    continue
                 if cmd == "/session":
                     cmd_args = user_input.strip()[len("/session"):].strip()
                     action = await handle_session_cmd(
-                        cmd_args, session_mgr, current_session_id,
+                        cmd_args, session_mgr, current_session_id, run_store=agent.run_store,
                     )
                     if action is not None and "switch_to" in action:
                         current_session_id = action["switch_to"]
@@ -358,6 +398,18 @@ async def repl(agent: Agent) -> None:
                     print_system("Unknown command. Try /help")
                     continue
 
+            if agent.run_store is not None:
+                def seed() -> list[dict]:
+                    return [*history, {"role": "user", "content": user_input, "message_id": f"msg-{uuid4().hex[:12]}"}]
+
+                try:
+                    await _generate(seed_messages=seed, publish_messages=_publish_durable)
+                except UserInterruptedError:
+                    print_system("Interrupted (ESC).")
+                except Exception as exc:
+                    print_system(str(exc))
+                continue
+
             history.append({"role": "user", "content": user_input})
             if session_mgr is not None:
                 session_mgr.append_message(
@@ -367,12 +419,7 @@ async def repl(agent: Agent) -> None:
             pre_len = len(history)
 
             try:
-                async with EscInterruptMonitor() as esc_monitor:
-                    approval_monitor = esc_monitor
-                    try:
-                        await agent.run_loop(history, interrupt_queue=esc_monitor.queue)
-                    finally:
-                        approval_monitor = None
+                await _generate()
             except UserInterruptedError:
                 print_system("Interrupted (ESC).")
                 history.append({"role": "assistant", "content": "[Generation interrupted by user via ESC]"})

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from contextlib import nullcontext
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import uuid
 from typing import Any, AsyncIterator, Callable, Iterable, Iterator
@@ -11,6 +12,7 @@ from typing import Any, AsyncIterator, Callable, Iterable, Iterator
 from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
 from ..core.model_context import ContextWindowExceeded
+from ..core.run_store import DurableRunError, DurableRunPaused, RunState, RunStore, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
 from ..file_checkpoints import FileCheckpoint, FileCheckpointError, GitFileCheckpoints, finish_file_operation
@@ -99,10 +101,14 @@ class Minibot:
         allow_subagent_delegation: bool = True,
         allow_team_tools: bool = True,
         tool_approval_handler: ToolApprovalHandler | None = None,
+        durable_execution: bool | None = None,
     ) -> None:
         if config is None:
             resolved_workdir = Path(workdir).resolve() if workdir is not None else None
             config = load_config(workdir=resolved_workdir)
+
+        if durable_execution is not None:
+            config = replace(config, durable_execution=durable_execution)
 
         if sessions_dir is not None:
             config.session.sessions_dir = str(Path(sessions_dir).expanduser().resolve())
@@ -126,6 +132,7 @@ class Minibot:
         self._pending_question: dict[str, Any] | None = None
         self._pending_question_future: "asyncio.Future[dict[str, Any]] | None" = None
         self._active_stream: _StreamPersistenceState | None = None
+        self._active_durable_segment = False
         self._tool_approval_handler = tool_approval_handler
         self._pending_tool_approvals: dict[str, asyncio.Future[bool]] = {}
 
@@ -159,8 +166,8 @@ class Minibot:
 
     def set_session(self, session_id: str) -> None:
         """Switch active session (and load its history if persistence is enabled)."""
-        if self._active_stream is not None:
-            raise RuntimeError("Cannot switch sessions while a stream is running")
+        if self._active_stream is not None or self._active_durable_segment:
+            raise RuntimeError("Cannot switch sessions while generation is running")
         self.session_id = self._resolve_session_id(session_id)
         self.agent.reset_session(self.session_id)
         self.messages = (
@@ -170,8 +177,8 @@ class Minibot:
         )
 
     def create_session(self) -> str:
-        if self._active_stream is not None:
-            raise RuntimeError("Cannot switch sessions while a stream is running")
+        if self._active_stream is not None or self._active_durable_segment:
+            raise RuntimeError("Cannot switch sessions while generation is running")
         if self._session_manager is None:
             session_id = str(uuid.uuid4())[:8]
         else:
@@ -319,6 +326,21 @@ class Minibot:
             return
 
         event_type = event.get("type")
+        if self.agent.run_store is not None:
+            if event_type == "ask_user_question":
+                durable_run_id = (event.get("data") or {}).get("durable_run_id")
+                self._session_manager.save_runtime_state(state.session_id, {
+                    "version": 1,
+                    "state": "awaiting_user_answer",
+                    "durable_run_id": durable_run_id,
+                    "assistant_message_id": event.get("message_id"),
+                    "pending_question": {
+                        key: event[key] for key in (
+                            "message_id", "question_id", "prompt", "options", "allow_free_text", "required",
+                        )
+                    },
+                })
+            return
         message_id = self._event_message_id(event)
         parent_user_message_id = self._event_parent_user_message_id(event)
         if message_id is not None and message_id not in state.assistant_parent_ids:
@@ -475,6 +497,77 @@ class Minibot:
                 )
         self._session_manager.delete_runtime_state(state.session_id, expected=saved)
 
+    def _durable_store(self) -> RunStore:
+        if self.agent.run_store is None:
+            raise DurableRunError("Durable execution is disabled.")
+        return self.agent.run_store
+
+    def list_runs(self, *, incomplete_only: bool = False) -> list[RunState]:
+        """Discover durable runs in this workspace and active session."""
+        return self._durable_store().list_runs(self.session_id, incomplete_only=incomplete_only)
+
+    def list_run_steps(self, run_id: str) -> list[StepState]:
+        """Inspect the ordered, committed journal for a run in this session."""
+        return self._durable_store().list_steps(self.session_id, run_id)
+
+    def pause_run(self, run_id: str) -> bool:
+        """Request a pause at the next safe boundary of an active run."""
+        return self._durable_store().pause(self.session_id, run_id)
+
+    def resolve_run_step(self, run_id: str, step_id: str, output: str, *, is_error: bool = False) -> None:
+        """Record the verified outcome of an ambiguous step without running the tool."""
+        if not isinstance(output, str) or type(is_error) is not bool:
+            raise ValueError("Recovery requires tool result text and a boolean error flag.")
+        with self._durable_store().claim(self.session_id, run_id) as journal:
+            journal.resolve(step_id, output, is_error=is_error)
+
+    def abandon_run(self, run_id: str) -> None:
+        """Close an unfinished run after the active owner exits."""
+        with self._durable_store().claim(self.session_id, run_id) as journal:
+            journal.abandon()
+            if self._session_manager is not None:
+                saved = self._session_manager.load_runtime_state(self.session_id)
+                if saved and saved.get("durable_run_id") == journal.run_id:
+                    message_id = saved.get("assistant_message_id")
+                    if message_id:
+                        self._session_manager.update_message(
+                            self.session_id, message_id, lambda message: {**message, "question_pending": False},
+                        )
+                    self._session_manager.delete_runtime_state(self.session_id, expected=saved)
+
+    async def resume_run(
+        self,
+        run_id: str,
+        *,
+        reasoning_effort: str | None = None,
+    ) -> ChatResult:
+        """Continue a durable run in the active session using current tool policy."""
+        self._durable_store()
+        if self._active_stream is not None or self._active_durable_segment:
+            raise RuntimeError("Generation is already running on this bot")
+        prev_stream = self.agent.stream_enabled
+        self.agent.set_stream_enabled(False)
+        try:
+            messages, usage = await self._run_durable_once(
+                prompt=None, interrupt_queue=None, reasoning_effort=reasoning_effort, resume_run_id=run_id,
+            )
+        finally:
+            self.agent.set_stream_enabled(prev_stream)
+        return ChatResult(self.session_id, messages, _last_assistant_text(messages), usage)
+
+    def resume_run_stream(
+        self,
+        run_id: str,
+        *,
+        reasoning_effort: str | None = None,
+        stop_on_ask_user_question: bool = False,
+    ) -> AsyncIterator[StreamEvent]:
+        """Continue a durable run and yield the events it produces."""
+        self._durable_store()
+        return self._stream_events(
+            None, None, reasoning_effort, stop_on_ask_user_question, resume_run_id=run_id,
+        )
+
     def _file_checkpoint_store(self) -> GitFileCheckpoints:
         if self.agent.file_checkpoints is None:
             raise FileCheckpointError("File checkpoints are disabled.")
@@ -516,7 +609,9 @@ class Minibot:
             return False
         if self._active_stream is not None and self._active_stream.session_id == session_id:
             raise RuntimeError("Cannot delete a session while its stream is running")
-        ok = self._session_manager.delete(session_id)
+        store = self.agent.run_store
+        with store.guard_session_mutation(session_id) if store is not None else nullcontext():
+            ok = self._session_manager.delete(session_id)
         if ok and session_id == self.session_id:
             self.create_session()
         return ok
@@ -666,15 +761,21 @@ class Minibot:
     async def resume_pending_question_stream(
         self,
         *,
-        question_id: str,  # noqa: ARG002
-        answer_text: str,  # noqa: ARG002
-        selected_option_value: str | None = None,  # noqa: ARG002
+        question_id: str,
+        answer_text: str,
+        selected_option_value: str | None = None,
         reasoning_effort: str | None = None,
         parent_run_id: str | None = None,
+        durable_run_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Resume a persisted pending-question turn until completion or the next pause."""
+        durable_answer = {
+            "question_id": question_id, "answer_text": answer_text,
+            "selected_option_value": selected_option_value,
+        } if durable_run_id is not None else None
         async for event in self._stream_events(
             None, None, reasoning_effort, True, parent_run_id=parent_run_id,
+            resume_run_id=durable_run_id, durable_answer=durable_answer,
         ):
             yield event
 
@@ -689,8 +790,8 @@ class Minibot:
         if session_id is not None and session_id != self.session_id:
             self.set_session(session_id)
 
-        if self._active_stream is not None:
-            raise RuntimeError("A stream is already running on this bot")
+        if self._active_stream is not None or self._active_durable_segment:
+            raise RuntimeError("Generation is already running on this bot")
         queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
         await self._event_router.set_queue(queue)
         prev_stream = self.agent.stream_enabled
@@ -753,7 +854,10 @@ class Minibot:
     async def _stream_events(
         self, prompt: str | None, session_id: str | None, reasoning_effort: str | None,
         stop_on_ask_user_question: bool,
-        *, parent_run_id: str | None = None,
+        *,
+        parent_run_id: str | None = None,
+        resume_run_id: str | None = None,
+        durable_answer: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         if session_id == "":
             if self._active_stream is not None:
@@ -768,8 +872,8 @@ class Minibot:
         detached = False
 
         async def produce() -> None:
-            if self._active_stream is not None:
-                raise RuntimeError("A stream is already running on this bot")
+            if self._active_stream is not None or self._active_durable_segment:
+                raise RuntimeError("Generation is already running on this bot")
             with own_stream(self._session_manager, state.session_id, state.run_id):
                 if state.session_id != self.session_id:
                     self.set_session(state.session_id)
@@ -777,21 +881,29 @@ class Minibot:
                 self._active_interrupt_queue = interrupt_queue
                 prev_stream = self.agent.stream_enabled
                 try:
-                    resume_run_id = parent_run_id
-                    if (self.config.trace_dir is not None and prompt is None
-                            and resume_run_id is None and self._session_manager is not None):
+                    trace_parent_run_id = parent_run_id
+                    if (self.agent.run_store is None and self.config.trace_dir is not None and prompt is None
+                            and trace_parent_run_id is None and self._session_manager is not None):
                         saved = self._session_manager.load_runtime_state(state.session_id)
                         if saved and saved.get("state") == "awaiting_user_answer":
-                            resume_run_id = saved.get("trace_run_id")
+                            trace_parent_run_id = saved.get("trace_run_id")
                     await self._event_router.set_queue(None if detached else queue)
                     await self._event_router.set_tap(
                         lambda event: self._handle_stream_persistence_event(event, state)
                     )
                     self.agent.set_stream_enabled(True)
-                    if prompt is None:
+                    if self.agent.run_store is not None:
+                        await self._run_durable_once(
+                            prompt=prompt, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                            run_id=state.run_id, parent_run_id=parent_run_id,
+                            resume_run_id=resume_run_id, durable_answer=durable_answer,
+                        )
+                    elif resume_run_id is not None:
+                        raise DurableRunError("Durable execution is disabled.")
+                    elif prompt is None:
                         await self._run_existing_messages_once(
                             interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
-                            parent_run_id=resume_run_id,
+                            parent_run_id=trace_parent_run_id,
                         )
                     else:
                         await self._run_once(
@@ -800,7 +912,7 @@ class Minibot:
                 except asyncio.CancelledError:
                     self._clear_streaming_state(state, interrupted=True)
                     raise
-                except UserInterruptedError:
+                except (UserInterruptedError, DurableRunPaused):
                     self._clear_streaming_state(state, interrupted=True)
                 except Exception as exc:
                     await self._event_router.emit({
@@ -930,6 +1042,53 @@ class Minibot:
             raise interrupted_error
         return self.messages, usage
 
+    async def _run_durable_once(
+        self,
+        *,
+        prompt: str | None,
+        interrupt_queue: "asyncio.Queue[None] | None",
+        reasoning_effort: str | None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        resume_run_id: str | None = None,
+        durable_answer: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
+        if self._active_durable_segment:
+            raise RuntimeError("Generation is already running on this bot")
+        self._active_durable_segment = True
+        session_id = self.session_id
+        working = list(self.messages)
+
+        def seed() -> list[dict[str, Any]]:
+            messages = self._session_manager.load(session_id) if self._session_manager is not None else working[:]
+            if prompt is not None:
+                messages.append({"role": "user", "content": prompt, "message_id": _new_message_id()})
+            return messages
+
+        def publish(messages: list[dict[str, Any]]) -> None:
+            if self._session_manager is None:
+                self.messages = messages
+                return
+            self._session_manager.store.project_durable_messages(session_id, messages)
+            saved = self._session_manager.load_runtime_state(session_id)
+            if saved and saved.get("state") == "awaiting_user_answer":
+                question = saved.get("pending_question") or {}
+                if any(message.get("answer_to_question_id") == question.get("question_id") for message in messages
+                       if message.get("answer_to_question_id")):
+                    self._session_manager.delete_runtime_state(session_id, expected=saved)
+
+        try:
+            result = await self.agent.run_loop(
+                working, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                run_id=run_id, parent_run_id=parent_run_id, resume_run_id=resume_run_id,
+                durable_answer=durable_answer, seed_messages=seed, publish_messages=publish,
+            )
+            return result, _last_assistant_usage(result)
+        finally:
+            self._active_durable_segment = False
+            if self._session_manager is not None:
+                self.messages = self._session_manager.load(session_id)
+
     async def _run_once(
         self,
         prompt: str,
@@ -937,6 +1096,10 @@ class Minibot:
         interrupt_queue: "asyncio.Queue[None] | None",
         reasoning_effort: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
+        if self.agent.run_store is not None:
+            return await self._run_durable_once(
+                prompt=prompt, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+            )
         user_msg = {"role": "user", "content": prompt, "message_id": _new_message_id()}
         self.messages.append(user_msg)
         if self._session_manager is not None:

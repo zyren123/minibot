@@ -120,6 +120,7 @@ def test_bootstrap_global_config_writes_templates(tmp_path):
     assert (app_home / "config" / "mcp_servers.yaml").exists()
     assert config.tools.timeout == 60
     assert config.llm.stream_enabled is True
+    assert config.durable_execution is False
     assert config.teams.debug_teammate_output is False
     assert config.skills_dir == (app_home / "skills").resolve()
     assert config.memory.memory_dir == str((app_home / "memory").resolve())
@@ -217,6 +218,7 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
         """
 skills_dir: custom-skills
 file_checkpoints: true
+durable_execution: true
 # 保存完整的工具输出
 context_offloading:
   enabled: false
@@ -264,6 +266,7 @@ tools:
     )
 
     assert config.file_checkpoints is True
+    assert config.durable_execution is True
     assert config.context_offloading.enabled is False
     assert config.context_offloading.threshold_chars == 234
     assert config.context_offloading.max_artifact_bytes == 262144
@@ -284,3 +287,10 @@ tools:
     assert config.tools.bash.cpus == 0.5
     assert config.tools.bash.pids_limit == 32
     assert observed_encodings == ["utf-8"]
+
+
+def test_durable_execution_requires_a_boolean(tmp_path):
+    app_home = tmp_path / "app-home"
+    _write(app_home / "config" / "default.yaml", 'durable_execution: "true"\n')
+    with pytest.raises(ValueError, match="durable_execution must be a boolean"):
+        load_config(workdir=tmp_path, app_home=app_home, project_root=tmp_path)

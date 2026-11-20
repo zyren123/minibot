@@ -403,7 +403,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [x] **Almacenamiento de resultados extensos**. Guarda el texto completo para leer rangos y buscar palabras dentro de una sesión. [Configurar el almacenamiento](docs/context-offloading.md)
 - [x] **Transporte Streamable HTTP para MCP**. Conecta con servidores remotos que usan las revisiones de protocolo de 2025. [Configuración](docs/mcp-streamable-http.md)
 - [x] **[Puntos de control y reversión de cambios en archivos](docs/file-checkpoints.md)**.
-- [ ] **Recuperación general de tareas tras reiniciar un proceso**.
+- [x] **Ejecución durable de un agente**. Activa el registro para reanudar tareas tras un reinicio y resolver manualmente los resultados inciertos. [Configuración y uso](docs/durable-execution.md)
 - [ ] **Visión**. Soporte nativo para la comprensión de imágenes multimodales.
 
 ---
