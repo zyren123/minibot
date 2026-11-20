@@ -31,6 +31,7 @@ _config: Config | None = None
 _DEFAULT_CONFIG_TEMPLATE = """# Minibot Default Configuration
 
 skills_dir: ../skills
+trace_dir: null
 
 llm:
   base_url: ${OPENAI_BASE_URL}
@@ -395,6 +396,7 @@ def load_config(
         teams=_parse_teams_config(default_config.get("teams")),
         subagents=_parse_subagents_config(default_config.get("subagents")),
         session=_parse_session_config(default_config.get("session"), app_home),
+        trace_dir=default_config.get("trace_dir"),
     )
 
     return _config

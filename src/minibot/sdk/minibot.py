@@ -422,6 +422,7 @@ class Minibot:
                 {
                     "version": 1,
                     "state": "awaiting_user_answer",
+                    **({"trace_run_id": state.run_id} if self.config.trace_dir is not None else {}),
                     "assistant_message_id": message_id,
                     "pending_question": {
                         "question_id": question_id,
@@ -599,11 +600,11 @@ class Minibot:
         answer_text: str,  # noqa: ARG002
         selected_option_value: str | None = None,  # noqa: ARG002
         reasoning_effort: str | None = None,
+        parent_run_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Resume a persisted pending-question turn until completion or the next pause."""
-        async for event in self.stream_existing_messages(
-            reasoning_effort=reasoning_effort,
-            stop_on_ask_user_question=True,
+        async for event in self._stream_events(
+            None, None, reasoning_effort, True, parent_run_id=parent_run_id,
         ):
             yield event
 
@@ -682,6 +683,7 @@ class Minibot:
     async def _stream_events(
         self, prompt: str | None, session_id: str | None, reasoning_effort: str | None,
         stop_on_ask_user_question: bool,
+        *, parent_run_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         if session_id == "":
             if self._active_stream is not None:
@@ -705,6 +707,12 @@ class Minibot:
                 self._active_interrupt_queue = interrupt_queue
                 prev_stream = self.agent.stream_enabled
                 try:
+                    resume_run_id = parent_run_id
+                    if (self.config.trace_dir is not None and prompt is None
+                            and resume_run_id is None and self._session_manager is not None):
+                        saved = self._session_manager.load_runtime_state(state.session_id)
+                        if saved and saved.get("state") == "awaiting_user_answer":
+                            resume_run_id = saved.get("trace_run_id")
                     await self._event_router.set_queue(None if detached else queue)
                     await self._event_router.set_tap(
                         lambda event: self._handle_stream_persistence_event(event, state)
@@ -713,6 +721,7 @@ class Minibot:
                     if prompt is None:
                         await self._run_existing_messages_once(
                             interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                            parent_run_id=resume_run_id,
                         )
                     else:
                         await self._run_once(
@@ -801,17 +810,25 @@ class Minibot:
         *,
         interrupt_queue: "asyncio.Queue[None] | None",
         reasoning_effort: str | None,
+        parent_run_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
         pre_len = len(self.messages)
         usage: dict[str, int] | None = None
         interrupted_error: UserInterruptedError | None = None
         parent_user_message_id = _last_user_message_id(self.messages)
+        trace_options: dict[str, Any] = {}
+        if self.config.trace_dir is not None:
+            trace_options = {
+                "run_id": self._active_stream.run_id if self._active_stream is not None else None,
+                "parent_run_id": parent_run_id,
+            }
 
         try:
             await self.agent.run_loop(
                 self.messages,
                 interrupt_queue=interrupt_queue,
                 reasoning_effort=reasoning_effort,
+                **trace_options,
             )
         except UserInterruptedError as exc:
             interrupted_error = exc

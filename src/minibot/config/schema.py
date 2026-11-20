@@ -153,6 +153,7 @@ class Config:
     teams: TeamsConfig = field(default_factory=TeamsConfig)
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    trace_dir: str | Path | None = None
 
     def __post_init__(self):
         if isinstance(self.workdir, str):
@@ -167,3 +168,6 @@ class Config:
             self.project_root = self.workdir
         if self.app_home is None:
             self.app_home = self.workdir / ".minibot"
+        if self.trace_dir is not None:
+            trace_path = Path(self.trace_dir).expanduser()
+            self.trace_dir = trace_path if trace_path.is_absolute() else self.app_home / trace_path

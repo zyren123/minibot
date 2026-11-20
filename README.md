@@ -113,6 +113,7 @@ MiniBot 采用极其精简的模块化设计，没有任何复杂的类继承链
 不使用 Pydantic 生成 Schema，而是直接解析 Python 函数签名。
 - **实现**：`src/minibot/tools/`
 - Bash 支持可选 Docker 隔离，默认仍在本地执行。参见 [Bash isolation](docs/bash-isolation.md)。
+- 可选 JSONL 执行记录支持运行关联、工具状态和耗时，默认关闭。参见 [Execution traces](docs/run-traces.md)。
 - **特性**：支持 `Bash` 执行、文件 IO，以及动态注册机制。支持 **元工具 (Meta-Tools)**，即“创造工具的工具”。
 
 ### 3. 🔗 MCP Integration (模型上下文协议)

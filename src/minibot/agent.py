@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import datetime
 import json
+from pathlib import Path
 import uuid
 from typing import Any, Literal
 
 from .config import Config, get_config
+from .traces import RunTrace, RunStatus
 from .core.client import LLMClient
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
@@ -130,6 +133,7 @@ class Agent:
         self.session_id = session_id or str(uuid.uuid4())[:8]
         self.extra_system_prompt = (extra_system_prompt or "").strip()
         self.event_sink = event_sink
+        self._trace_context: ContextVar[RunTrace | None] = ContextVar("run_trace", default=None)
         self.role: AgentRole = role
         self.team_role: Literal["lead", "teammate"] = "teammate" if role == "teammate" else "lead"
         self.team_id = team_id
@@ -207,6 +211,9 @@ class Agent:
 
     async def _emit(self, event: StreamEvent) -> None:
         """Emit one structured event if an event sink is configured."""
+        trace = self._trace_context.get()
+        if trace is not None:
+            trace.observe(event)
         if self.event_sink is None:
             return
         try:
@@ -1355,6 +1362,40 @@ You are now live. Await instructions and begin the loop.""",
         raise UserInterruptedError("Interrupted by ESC")
 
     async def run_loop(
+        self,
+        messages: list[dict],
+        *,
+        interrupt_queue: "asyncio.Queue[None] | None" = None,
+        reasoning_effort: str | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> list[dict]:
+        """Run one execution segment, recording only allowlisted metadata when enabled."""
+        trace = (
+            RunTrace(Path(self.config.trace_dir), self.session_id,
+                     run_id=run_id, parent_run_id=parent_run_id)
+            if self.config.trace_dir is not None else None
+        )
+        token = self._trace_context.set(trace)
+        status: RunStatus = "failed"
+        try:
+            result = await self._run_loop(
+                messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+            )
+            status = "completed"
+            return result
+        except UserInterruptedError:
+            status = "waiting_for_user" if trace is not None and trace.waiting else "interrupted"
+            raise
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            status = "interrupted"
+            raise
+        finally:
+            self._trace_context.reset(token)
+            if trace is not None:
+                trace.close(status)
+
+    async def _run_loop(
         self,
         messages: list[dict],
         *,

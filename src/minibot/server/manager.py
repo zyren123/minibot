@@ -720,11 +720,16 @@ class AgentManager:
 
         bot = await self.get_bot(bot_id, session_id)
         if hasattr(bot, "resume_pending_question_stream"):
+            trace_options = (
+                {"parent_run_id": runtime_state["trace_run_id"]}
+                if runtime_state.get("trace_run_id") else {}
+            )
             async for event in bot.resume_pending_question_stream(
                 question_id=question_id,
                 answer_text=answer_text,
                 selected_option_value=selected_option_value,
                 reasoning_effort=reasoning_effort,
+                **trace_options,
             ):
                 yield event
             return

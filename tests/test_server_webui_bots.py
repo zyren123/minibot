@@ -28,6 +28,48 @@ def client(server_env: dict[str, Path]) -> TestClient:
     return TestClient(app)
 
 
+@pytest.mark.asyncio
+async def test_answer_stream_preserves_trace_parent_after_cache_restart(server_env, monkeypatch):
+    import json
+    from src.minibot.server.manager import AgentManager
+    from tests.test_tool_outcomes import TurnClient, call
+    from tests.test_run_traces import records
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    manager._base_config.trace_dir = server_env["home"] / "traces"
+    manager._base_config.mcp.enabled = False
+    manager._base_config.teams.enabled = False
+    bot_id = (await manager.create_bot(name="Trace resume"))["bot_id"]
+    sessions = manager.sessions_for(bot_id)
+    session_id = sessions.create()
+    bot = await manager.get_bot(bot_id, session_id)
+    bot.agent.client = TurnClient([call("askuserquestion", json.dumps({"prompt": "Choose"}))])
+    async for _ in bot.stream("run", stop_on_ask_user_question=True):
+        pass
+    first, = records(manager._base_config.trace_dir)
+    original_get = manager.get_bot
+
+    async def get_bot(*args):
+        resumed = await original_get(*args)
+        assert resumed is not bot
+        resumed.agent.client = TurnClient([])
+        return resumed
+
+    monkeypatch.setattr(manager, "get_bot", get_bot)
+    async for _ in manager.submit_user_answer_stream(bot_id, session_id, {
+        "question_id": "call-1", "answer_text": "Answer",
+    }):
+        pass
+    runs = records(manager._base_config.trace_dir)
+    resumed, = [run for run in runs if run[0]["parent_run_id"]]
+    assert resumed[0]["parent_run_id"] == first[0]["run_id"]
+    assert first[-1]["status"] == "waiting_for_user"
+    assert resumed[-1]["status"] == "completed"
+    messages = sessions.load(session_id)
+    assert any(message.get("answer_to_question_id") == "call-1" for message in messages)
+    assert messages[-1]["content"] == "done"
+
+
 def test_bots_crud_and_config_persistence(client: TestClient, server_env: dict[str, Path]) -> None:
     resp = client.get("/api/bots")
     assert resp.status_code == 200
