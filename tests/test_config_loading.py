@@ -218,6 +218,10 @@ def test_load_config_reads_yaml_as_utf8(tmp_path, monkeypatch):
 skills_dir: custom-skills
 llm:
   model: 模型😀
+runtime_budget:
+  max_llm_calls: 4
+  max_wall_time: 12.5
+  max_output_tokens: 900
 tools:
   bash:
     backend: docker
@@ -245,6 +249,10 @@ tools:
     )
 
     assert config.llm.model == "模型😀"
+    assert config.runtime_budget.max_llm_calls == 4
+    assert config.runtime_budget.max_wall_time == 12.5
+    assert config.runtime_budget.max_output_tokens == 900
+    assert config.runtime_budget.max_tool_calls == 100
     assert config.tools.bash.backend == "docker"
     assert config.tools.bash.memory_mb == 256
     assert config.tools.bash.cpus == 0.5

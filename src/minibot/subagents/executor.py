@@ -6,7 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ..config.schema import RuntimeBudgetConfig
 from ..core.client import LLMClient
+from ..core.runtime_budget import RuntimeBudget, current_budget
 from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
 from ..tools.result import ToolOutcome
@@ -32,6 +34,7 @@ class SubagentExecutor:
         hook_manager: HookManager,
         workdir: Path,
         skill_loader: "SkillLoader | None" = None,
+        budget_limits: RuntimeBudgetConfig | None = None,
     ):
         self.client = client
         self.tool_registry = tool_registry
@@ -39,6 +42,7 @@ class SubagentExecutor:
         self.hook_manager = hook_manager
         self.workdir = workdir
         self.skill_loader = skill_loader
+        self.budget_limits = budget_limits or RuntimeBudgetConfig()
 
     def _get_tools_for_agent(self, agent_type: str) -> list[dict]:
         """Get tool definitions for an agent type."""
@@ -86,6 +90,7 @@ class SubagentExecutor:
 
 Complete the task and return a clear, concise summary."""
 
+        budget = current_budget.get() or RuntimeBudget(self.budget_limits)
         sub_tools = self._get_tools_for_agent(agent_type)
         allowed_tool_names = frozenset(tool["function"]["name"] for tool in sub_tools)
         sub_messages = [{"role": "user", "content": prompt}]
@@ -139,18 +144,23 @@ Complete the task and return a clear, concise summary."""
                     status.tool_count = tool_count
                     status.tick()
 
-                response = await self.client.create_message_async(
-                    messages=sub_messages,
-                    system=sub_system,
-                    tools=sub_tools,
-                    max_tokens=8000,
-                )
+                allowance = budget.start_model(sub_messages, sub_system, sub_tools, 8000)
+                async with budget.time_limit():
+                    response = await self.client.create_message_async(
+                        messages=sub_messages,
+                        system=sub_system,
+                        tools=sub_tools,
+                        max_tokens=allowance.max_tokens,
+                    )
 
                 choice = response.choices[0]
                 assistant_message = choice.message
                 finish_reason = choice.finish_reason
                 content = assistant_message.content or ""
                 tool_calls = assistant_message.tool_calls or []
+                budget.finish_model(allowance, getattr(response, "usage", None), (
+                    str(content), str(getattr(assistant_message, "reasoning_content", None) or ""), tool_calls,
+                ))
 
                 if finish_reason != "tool_calls":
                     break
@@ -161,6 +171,7 @@ Complete the task and return a clear, concise summary."""
                 results: list[dict[str, Any]] = []
 
                 for tc in tool_calls:
+                    budget.start_tool()
                     tool_count += 1
                     tc_name = tc.function.name
                     if status is not None:
@@ -180,9 +191,10 @@ Complete the task and return a clear, concise summary."""
                             )[:50000]
                             outcome = ToolOutcome(output, "invalid_arguments")
                         else:
-                            outcome = await execute_with_hooks(
-                                self.tool_registry, self.hook_manager, tc_name, tc_input,
-                            )
+                            async with budget.time_limit():
+                                outcome = await execute_with_hooks(
+                                    self.tool_registry, self.hook_manager, tc_name, tc_input,
+                                )
                             if parse_note:
                                 outcome = replace(outcome, text=f"Warning: {parse_note}\n{outcome.text}")
                     results.append({"tool_call_id": tc.id, "output": outcome.text, "metadata": outcome.metadata()})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from contextlib import nullcontext
 from contextlib import suppress
 from contextvars import ContextVar
@@ -15,6 +16,7 @@ from typing import Any, Literal
 from .config import Config, get_config
 from .traces import RunTrace, RunStatus
 from .core.client import LLMClient
+from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
 from .tools.result import ToolOutcome
@@ -200,6 +202,7 @@ class Agent:
             hook_manager=self.hook_manager,
             workdir=self.workdir,
             skill_loader=self.skill_loader,
+            budget_limits=self.config.runtime_budget,
         )
 
         self._register_tools()
@@ -1116,7 +1119,8 @@ You are now live. Await instructions and begin the loop.""",
         messages: list[dict],
         system: str,
         tools: list[dict] | None,
-        max_tokens: int,
+        budget: RuntimeBudget,
+        allowance: ModelAllowance,
         assistant_message_id: str,
         parent_user_message_id: str | None,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
@@ -1143,42 +1147,18 @@ You are now live. Await instructions and begin the loop.""",
             thinking_ctx.__enter__()
             thinking_open = True
 
-            if interrupt_queue is None:
-                stream = await self.client.create_message_stream_async(
+            self._drain_interrupt_queue(interrupt_queue)
+            stream = await self._await_model_or_interrupt(
+                self.client.create_message_stream_async(
                     messages=messages,
                     system=system,
                     tools=tools,
-                    max_tokens=max_tokens,
+                    max_tokens=allowance.max_tokens,
                     reasoning_effort=reasoning_effort,
-                )
-            else:
-                self._drain_interrupt_queue(interrupt_queue)
-                llm_task = asyncio.create_task(
-                    self.client.create_message_stream_async(
-                        messages=messages,
-                        system=system,
-                        tools=tools,
-                        max_tokens=max_tokens,
-                        reasoning_effort=reasoning_effort,
-                    )
-                )
-                interrupt_task = asyncio.create_task(interrupt_queue.get())
-                done, _pending = await asyncio.wait(
-                    {llm_task, interrupt_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if llm_task in done:
-                    interrupt_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await interrupt_task
-                    stream = await llm_task
-                else:
-                    llm_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await llm_task
-                    with suppress(Exception):
-                        interrupt_task.result()
-                    raise UserInterruptedError("Interrupted by ESC")
+                ),
+                interrupt_queue,
+                close_abandoned_stream=True,
+            )
 
             iterator = stream.__aiter__()
             while True:
@@ -1195,24 +1175,29 @@ You are now live. Await instructions and begin the loop.""",
                         chunk = await iterator.__anext__()
                     else:
                         next_chunk_task = asyncio.create_task(iterator.__anext__())
-                        while True:
-                            done, _pending = await asyncio.wait(
-                                {next_chunk_task},
-                                timeout=0.1,
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-                            if next_chunk_task in done:
-                                break
-                            try:
-                                interrupt_queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                pass
-                            else:
-                                next_chunk_task.cancel()
-                                with suppress(asyncio.CancelledError):
-                                    await next_chunk_task
-                                raise UserInterruptedError("Interrupted by ESC")
-                        chunk = await next_chunk_task
+                        try:
+                            while True:
+                                done, _pending = await asyncio.wait(
+                                    {next_chunk_task},
+                                    timeout=0.1,
+                                    return_when=asyncio.FIRST_COMPLETED,
+                                )
+                                if next_chunk_task in done:
+                                    break
+                                try:
+                                    interrupt_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                                else:
+                                    next_chunk_task.cancel()
+                                    with suppress(asyncio.CancelledError):
+                                        await next_chunk_task
+                                    raise UserInterruptedError("Interrupted by ESC")
+                            chunk = await next_chunk_task
+                        except BaseException:
+                            next_chunk_task.cancel()
+                            await asyncio.gather(next_chunk_task, return_exceptions=True)
+                            raise
                 except StopAsyncIteration:
                     break
 
@@ -1284,6 +1269,13 @@ You are now live. Await instructions and begin the loop.""",
                     finish_reason = str(chunk_finish)
 
                 usage = self._normalize_usage(self._field(chunk, "usage")) or usage
+        except UserInterruptedError:
+            raise
+        except Exception:
+            budget.finish_model(allowance, usage, (
+                "".join(text_parts), "".join(reasoning_parts), list(tool_call_map.values()),
+            ))
+            raise
         finally:
             if thinking_open:
                 with suppress(Exception):
@@ -1322,44 +1314,75 @@ You are now live. Await instructions and begin the loop.""",
         interrupt_queue: "asyncio.Queue[None] | None" = None,
         reasoning_effort: str | None = None,
     ) -> Any:
-        if interrupt_queue is None:
-            return await self.client.create_message_async(
-                messages=messages,
-                system=system,
-                tools=tools,
-                max_tokens=max_tokens,
-                reasoning_effort=reasoning_effort,
-            )
-
         self._drain_interrupt_queue(interrupt_queue)
-        llm_task = asyncio.create_task(
+        return await self._await_model_or_interrupt(
             self.client.create_message_async(
                 messages=messages,
                 system=system,
                 tools=tools,
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
-            )
+            ),
+            interrupt_queue,
         )
+
+    async def _await_model_or_interrupt(
+        self,
+        request: Coroutine[Any, Any, Any],
+        interrupt_queue: asyncio.Queue[None] | None,
+        *,
+        close_abandoned_stream: bool = False,
+    ) -> Any:
+        if interrupt_queue is None:
+            return await request
+        llm_task = asyncio.create_task(request)
         interrupt_task = asyncio.create_task(interrupt_queue.get())
-
-        done, _pending = await asyncio.wait(
-            {llm_task, interrupt_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        if llm_task in done:
+        try:
+            done, _ = await asyncio.wait(
+                {llm_task, interrupt_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if llm_task not in done:
+                raise UserInterruptedError("Interrupted by ESC")
             interrupt_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await interrupt_task
-            return await llm_task
+            await asyncio.gather(interrupt_task, return_exceptions=True)
+            return llm_task.result()
+        except BaseException:
+            llm_task.cancel()
+            interrupt_task.cancel()
+            await asyncio.gather(llm_task, interrupt_task, return_exceptions=True)
+            if close_abandoned_stream and not llm_task.cancelled() and llm_task.exception() is None:
+                with suppress(Exception):
+                    await self._close_stream(llm_task.result())
+            raise
 
-        llm_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await llm_task
-        with suppress(Exception):
-            interrupt_task.result()
-        raise UserInterruptedError("Interrupted by ESC")
+    async def _budgeted_message(
+        self,
+        budget: RuntimeBudget,
+        messages: list[dict],
+        system: str,
+        tools: list[dict] | None,
+        *,
+        interrupt_queue: asyncio.Queue[None] | None,
+        reasoning_effort: str | None = None,
+    ) -> Any:
+        allowance = budget.start_model(messages, system, tools, self.config.llm.max_tokens)
+        async with budget.time_limit():
+            response = await self._create_message_with_interrupt(
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=allowance.max_tokens,
+                interrupt_queue=interrupt_queue,
+                reasoning_effort=reasoning_effort,
+            )
+        choice = self._first_choice(response)
+        payload = self._field(choice, "message") or response
+        budget.finish_model(allowance, self._field(response, "usage"), (
+            self._extract_stream_text(payload),
+            self._extract_reasoning_text(payload),
+            self._extract_tool_calls(payload),
+        ))
+        return response
 
     async def run_loop(
         self,
@@ -1377,13 +1400,25 @@ You are now live. Await instructions and begin the loop.""",
             if self.config.trace_dir is not None else None
         )
         token = self._trace_context.set(trace)
+        budget = RuntimeBudget(self.config.runtime_budget)
+        budget_token = current_budget.set(budget)
         status: RunStatus = "failed"
+        budget_limit = None
         try:
             result = await self._run_loop(
-                messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                messages, budget=budget, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
             )
             status = "completed"
             return result
+        except RuntimeBudgetExceeded as exc:
+            status = "budget_exceeded"
+            budget_limit = exc.limit
+            await self._emit({
+                "type": "system",
+                "message": str(exc),
+                "data": {"code": "budget_exceeded", "limit": exc.limit},
+            })
+            raise
         except UserInterruptedError:
             status = "waiting_for_user" if trace is not None and trace.waiting else "interrupted"
             raise
@@ -1391,14 +1426,16 @@ You are now live. Await instructions and begin the loop.""",
             status = "interrupted"
             raise
         finally:
+            current_budget.reset(budget_token)
             self._trace_context.reset(token)
             if trace is not None:
-                trace.close(status)
+                trace.close(status, budget_limit=budget_limit)
 
     async def _run_loop(
         self,
         messages: list[dict],
         *,
+        budget: RuntimeBudget,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
         reasoning_effort: str | None = None,
     ) -> list[dict]:
@@ -1421,16 +1458,22 @@ You are now live. Await instructions and begin the loop.""",
 
             if self._streaming_active():
                 try:
-                    stream_result = await self._create_message_stream_with_interrupt(
-                        messages=messages,
-                        system=self.system_prompt,
-                        tools=tools,
-                        max_tokens=self.config.llm.max_tokens,
-                        assistant_message_id=assistant_message_id,
-                        parent_user_message_id=parent_user_message_id,
-                        interrupt_queue=interrupt_queue,
-                        reasoning_effort=reasoning_effort,
-                    )
+                    allowance = budget.start_model(messages, self.system_prompt, tools, self.config.llm.max_tokens)
+                    async with budget.time_limit():
+                        stream_result = await self._create_message_stream_with_interrupt(
+                            messages=messages,
+                            system=self.system_prompt,
+                            tools=tools,
+                            budget=budget,
+                            allowance=allowance,
+                            assistant_message_id=assistant_message_id,
+                            parent_user_message_id=parent_user_message_id,
+                            interrupt_queue=interrupt_queue,
+                            reasoning_effort=reasoning_effort,
+                        )
+                    budget.finish_model(allowance, stream_result["usage"], (
+                        stream_result["content"], stream_result["reasoning"], stream_result["tool_calls"],
+                    ))
                     content = stream_result["content"]
                     reasoning = stream_result.get("reasoning", "")
                     finish_reason = stream_result["finish_reason"]
@@ -1438,7 +1481,7 @@ You are now live. Await instructions and begin the loop.""",
                     stream_rendered = bool(stream_result["stream_rendered"])
                     usage = stream_result.get("usage")
                     stream_success = True
-                except UserInterruptedError:
+                except (UserInterruptedError, RuntimeBudgetExceeded):
                     raise
                 except Exception as exc:
                     self.stream_degraded = True
@@ -1459,11 +1502,8 @@ You are now live. Await instructions and begin the loop.""",
                     else nullcontext()
                 )
                 with status_ctx:
-                    response = await self._create_message_with_interrupt(
-                        messages=messages,
-                        system=self.system_prompt,
-                        tools=tools,
-                        max_tokens=self.config.llm.max_tokens,
+                    response = await self._budgeted_message(
+                        budget, messages, self.system_prompt, tools,
                         interrupt_queue=interrupt_queue,
                         reasoning_effort=reasoning_effort,
                     )
@@ -1523,6 +1563,7 @@ You are now live. Await instructions and begin the loop.""",
                         "Be detailed but concise enough to replace the previous message history."
                     )
                     
+                    calls_before_compaction = budget.llm_calls
                     try:
                         status_ctx = (
                             status("[bright_black]Compacting context…[/]")
@@ -1530,11 +1571,8 @@ You are now live. Await instructions and begin the loop.""",
                             else nullcontext()
                         )
                         with status_ctx:
-                            compaction_resp = await self._create_message_with_interrupt(
-                                messages=messages,
-                                system=compaction_system,
-                                tools=None,
-                                max_tokens=self.config.llm.max_tokens,
+                            compaction_resp = await self._budgeted_message(
+                                budget, messages, compaction_system, None,
                                 interrupt_queue=interrupt_queue,
                             )
                         compaction_choice = self._first_choice(compaction_resp)
@@ -1591,6 +1629,17 @@ You are now live. Await instructions and begin the loop.""",
                         if self._ui_enabled():
                             print_system("Context compaction completed. Older history dropped.")
                             
+                    except RuntimeBudgetExceeded as exc:
+                        # Preserve a complete reply when the optional summary could not start.
+                        if (finish_reason == "tool_calls" or exc.limit == "max_wall_time"
+                                or budget.llm_calls != calls_before_compaction):
+                            raise
+                        notice = "Context compaction skipped because the run budget is exhausted."
+                        await self._emit({"type": "system", "message": notice})
+                        if self._ui_enabled():
+                            print_system(notice)
+                    except UserInterruptedError:
+                        raise
                     except Exception as e:
                         await self._emit(
                             {
@@ -1603,7 +1652,8 @@ You are now live. Await instructions and begin the loop.""",
                             print_system(f"Warning: Context compaction failed: {e}")
 
             display_tool_calls = [
-                tc for tc in tool_calls if not self._is_ask_user_tool(self._tool_call_name(tc))
+                (i, tc) for i, tc in enumerate(tool_calls, start=1)
+                if not self._is_ask_user_tool(self._tool_call_name(tc))
             ]
 
             # Emit structured assistant end event for all non-interrupted responses.
@@ -1613,7 +1663,7 @@ You are now live. Await instructions and begin the loop.""",
                     "name": self._tool_call_name(tc),
                     "arguments": self._tool_call_arguments(tc),
                 }
-                for i, tc in enumerate(display_tool_calls, start=1)
+                for i, tc in display_tool_calls
             ]
             await self._emit(
                 {
@@ -1647,7 +1697,6 @@ You are now live. Await instructions and begin the loop.""",
                 messages.append(assistant_msg)
                 return messages
 
-            generic_tool_calls = display_tool_calls
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": content,
@@ -1660,7 +1709,7 @@ You are now live. Await instructions and begin the loop.""",
                 assistant_msg["usage"] = usage
             if compaction_context_usage:
                 assistant_msg["context_usage"] = dict(compaction_context_usage)
-            if generic_tool_calls:
+            if display_tool_calls:
                 assistant_msg["tool_calls"] = [
                     {
                         "id": self._tool_call_id(tc) or f"tool-call-{i}",
@@ -1670,13 +1719,34 @@ You are now live. Await instructions and begin the loop.""",
                             "arguments": self._tool_call_arguments(tc),
                         },
                     }
-                    for i, tc in enumerate(generic_tool_calls, start=1)
+                    for i, tc in display_tool_calls
                 ]
             assistant_msg_appended = False
             tool_results: list[dict[str, Any]] = []
+            budget_stop: RuntimeBudgetExceeded | None = None
             for i, tc in enumerate(tool_calls, start=1):
                 tc_id = self._tool_call_id(tc) or f"tool-call-{i}"
                 tc_name = self._tool_call_name(tc)
+                is_question = self._is_ask_user_tool(tc_name)
+                if budget_stop is None:
+                    try:
+                        budget.start_tool()
+                    except RuntimeBudgetExceeded as exc:
+                        budget_stop = exc
+                if budget_stop is not None:
+                    # The provider still expects a result for each advertised call ID.
+                    if not is_question:
+                        refusal = ToolOutcome(str(budget_stop), "refused")
+                        tool_results.append(
+                            {
+                                "tool_call_id": tc_id,
+                                "tool_name": tc_name,
+                                "tool_args": {},
+                                "output": refusal.text,
+                                "metadata": refusal.metadata(),
+                            }
+                        )
+                    continue
                 tc_args_raw = self._tool_call_arguments(tc)
                 tc_input, parse_note = parse_tool_arguments(tc_args_raw)
                 if tc_input is None:
@@ -1746,10 +1816,24 @@ You are now live. Await instructions and begin the loop.""",
                         print()
                         print_tool_call(f"{self._tool_log_prefix()}> {tc_name}({args_preview})")
 
-                outcome = None
-                if self._is_ask_user_tool(tc_name):
-                    outcome = await self._execute_tool_with_hooks(tc_name, tc_input)
-                if self._is_ask_user_tool(tc_name) and not outcome.is_error:
+                tool_status_ctx = (
+                    status(f"[bright_black]Running {tc_name}…[/]")
+                    if not is_question and tc_name != "Task" and self.status_enabled and self._ui_enabled()
+                    else nullcontext()
+                )
+                try:
+                    with tool_status_ctx:
+                        async with budget.time_limit():
+                            if is_question:
+                                outcome = await self._execute_tool_with_hooks(tc_name, tc_input)
+                            else:
+                                outcome = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
+                except RuntimeBudgetExceeded as exc:
+                    budget_stop = exc
+                    status_on_stop = "timeout" if exc.limit == "max_wall_time" else "refused"
+                    outcome = ToolOutcome(str(exc), status_on_stop)
+
+                if is_question and not outcome.is_error:
                     raw_payload = json.loads(outcome.text)
                     question = self._normalize_ask_user_payload(raw_payload, question_id=tc_id)
                     question["message_id"] = assistant_message_id
@@ -1782,7 +1866,8 @@ You are now live. Await instructions and begin the loop.""",
                         question_event["context_usage"] = dict(compaction_context_usage)
                         question_event["context_compacted"] = True
                     await self._emit(question_event)
-                    answer = await self._resolve_ask_user_answer(question)
+                    with budget.pause():
+                        answer = await self._resolve_ask_user_answer(question)
                     assistant_msg["question_pending"] = False
                     messages.append(
                         {
@@ -1803,15 +1888,6 @@ You are now live. Await instructions and begin the loop.""",
                     )
                     continue
 
-                if outcome is None:
-                    tool_status_ctx = (
-                        status(f"[bright_black]Running {tc_name}…[/]")
-                        if tc_name != "Task" and self.status_enabled and self._ui_enabled()
-                        else nullcontext()
-                    )
-                    with tool_status_ctx:
-                        outcome = await self._execute_interruptible_tool(tc_name, tc_input, interrupt_queue)
-
                 output = outcome.text
                 if parse_note:
                     output = f"Warning: {parse_note}\n{output}"
@@ -1830,15 +1906,16 @@ You are now live. Await instructions and begin the loop.""",
                     await self._emit_todo_snapshot()
                 if self._ui_enabled():
                     print_tool_output(self._tool_output_name(tc_name), output)
-                tool_results.append(
-                    {
-                        "tool_call_id": tc_id,
-                        "tool_name": tc_name,
-                        "tool_args": tc_input,
-                        "output": output,
-                        "metadata": outcome.metadata(),
-                    }
-                )
+                if not is_question or budget_stop is None:
+                    tool_results.append(
+                        {
+                            "tool_call_id": tc_id,
+                            "tool_name": tc_name,
+                            "tool_args": tc_input,
+                            "output": output,
+                            "metadata": outcome.metadata(),
+                        }
+                    )
 
             if not assistant_msg_appended:
                 messages.append(assistant_msg)
@@ -1856,6 +1933,9 @@ You are now live. Await instructions and begin the loop.""",
                         **result["metadata"],
                     }
                 )
+
+            if budget_stop is not None:
+                raise budget_stop
 
     async def start_session(self) -> None:
         """Start the agent session."""

@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Callable, Iterable, Iterator
 
 from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
+from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
 from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
@@ -833,6 +834,8 @@ class Minibot:
         except UserInterruptedError as exc:
             interrupted_error = exc
         except Exception as exc:
+            if isinstance(exc, RuntimeBudgetExceeded) and self._active_stream is not None:
+                self._clear_streaming_state(self._active_stream)
             error_msg = {
                 "role": "assistant",
                 "content": f"[Error: {exc}]",

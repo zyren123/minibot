@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 from .schema import (
     Config,
     LLMConfig,
+    RuntimeBudgetConfig,
     ToolsConfig,
     BashConfig,
     HooksConfig,
@@ -39,6 +40,13 @@ llm:
   model: ${MODEL_ID:gpt-4.1-mini}
   max_tokens: 8000
   stream_enabled: true
+
+runtime_budget:
+  max_llm_calls: 30
+  max_tool_calls: 100
+  max_wall_time: 600
+  max_input_tokens: 200000
+  max_output_tokens: 50000
 
 tools:
   enabled:
@@ -397,9 +405,19 @@ def load_config(
         subagents=_parse_subagents_config(default_config.get("subagents")),
         session=_parse_session_config(default_config.get("session"), app_home),
         trace_dir=default_config.get("trace_dir"),
+        runtime_budget=_parse_runtime_budget(default_config.get("runtime_budget", {})),
     )
 
     return _config
+
+
+def _parse_runtime_budget(data: Any) -> RuntimeBudgetConfig:
+    if not isinstance(data, dict):
+        raise ValueError("runtime_budget must be a mapping")
+    try:
+        return RuntimeBudgetConfig(**data)
+    except TypeError as exc:
+        raise ValueError(f"Invalid runtime_budget configuration: {exc}") from exc
 
 
 def _parse_tools_config(data: Any) -> ToolsConfig:

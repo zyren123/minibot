@@ -13,6 +13,13 @@ llm:
   stream_enabled: true
 
 # Tools configuration
+runtime_budget:
+  max_llm_calls: 30
+  max_tool_calls: 100
+  max_wall_time: 600
+  max_input_tokens: 200000
+  max_output_tokens: 50000
+
 tools:
   enabled:
     - "*"  # Enable all tools

@@ -13,7 +13,7 @@ import uuid
 
 from .events import StreamEvent
 
-RunStatus = Literal["completed", "failed", "interrupted", "waiting_for_user"]
+RunStatus = Literal["completed", "failed", "interrupted", "waiting_for_user", "budget_exceeded"]
 
 
 @dataclass(frozen=True)
@@ -113,9 +113,10 @@ class RunTrace:
             self.waiting = False
             self._write("run_resumed")
 
-    def close(self, status: RunStatus) -> None:
+    def close(self, status: RunStatus, *, budget_limit: str | None = None) -> None:
         self.finish_tool(status="interrupted" if status == "interrupted" else "error", is_error=True)
-        self._write("run_end", status=status, duration_ms=(time.monotonic() - self.started) * 1000)
+        fields = {"budget_limit": budget_limit} if budget_limit is not None else {}
+        self._write("run_end", status=status, duration_ms=(time.monotonic() - self.started) * 1000, **fields)
         file, self._file = self._file, None
         if file is not None:
             try:

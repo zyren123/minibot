@@ -18,6 +18,26 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeBudgetConfig:
+    """Cumulative limits for one active execution segment."""
+
+    max_llm_calls: int = 30
+    max_tool_calls: int = 100
+    max_wall_time: int | float = 600
+    max_input_tokens: int = 200_000
+    max_output_tokens: int = 50_000
+
+    def __post_init__(self):
+        for name in ("max_llm_calls", "max_tool_calls", "max_input_tokens", "max_output_tokens"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"runtime_budget.{name} must be a positive integer")
+        limit = self.max_wall_time
+        if type(limit) not in (int, float) or not 0 < limit < math.inf:
+            raise ValueError("runtime_budget.max_wall_time must be a positive finite number")
+
+
+@dataclass(frozen=True)
 class BashConfig:
     """Bash execution policy. Local execution remains the default."""
     backend: Literal["disabled", "local", "docker"] = "local"
@@ -154,6 +174,7 @@ class Config:
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     trace_dir: str | Path | None = None
+    runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
 
     def __post_init__(self):
         if isinstance(self.workdir, str):

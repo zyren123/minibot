@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from ..core.runtime_budget import RuntimeBudgetExceeded
 from .base import BaseTool
 from .result import ToolOutcome
 
@@ -64,6 +65,8 @@ class ToolRegistry:
             return ToolOutcome(f"Error: {exc}", "invalid_arguments")
         try:
             return await tool.execute_result(**args)
+        except RuntimeBudgetExceeded:
+            raise
         except TimeoutError as exc:
             return ToolOutcome(f"Error: {exc}", "timeout")
         except Exception as exc:

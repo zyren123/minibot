@@ -36,7 +36,7 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 | `tool_end` | Same invocation fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
 | `run_waiting` | None |
 | `run_resumed` | None |
-| `run_end` | `status`, `duration_ms` |
+| `run_end` | `status`, `duration_ms`, optional `budget_limit` |
 
 An internal invocation UUID pairs each tool start with its end, even when provider call IDs repeat. Tool statuses preserve `ToolOutcome` values. Cancellation produces an `interrupted` tool status and continues to raise the original interruption. A post-hook failure can retain tool status `success` while setting `is_error` and `hook_phase` to `post`.
 
@@ -44,7 +44,7 @@ Tool duration starts before delivery of `tool_call` and ends before delivery of 
 
 ## Lifecycle
 
-Run end states are `completed`, `failed`, `interrupted`, and `waiting_for_user`. `completed` means the execution loop returned. It does not judge whether the user's task succeeded. Tool failures can occur inside a completed run. An `assistant_end` event does not close a run because more tools or model rounds can follow it.
+Run end states are `completed`, `failed`, `interrupted`, `waiting_for_user`, and `budget_exceeded`. A budget stop records the configured limit name in `budget_limit`. See [Runtime budgets](runtime-budget.md). `completed` means the execution loop returned. It does not judge whether the user's task succeeded. Tool failures can occur inside a completed run. An `assistant_end` event does not close a run because more tools or model rounds can follow it.
 
 A live question emits `run_waiting`. Its answer emits `run_resumed` in the same run. A persisted pause ends with `waiting_for_user`. The runtime sidecar stores `trace_run_id`; the server answer-stream route passes it into the resumed segment's `parent_run_id`, including after bot-cache eviction or restart. Existing sidecars without this field produce unlinked segments. These links do not provide checkpoint replay or deduplication of side effects. The SDK's `resume_pending_question_stream` continues prepared history, as before; persisting the answer remains the caller's responsibility outside the server route.
 
