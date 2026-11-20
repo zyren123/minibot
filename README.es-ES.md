@@ -395,7 +395,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [x] **Presupuestos de ejecución**. El agente principal y sus subagentes de `Task` comparten un presupuesto por segmento de ejecución. [Presupuestos de ejecución](docs/runtime-budget.md)
 - [x] **Trazas de ejecución y pruebas de regresión sin conexión**. Trazas JSONL y pruebas repetibles de tareas. [Trazas y pruebas de regresión](docs/run-traces.md)
 - [x] **Evaluación de tareas con modelos**. Puedes ejecutar tareas fijas varias veces con un proveedor de modelos. [Ejecutar evaluaciones](docs/model-evals.md)
-- [ ] **Permisos y aprobaciones unificados para herramientas**.
+- [x] **Permisos y aprobaciones unificados para herramientas**. Permite la aprobación humana por llamada y la revisión con IA para rutas de archivos configuradas. [Configurar las aprobaciones](docs/tool-approvals.md)
 - [ ] **Aislamiento de otras herramientas además de Bash**.
 - [ ] **Trazas de llamadas entre agentes principales y subagentes**.
 - [ ] **Control del contexto antes de cada solicitud y gestión unificada de la salida de las herramientas**.

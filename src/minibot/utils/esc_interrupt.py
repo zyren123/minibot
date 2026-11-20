@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 
 
 class EscInterruptMonitor:
@@ -72,6 +72,23 @@ class EscInterruptMonitor:
             self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._old_attrs)
 
         self._enabled = False
+
+    @contextmanager
+    def suspend(self):
+        """Give another interactive prompt exclusive ownership of terminal input."""
+        if not self._enabled:
+            yield
+            return
+        assert self._loop is not None and self._fd is not None
+        assert self._termios is not None and self._tty is not None
+        self._loop.remove_reader(self._fd)
+        self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._old_attrs)
+        try:
+            yield
+        finally:
+            if self._enabled:
+                self._tty.setcbreak(self._fd)
+                self._loop.add_reader(self._fd, self._on_stdin_ready)
 
     def _on_stdin_ready(self) -> None:
         if not self._enabled or self._fd is None:

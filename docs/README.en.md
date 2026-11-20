@@ -321,7 +321,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [x] **Runtime budgets**. The main agent and its `Task` subagents share one budget per execution segment. [Runtime budgets](runtime-budget.md)
 - [x] **Run traces and offline task regression checks**. JSONL traces and repeatable task checks. [Traces and regression checks](run-traces.md)
 - [x] **Model task evaluations**. Opt in to run fixed tasks repeatedly with a model provider. [Run model evaluations](model-evals.md)
-- [ ] **Unified tool permissions and approvals**.
+- [x] **Unified tool permissions and approvals**. Supports one-time human approval and AI review for configured file paths. [Configure approvals](tool-approvals.md)
 - [ ] **Isolation for tools beyond Bash**.
 - [ ] **Parent-child agent call tracing**.
 - [ ] **Pre-request context checks and unified tool-output management**.

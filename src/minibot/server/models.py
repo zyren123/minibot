@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from ..tools.result import ToolStatus
 
@@ -76,6 +76,12 @@ class SubmitUserAnswerRequest(BaseModel):
     question_id: str
     answer_text: str = ""
     selected_option_value: str | None = None
+
+
+class SubmitToolApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved: StrictBool
 
 
 class ConfigResponse(BaseModel):

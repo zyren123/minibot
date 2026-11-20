@@ -15,6 +15,7 @@ from ..events import StreamEvent
 from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
 from ..tools.base import BaseTool
+from ..tools.permissions import ToolApprovalHandler, ToolApprovalRequest
 
 from ._active_streams import own_stream
 from ._event_router import RouterEventSink
@@ -76,6 +77,7 @@ class _StreamPersistenceState:
     assistant_parent_ids: dict[str, str | None] = field(default_factory=dict)
     question_message_ids: dict[str, str] = field(default_factory=dict)
     producer: asyncio.Task[None] | None = None
+    approvals_cancelled: bool = False
 
 
 class Minibot:
@@ -94,6 +96,7 @@ class Minibot:
         disabled_skills: Iterable[str] | None = None,
         allow_subagent_delegation: bool = True,
         allow_team_tools: bool = True,
+        tool_approval_handler: ToolApprovalHandler | None = None,
     ) -> None:
         if config is None:
             resolved_workdir = Path(workdir).resolve() if workdir is not None else None
@@ -121,6 +124,8 @@ class Minibot:
         self._pending_question: dict[str, Any] | None = None
         self._pending_question_future: "asyncio.Future[dict[str, Any]] | None" = None
         self._active_stream: _StreamPersistenceState | None = None
+        self._tool_approval_handler = tool_approval_handler
+        self._pending_tool_approvals: dict[str, asyncio.Future[bool]] = {}
 
         self.agent = Agent(
             config=self.config,
@@ -132,6 +137,7 @@ class Minibot:
             allow_subagent_delegation=allow_subagent_delegation,
             allow_team_tools=allow_team_tools,
             ask_user_handler=self._wait_for_user_answer,
+            tool_approval_handler=self._wait_for_tool_approval,
         )
 
         if tools:
@@ -535,6 +541,7 @@ class Minibot:
                 q.put_nowait(None)
             except asyncio.QueueFull:
                 pass
+        self._cancel_tool_approvals()
         pending = self._pending_question_future
         if pending is not None and not pending.done():
             pending.set_exception(UserInterruptedError("Interrupted while waiting for user answer"))
@@ -542,6 +549,47 @@ class Minibot:
 
         if self._active_stream is not None:
             self._clear_streaming_state(self._active_stream, interrupted=True)
+
+    def _cancel_tool_approvals(self) -> None:
+        if self._active_stream is not None:
+            self._active_stream.approvals_cancelled = True
+        for future in self._pending_tool_approvals.values():
+            if not future.done():
+                future.set_result(False)
+
+    async def _wait_for_tool_approval(self, request: ToolApprovalRequest) -> bool:
+        state = self._active_stream
+        if state is not None and state.approvals_cancelled:
+            return False
+        if self._tool_approval_handler is not None:
+            approved = await self._tool_approval_handler(request)
+            return approved is True and not (state is not None and state.approvals_cancelled)
+        if state is None:
+            return False
+        future = asyncio.get_running_loop().create_future()
+        self._pending_tool_approvals[request.approval_id] = future
+        try:
+            await self._event_router.emit({
+                "type": "tool_approval_request",
+                "session_id": state.session_id,
+                "approval_id": request.approval_id,
+                "tool_name": request.tool_name,
+                "approval_actor": request.actor,
+                "approval_preview": request.preview,
+            })
+            approved = await future
+            return approved and not state.approvals_cancelled
+        finally:
+            self._pending_tool_approvals.pop(request.approval_id, None)
+
+    def submit_tool_approval(self, approval_id: str, approved: bool) -> None:
+        """Resolve one live approval. A stale or consumed ID raises ValueError."""
+        future = self._pending_tool_approvals.get(approval_id)
+        if self._active_stream is None or self._active_stream.approvals_cancelled or future is None or future.done():
+            raise ValueError("No live tool approval matches this ID")
+        if type(approved) is not bool:
+            raise ValueError("Tool approval decision must be boolean")
+        future.set_result(approved)
 
     async def _wait_for_user_answer(self, question: dict[str, Any]) -> dict[str, Any]:
         if self._active_stream is not None and self._active_stream.stop_on_ask_user_question:
@@ -746,6 +794,7 @@ class Minibot:
                         if self._session_manager is not None:
                             self.messages = self._session_manager.load(state.session_id)
                     finally:
+                        self._cancel_tool_approvals()
                         self._active_interrupt_queue = None
                         self._active_stream = None
 
@@ -762,6 +811,8 @@ class Minibot:
             await task
         finally:
             detached = True
+            if self._active_stream is state and self._tool_approval_handler is None:
+                self._cancel_tool_approvals()
             self._event_router.detach_queue(queue)
 
     def stream_sync(

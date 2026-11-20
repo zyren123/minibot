@@ -36,7 +36,7 @@ export type TodoSnapshot = {
   completed_at?: string | null;
 };
 
-export type StreamEvent = {
+export type ChatStreamEvent = {
   type?: StreamEventType;
   session_id?: string;
   message_id?: string;
@@ -85,6 +85,27 @@ export type StreamEvent = {
     [key: string]: unknown;
   };
 };
+
+export type ToolApprovalRequestEvent = {
+  type: "tool_approval_request";
+  session_id: string;
+  approval_id: string;
+  tool_name: string;
+  approval_actor: string;
+  approval_preview: string;
+};
+
+export type ToolApprovalResolvedEvent = {
+  type: "tool_approval_resolved";
+  session_id: string;
+  approval_id: string;
+  approved: boolean;
+  approval_source: "human" | "auto_review" | "policy";
+  tool_name?: string;
+};
+
+export type ToolApprovalEvent = ToolApprovalRequestEvent | ToolApprovalResolvedEvent;
+export type StreamEvent = ChatStreamEvent | ToolApprovalEvent;
 
 export type SessionMeta = {
   session_id: string;

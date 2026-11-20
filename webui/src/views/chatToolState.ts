@@ -1,4 +1,4 @@
-import type { Message, StreamEvent } from "../lib/types";
+import type { ChatStreamEvent, Message } from "../lib/types";
 
 export type ToolInvocationStatus = "running" | "done" | "error";
 
@@ -38,7 +38,7 @@ function isAskUserTool(name: string): boolean {
 }
 
 export function normalizeStreamToolCalls(
-  toolCalls: StreamEvent["tool_calls"] | undefined,
+  toolCalls: ChatStreamEvent["tool_calls"] | undefined,
 ): Message["tool_calls"] {
   if (!toolCalls?.length) return [];
   return toolCalls.map((toolCall) => ({

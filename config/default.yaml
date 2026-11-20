@@ -20,6 +20,13 @@ runtime_budget:
   max_input_tokens: 200000
   max_output_tokens: 50000
 
+tool_permissions:
+  mode: "off"
+  default: ask
+  rules: {}
+  auto_review_paths: []
+  timeout: 120
+
 tools:
   enabled:
     - "*"  # Enable all tools

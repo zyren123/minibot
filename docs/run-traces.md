@@ -34,6 +34,7 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 | `run_start` | `scope`, `parent_run_id`, `started_at` |
 | `tool_start` | `invocation_id`, `tool_call_id`, `tool_name` |
 | `tool_end` | Same invocation fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
+| `tool_approval` | `approval_id`, `tool_name`, `approved`, `source` |
 | `run_waiting` | None |
 | `run_resumed` | None |
 | `run_end` | `status`, `duration_ms`, optional `budget_limit` |
@@ -53,6 +54,10 @@ SDK streaming runs reuse the producer's ownership UUID. Detaching or closing an 
 ## Scope and output policy
 
 `scope` is `agent_tools`. Records cover tools in the owning Agent loop. A `Task` call is one invocation. Its subagent's internal tool calls are excluded. Team activity has no parent-child trace graph. Separately invoked Agents with tracing enabled create their own runs. Direct `Agent.run_loop`, SDK chat, streaming and synchronous wrappers all support recording.
+
+[Tool approval](tool-approvals.md) decisions are recorded in the trace of the Agent
+run that owns the decision, including decisions requested by a delegated Agent.
+The trace does not record approval previews or reviewer prompts.
 
 Records use an allowlist. They omit prompts, arguments, tool output, assistant text, reasoning, generic system payloads, exception messages and hook diagnostic strings. Session IDs, tool names and provider call IDs remain metadata in the file. Avoid putting credentials in those identifiers.
 

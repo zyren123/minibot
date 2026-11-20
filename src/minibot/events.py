@@ -22,6 +22,8 @@ EventType = Literal[
     "todo_snapshot",
     "tool_call",
     "tool_result",
+    "tool_approval_request",
+    "tool_approval_resolved",
     "system",
 ]
 
@@ -66,6 +68,13 @@ class StreamEvent(TypedDict, total=False):
     tool_hook_error: str
     tool_hook_phase: Literal["pre", "post"]
     note: str
+
+    # Tool approval
+    approval_id: str
+    approval_actor: str
+    approval_preview: str
+    approved: bool
+    approval_source: Literal["policy", "human", "auto_review"]
 
     # System / status
     message: str

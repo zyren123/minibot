@@ -2,6 +2,7 @@ import type {
   AvailableModel,
   BotConfig,
   BotMeta,
+  ChatStreamEvent,
   Config,
   DeletedMessageResult,
   DeletedModelsResult,
@@ -30,6 +31,7 @@ import type {
   StreamEvent,
   UpdateMCPServerRequest,
 } from "./types";
+import { parseToolApprovalEvent } from "./toolApprovals";
 
 export async function apiGet<T>(path: string): Promise<T> {
   const resp = await fetch(path);
@@ -340,6 +342,27 @@ export async function submitPendingQuestionAnswer(
   );
 }
 
+export async function submitToolApproval({
+  botId, sessionId, approvalId, approved,
+}: {
+  botId: string;
+  sessionId: string;
+  approvalId: string;
+  approved: boolean;
+}): Promise<"accepted" | "stale"> {
+  const resp = await fetch(
+    `/api/bots/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approvalId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    },
+  );
+  if (resp.status === 409) return "stale";
+  if (!resp.ok) throw new Error(await resp.text());
+  return "accepted";
+}
+
 export async function* submitPendingQuestionAnswerStream(
   botId: string,
   sessionId: string,
@@ -406,7 +429,10 @@ async function* streamResponse(resp: Response): AsyncGenerator<StreamEvent> {
       }
       if (!data) continue;
       try {
-        yield JSON.parse(data) as StreamEvent;
+        const payload: unknown = JSON.parse(data);
+        const approval = parseToolApprovalEvent(payload);
+        if (approval === "invalid") continue;
+        yield approval ?? (payload as ChatStreamEvent);
       } catch {
         yield { type: "system", message: "Failed to parse stream event.", data: { raw: data } };
       }

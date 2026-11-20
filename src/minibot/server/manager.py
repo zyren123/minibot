@@ -627,6 +627,13 @@ class AgentManager:
         session_mgr.delete_runtime_state(session_id, expected=runtime_state)
         return None
 
+    def submit_tool_approval(self, bot_id: str, session_id: str, approval_id: str, approved: bool) -> None:
+        """Resolve a live invocation without locking its waiting chat stream."""
+        bot = self._bots.get((bot_id, session_id))
+        if bot is None:
+            raise ValueError("No live tool approval matches this ID")
+        bot.submit_tool_approval(approval_id, approved)
+
     async def pending_question_snapshot(self, bot_id: str, session_id: str) -> dict[str, Any] | None:
         session_mgr = self.sessions_for(bot_id)
         runtime_state = session_mgr.load_runtime_state(session_id)
@@ -1452,6 +1459,7 @@ class AgentManager:
             allow_subagent_delegation=False,
             allow_team_tools=False,
         )
+        worker.agent._permission_actor = f"bot:{subagent_bot_id}"
 
         try:
             try:

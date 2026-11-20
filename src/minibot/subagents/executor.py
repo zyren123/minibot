@@ -193,7 +193,7 @@ Complete the task and return a clear, concise summary."""
                         else:
                             async with budget.time_limit():
                                 outcome = await execute_with_hooks(
-                                    self.tool_registry, self.hook_manager, tc_name, tc_input,
+                                    self.tool_registry, self.hook_manager, tc_name, tc_input, actor=f"subagent:{agent_type}",
                                 )
                             if parse_note:
                                 outcome = replace(outcome, text=f"Warning: {parse_note}\n{outcome.text}")

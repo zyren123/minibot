@@ -13,6 +13,7 @@ from .schema import (
     LLMConfig,
     RuntimeBudgetConfig,
     ToolsConfig,
+    ToolPermissionsConfig,
     BashConfig,
     HooksConfig,
     MCPConfig,
@@ -47,6 +48,13 @@ runtime_budget:
   max_wall_time: 600
   max_input_tokens: 200000
   max_output_tokens: 50000
+
+tool_permissions:
+  mode: "off"
+  default: ask
+  rules: {}
+  auto_review_paths: []
+  timeout: 120
 
 tools:
   enabled:
@@ -406,6 +414,7 @@ def load_config(
         session=_parse_session_config(default_config.get("session"), app_home),
         trace_dir=default_config.get("trace_dir"),
         runtime_budget=_parse_runtime_budget(default_config.get("runtime_budget", {})),
+        tool_permissions=_parse_tool_permissions(default_config.get("tool_permissions", {})),
     )
 
     return _config
@@ -418,6 +427,15 @@ def _parse_runtime_budget(data: Any) -> RuntimeBudgetConfig:
         return RuntimeBudgetConfig(**data)
     except TypeError as exc:
         raise ValueError(f"Invalid runtime_budget configuration: {exc}") from exc
+
+
+def _parse_tool_permissions(data: Any) -> ToolPermissionsConfig:
+    if not isinstance(data, dict):
+        raise ValueError("tool_permissions must be a mapping")
+    try:
+        return ToolPermissionsConfig(**data)
+    except TypeError as exc:
+        raise ValueError(f"Invalid tool_permissions configuration: {exc}") from exc
 
 
 def _parse_tools_config(data: Any) -> ToolsConfig:

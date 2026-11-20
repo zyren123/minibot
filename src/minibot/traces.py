@@ -105,6 +105,11 @@ class RunTrace:
                 status=event.get("tool_status", "error"),
                 is_error=event.get("is_error", True), **fields,
             )
+        elif kind == "tool_approval_resolved":
+            self._write(
+                "tool_approval", approval_id=event["approval_id"], tool_name=event["tool_name"],
+                approved=event["approved"], source=event["approval_source"],
+            )
         elif kind == "ask_user_question":
             self.finish_tool(status="success", is_error=False)
             self.waiting = True

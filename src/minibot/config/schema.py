@@ -37,6 +37,43 @@ class RuntimeBudgetConfig:
             raise ValueError("runtime_budget.max_wall_time must be a positive finite number")
 
 
+ToolPermission = Literal["allow", "deny", "ask"]
+
+
+@dataclass(frozen=True)
+class ToolPermissionsConfig:
+    """Execution policy for model-requested tools."""
+
+    mode: Literal["off", "manual", "auto_review"] = "off"
+    default: ToolPermission = "ask"
+    rules: dict[str, ToolPermission] = field(default_factory=dict)
+    auto_review_paths: tuple[str, ...] = ()
+    timeout: int | float = 120
+
+    def __post_init__(self):
+        choices = ("allow", "deny", "ask")
+        if self.mode not in ("off", "manual", "auto_review"):
+            raise ValueError("tool_permissions.mode must be off, manual, or auto_review")
+        if self.default not in choices:
+            raise ValueError("tool_permissions.default must be allow, deny, or ask")
+        if not isinstance(self.rules, dict) or any(
+            not isinstance(name, str) or not name.strip() or decision not in choices
+            for name, decision in self.rules.items()
+        ):
+            raise ValueError("tool_permissions.rules must map tool names to allow, deny, or ask")
+        paths = self.auto_review_paths
+        if not isinstance(paths, (tuple, list)) or any(
+            not isinstance(path, str) or not path.strip() or "\\" in path
+            or path.startswith("/") or any(part in ("", ".", "..") for part in path.split("/"))
+            for path in paths
+        ):
+            raise ValueError("tool_permissions.auto_review_paths must contain workspace-relative glob patterns")
+        if type(self.timeout) not in (int, float) or not 0 < self.timeout <= 3600:
+            raise ValueError("tool_permissions.timeout must be in (0, 3600] seconds")
+        object.__setattr__(self, "rules", dict(self.rules))
+        object.__setattr__(self, "auto_review_paths", tuple(paths))
+
+
 @dataclass(frozen=True)
 class BashConfig:
     """Bash execution policy. Local execution remains the default."""
@@ -175,8 +212,11 @@ class Config:
     session: SessionConfig = field(default_factory=SessionConfig)
     trace_dir: str | Path | None = None
     runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
+    tool_permissions: ToolPermissionsConfig = field(default_factory=ToolPermissionsConfig)
 
     def __post_init__(self):
+        if not isinstance(self.tool_permissions, ToolPermissionsConfig):
+            raise ValueError("tool_permissions must be a ToolPermissionsConfig")
         if isinstance(self.workdir, str):
             self.workdir = Path(self.workdir)
         if isinstance(self.app_home, str):

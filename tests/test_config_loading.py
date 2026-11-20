@@ -222,6 +222,13 @@ runtime_budget:
   max_llm_calls: 4
   max_wall_time: 12.5
   max_output_tokens: 900
+tool_permissions:
+  mode: auto_review
+  default: deny
+  rules:
+    write_file: ask
+  auto_review_paths: ["笔记/**"]
+  timeout: 12.5
 tools:
   bash:
     backend: docker
@@ -253,6 +260,11 @@ tools:
     assert config.runtime_budget.max_wall_time == 12.5
     assert config.runtime_budget.max_output_tokens == 900
     assert config.runtime_budget.max_tool_calls == 100
+    assert config.tool_permissions.mode == "auto_review"
+    assert config.tool_permissions.default == "deny"
+    assert config.tool_permissions.rules == {"write_file": "ask"}
+    assert config.tool_permissions.auto_review_paths == ("笔记/**",)
+    assert config.tool_permissions.timeout == 12.5
     assert config.tools.bash.backend == "docker"
     assert config.tools.bash.memory_mb == 256
     assert config.tools.bash.cpus == 0.5

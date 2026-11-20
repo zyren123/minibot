@@ -51,6 +51,7 @@ from .models import (
     ProviderUpdateRequest,
     SkillInfo,
     SubmitUserAnswerRequest,
+    SubmitToolApprovalRequest,
     SubagentCandidateResponse,
 )
 
@@ -377,6 +378,16 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         if not manager.sessions_for(bot_id).exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"session_id": session_id, "messages": manager.session_messages(bot_id, session_id)}
+
+    @app.post("/api/bots/{bot_id}/sessions/{session_id}/tool-approvals/{approval_id}")
+    async def submit_tool_approval(
+        bot_id: str, session_id: str, approval_id: str, req: SubmitToolApprovalRequest,
+    ) -> dict[str, str]:
+        try:
+            manager.submit_tool_approval(bot_id, session_id, approval_id, req.approved)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "ok"}
 
     @app.get("/api/bots/{bot_id}/sessions/{session_id}/pending-question", response_model=PendingQuestionResponse | None)
     async def get_bot_pending_question(bot_id: str, session_id: str) -> Any:

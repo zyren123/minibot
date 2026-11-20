@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import type {
   AvailableModel,
   BotConfig,
+  ChatStreamEvent,
   Message,
   PendingQuestion,
   ReasoningEffort,
@@ -24,11 +25,13 @@ import {
   listSessions,
   loadSession,
   submitPendingQuestionAnswerStream,
+  submitToolApproval,
   streamRegenerateSessionMessage,
   streamChat,
   updateBotConfig,
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { ToolApprovalCard, type PendingToolApproval } from "./ToolApprovalCard";
 import {
   countHiddenTurnsBeforeIndex,
   expandHistoryWindowStart,
@@ -43,6 +46,12 @@ import {
 
 const INITIAL_VISIBLE_HISTORY_TURNS = 24;
 const HISTORY_TURN_BATCH = 24;
+
+type ToolApprovalNotice = {
+  botId: string;
+  sessionId: string;
+  text: string;
+};
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -200,7 +209,7 @@ type ContextSnapshot = {
   compacted: boolean;
 };
 
-function normalizeTodoSnapshot(raw: StreamEvent["todo"] | undefined): TodoSnapshot | null {
+function normalizeTodoSnapshot(raw: ChatStreamEvent["todo"] | undefined): TodoSnapshot | null {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.items)) return null;
   const items: TodoSnapshot["items"] = [];
   raw.items.forEach((item, index) => {
@@ -418,9 +427,12 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [pendingAnswerDraft, setPendingAnswerDraft] = useState("");
   const [pendingCustomOpen, setPendingCustomOpen] = useState(false);
   const [submittingAnswer, setSubmittingAnswer] = useState(false);
+  const [toolApprovals, setToolApprovals] = useState<PendingToolApproval[]>([]);
+  const [toolApprovalNotice, setToolApprovalNotice] = useState<ToolApprovalNotice | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const approvalBotIdRef = useRef(botId);
   const sessionStateVersionRef = useRef(0);
 
   const sortedSessions = useMemo(
@@ -503,6 +515,9 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     [messages, visibleHistoryStartIndex],
   );
 
+  const visibleToolApprovals = toolApprovals.filter((approval) => (
+    approval.botId === botId && approval.session_id === sessionId
+  ));
   const chatBusy = streaming || submittingAnswer;
   const chatBlocked = Boolean(botConfig && (!botConfig.enabled || !botConfig.chat_ready));
   const blockedReason =
@@ -556,6 +571,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setReasoningOpenById({});
     setToolOpenById({});
     clearTodoState();
+    sessionIdRef.current = created.session_id;
     setSessionId(created.session_id);
     await refreshSessions(botId);
     return created.session_id;
@@ -597,7 +613,14 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
-  }, [sessionId]);
+    approvalBotIdRef.current = botId;
+    setToolApprovals((current) => current.filter((approval) => (
+      approval.botId === botId && approval.session_id === sessionId
+    )));
+    setToolApprovalNotice((current) => (
+      current?.botId === botId && current.sessionId === sessionId ? current : null
+    ));
+  }, [botId, sessionId]);
 
   useEffect(() => {
     markSessionStateDirty();
@@ -642,7 +665,42 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [deleteOpen]);
 
-  function applyStreamEvent(ev: StreamEvent) {
+  function removeToolApproval(bot: string, session: string, approvalId: string) {
+    setToolApprovals((current) => current.filter((approval) => (
+      approval.botId !== bot || approval.session_id !== session || approval.approval_id !== approvalId
+    )));
+  }
+
+  function clearToolApprovals(bot: string, session: string) {
+    setToolApprovals((current) => current.filter((approval) => (
+      approval.botId !== bot || approval.session_id !== session
+    )));
+  }
+
+  function applyStreamEvent(ev: StreamEvent, streamSessionId: string) {
+    if (ev.type === "tool_approval_request" || ev.type === "tool_approval_resolved") {
+      if (
+        ev.session_id !== streamSessionId ||
+        approvalBotIdRef.current !== botId || sessionIdRef.current !== streamSessionId
+      ) return;
+
+      if (ev.type === "tool_approval_request") {
+        setToolApprovals((current) => current.some((approval) => approval.approval_id === ev.approval_id)
+          ? current
+          : [...current, { ...ev, botId, state: "pending" }]);
+      } else {
+        removeToolApproval(botId, streamSessionId, ev.approval_id);
+        if (ev.approval_source === "auto_review" && ev.tool_name) {
+          setToolApprovalNotice({
+            botId,
+            sessionId: streamSessionId,
+            text: t(ev.approved ? "chat.approval.autoApproved" : "chat.approval.autoDenied", { tool: ev.tool_name }),
+          });
+        }
+      }
+      return;
+    }
+
     if (ev.type === "todo_snapshot") {
       setTodoSnapshot(normalizeTodoSnapshot(ev.todo));
       return;
@@ -883,6 +941,44 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     }
   }
 
+  async function consumeChatStream(events: AsyncIterable<StreamEvent>, streamSessionId: string) {
+    setToolApprovalNotice(null);
+    try {
+      for await (const event of events) applyStreamEvent(event, streamSessionId);
+    } finally {
+      clearToolApprovals(botId, streamSessionId);
+    }
+  }
+
+  async function onSubmitToolApproval(approval: PendingToolApproval, approved: boolean) {
+    if (approval.state === "submitting" || approval.botId !== botId || approval.session_id !== sessionId) return;
+    const matches = (item: PendingToolApproval) => (
+      item.botId === approval.botId &&
+      item.session_id === approval.session_id &&
+      item.approval_id === approval.approval_id
+    );
+    setToolApprovals((current) => current.map((item) => matches(item) ? { ...item, state: "submitting" } : item));
+    try {
+      const result = await submitToolApproval({
+        botId: approval.botId,
+        sessionId: approval.session_id,
+        approvalId: approval.approval_id,
+        approved,
+      });
+      removeToolApproval(approval.botId, approval.session_id, approval.approval_id);
+      if (result === "stale" && approvalBotIdRef.current === approval.botId &&
+          sessionIdRef.current === approval.session_id) {
+        setToolApprovalNotice({
+          botId: approval.botId,
+          sessionId: approval.session_id,
+          text: t("chat.approval.stale"),
+        });
+      }
+    } catch {
+      setToolApprovals((current) => current.map((item) => matches(item) ? { ...item, state: "error" } : item));
+    }
+  }
+
   function renderPendingQuestionCard(question: PendingQuestion) {
     const hasPresetOptions = question.options.length > 0;
     const showCustomComposer = question.allow_free_text && (!hasPresetOptions || pendingCustomOpen);
@@ -983,9 +1079,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setPrompt("");
 
     try {
-      for await (const ev of streamChat(botId, sid, nextPrompt, reasoningEffort || null)) {
-        applyStreamEvent(ev);
-      }
+      await consumeChatStream(streamChat(botId, sid, nextPrompt, reasoningEffort || null), sid);
       await refreshSessions(botId);
       await selectSession(sid, { force: true });
       await refreshBotState(botId);
@@ -1019,13 +1113,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     setPendingCustomOpen(false);
     setMessages(optimisticMessages);
     try {
-      for await (const ev of submitPendingQuestionAnswerStream(botId, sessionId, {
+      await consumeChatStream(submitPendingQuestionAnswerStream(botId, sessionId, {
         question_id: optimisticQuestion.question_id,
         answer_text: answerText,
         selected_option_value: option?.value ?? null,
-      })) {
-        applyStreamEvent(ev);
-      }
+      }), sessionId);
       await refreshSessions(botId);
       await selectSession(sessionId, { force: true });
       await refreshBotState(botId);
@@ -1044,6 +1136,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     if (!sessionId) return;
     try {
       await cancelSession(botId, sessionId);
+      clearToolApprovals(botId, sessionId);
     } catch (err) {
       setStatus(errorMessage(err));
     }
@@ -1094,9 +1187,10 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       setMessages(optimisticMessages);
       setVisibleHistoryStartIndex(findHistoryWindowStart(optimisticMessages, INITIAL_VISIBLE_HISTORY_TURNS));
       syncContextSnapshot(sessionId, optimisticMessages);
-      for await (const ev of streamRegenerateSessionMessage(botId, sessionId, messageId, reasoningEffort || null)) {
-        applyStreamEvent(ev);
-      }
+      await consumeChatStream(
+        streamRegenerateSessionMessage(botId, sessionId, messageId, reasoningEffort || null),
+        sessionId,
+      );
       await refreshSessions(botId);
       await selectSession(sessionId, { force: true });
       await refreshBotState(botId);
@@ -1812,6 +1906,23 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         <div className="border-t border-zinc-800 bg-zinc-950/95 px-5 py-4">
           {pendingQuestion && showPendingQuestionFallback ? (
             <div className="mx-auto mb-3 max-w-3xl">{renderPendingQuestionCard(pendingQuestion)}</div>
+          ) : null}
+
+          {visibleToolApprovals.length > 0 ? (
+            <div className="mx-auto mb-3 max-h-[42vh] max-w-3xl space-y-3 overflow-y-auto">
+              {visibleToolApprovals.map((approval) => (
+                <ToolApprovalCard
+                  key={approval.approval_id}
+                  approval={approval}
+                  onDecision={(approved) => void onSubmitToolApproval(approval, approved)}
+                />
+              ))}
+            </div>
+          ) : null}
+          {toolApprovalNotice?.botId === botId && toolApprovalNotice.sessionId === sessionId ? (
+            <p role="status" className="mx-auto mb-3 max-w-3xl break-words text-xs text-zinc-400">
+              {toolApprovalNotice.text}
+            </p>
           ) : null}
 
           <div className="mx-auto flex max-w-4xl items-end gap-3">

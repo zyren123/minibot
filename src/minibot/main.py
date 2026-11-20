@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 from pathlib import Path
+import sys
 
 from .config import load_config
 from .agent import Agent, UserInterruptedError
@@ -19,6 +20,7 @@ from .ui.cmd_model import handle_model_cmd
 from .ui.cmd_skills import handle_skills_cmd, load_skills_disabled
 from .ui.cmd_session import handle_session_cmd
 from .ui.cmd_team import handle_team_cmd
+from .tools.permissions import ToolApprovalRequest, current_permissions
 from .ui.ask_user import ask_user_question_cli
 from .server.bots import BotStore, DEFAULT_BOT_ID
 
@@ -194,7 +196,29 @@ async def repl(agent: Agent) -> None:
     async def _ask_user_handler(question: dict[str, object]) -> dict[str, object]:
         return await ask_user_question_cli(question, prompt_fn=_prompt)
 
+    approval_prompt_lock = asyncio.Lock()
+    approval_monitor: EscInterruptMonitor | None = None
+
+    async def _approve_tool(request: ToolApprovalRequest) -> bool:
+        permissions = current_permissions.get()
+        async with approval_prompt_lock:
+            if approval_monitor is None or permissions is None or not permissions.active or not sys.stdin.isatty():
+                return False
+            print(f"Tool approval requested by {request.actor} for {request.tool_name}.")
+            print(request.preview)
+            try:
+                with approval_monitor.suspend():
+                    if pt_input is None:
+                        from prompt_toolkit import PromptSession
+
+                        answer = await PromptSession().prompt_async("Approve once? [y/N] ")
+                        return answer.strip().lower() in {"y", "yes"}
+                    return await pt_input.confirm_async("Approve once?", default=False)
+            except (EOFError, KeyboardInterrupt):
+                return False
+
     agent.ask_user_handler = _ask_user_handler
+    agent.tool_approval_handler = _approve_tool
 
     try:
         while True:
@@ -339,7 +363,11 @@ async def repl(agent: Agent) -> None:
 
             try:
                 async with EscInterruptMonitor() as esc_monitor:
-                    await agent.run_loop(history, interrupt_queue=esc_monitor.queue)
+                    approval_monitor = esc_monitor
+                    try:
+                        await agent.run_loop(history, interrupt_queue=esc_monitor.queue)
+                    finally:
+                        approval_monitor = None
             except UserInterruptedError:
                 print_system("Interrupted (ESC).")
                 history.append({"role": "assistant", "content": "[Generation interrupted by user via ESC]"})
