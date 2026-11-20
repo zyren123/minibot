@@ -62,6 +62,7 @@ class SubagentTrace:
             event, invocation_id=invocation.id, artifact_id=metadata.artifact_id,
             artifact_run_id=metadata.run_id, artifact_tool_name=metadata.tool_name,
             size_bytes=metadata.size_bytes, content_type=metadata.content_type,
+            **({"workspace_id": metadata.workspace_id} if metadata.workspace_id is not None else {}),
         )
 
     def start_model(self) -> None:
@@ -232,6 +233,7 @@ class RunTrace:
             event, invocation_id=invocation.id, artifact_id=metadata.artifact_id,
             artifact_run_id=metadata.run_id, artifact_tool_name=metadata.tool_name,
             size_bytes=metadata.size_bytes, content_type=metadata.content_type,
+            **({"workspace_id": metadata.workspace_id} if metadata.workspace_id is not None else {}),
         )
 
     def observe(self, event: StreamEvent) -> None:

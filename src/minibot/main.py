@@ -306,10 +306,16 @@ async def repl(agent: Agent) -> None:
                     await handle_memory_cmd(cmd_args, agent.memory_manager)
                     continue
                 if cmd == "/skills":
+                    if agent.restricted_workspace:
+                        print_system("/skills requires a trusted local workspace.")
+                        continue
                     cmd_args = user_input.strip()[len("/skills"):].strip()
                     await handle_skills_cmd(cmd_args, agent)
                     continue
                 if cmd == "/agent":
+                    if agent.restricted_workspace:
+                        print_system("/agent requires a trusted local workspace.")
+                        continue
                     cmd_args = user_input.strip()[len("/agent"):].strip()
                     config_path = agent.config.app_home / "config" / "default.yaml"
 
@@ -322,6 +328,9 @@ async def repl(agent: Agent) -> None:
                     )
                     continue
                 if cmd == "/mcp":
+                    if agent.restricted_workspace:
+                        print_system("/mcp requires a trusted local workspace.")
+                        continue
                     cmd_args = user_input.strip()[len("/mcp"):].strip()
                     config_path = agent.config.app_home / "config" / "mcp_servers.yaml"
                     await handle_mcp_cmd(
@@ -341,6 +350,9 @@ async def repl(agent: Agent) -> None:
                     )
                     continue
                 if cmd == "/team":
+                    if agent.restricted_workspace:
+                        print_system("/team requires a trusted local workspace.")
+                        continue
                     cmd_args = user_input.strip()[len("/team"):].strip()
                     await handle_team_cmd(
                         cmd_args,
@@ -443,8 +455,8 @@ def main() -> None:
     workdir = Path.cwd().resolve()
     app_home = resolve_app_home()
     project_root = resolve_project_root(workdir)
-    _setup_readline(app_home / "history" / "history")
     config = load_config(workdir=workdir, app_home=app_home, project_root=project_root)
+    _setup_readline(app_home / "history" / "history")
     global_teams_enabled = bool(config.teams.enabled)
     bot_store = BotStore(app_home=app_home)
     default_bot = bot_store.read_bot_json(DEFAULT_BOT_ID)

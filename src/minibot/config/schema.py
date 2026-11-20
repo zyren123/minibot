@@ -1,6 +1,6 @@
 """Configuration schema definitions."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 import math
 from pathlib import Path
 from typing import Any, Literal
@@ -101,6 +101,18 @@ class ToolPermissionsConfig:
         object.__setattr__(self, "auto_review_paths", tuple(paths))
 
 
+def _validate_docker_limits(config: "BashConfig | WorkspaceConfig", prefix: str) -> None:
+    if not isinstance(config.image, str) or not config.image.strip() or config.image.startswith("-"):
+        raise ValueError(f"{prefix}.image must be a nonempty image reference")
+    for name in ("memory_mb", "pids_limit"):
+        value = getattr(config, name)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{prefix}.{name} must be a positive integer")
+    cpus = config.cpus
+    if type(cpus) not in (int, float) or not math.isfinite(cpus) or cpus <= 0:
+        raise ValueError(f"{prefix}.cpus must be a positive finite number")
+
+
 @dataclass(frozen=True)
 class BashConfig:
     """Bash execution policy. Local execution remains the default."""
@@ -113,14 +125,35 @@ class BashConfig:
     def __post_init__(self):
         if self.backend not in ("disabled", "local", "docker"):
             raise ValueError("tools.bash.backend must be disabled, local, or docker")
-        if not isinstance(self.image, str) or not self.image.strip() or self.image.startswith("-"):
-            raise ValueError("tools.bash.image must be a nonempty image reference")
-        for name in ("memory_mb", "pids_limit"):
-            value = getattr(self, name)
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"tools.bash.{name} must be a positive integer")
-        if type(self.cpus) not in (int, float) or not math.isfinite(self.cpus) or self.cpus <= 0:
-            raise ValueError("tools.bash.cpus must be a positive finite number")
+        _validate_docker_limits(self, "tools.bash")
+
+
+@dataclass(frozen=True)
+class WorkspaceConfig:
+    """Execution policy for the whole workspace. Docker applies to shell and file tools."""
+
+    backend: Literal["local", "docker"] = "local"
+    image: str = "python:3.12-slim"
+    memory_mb: int = 512
+    cpus: float = 1.0
+    pids_limit: int = 128
+    network: Literal["none", "bridge"] = "none"
+    timeout: int | float | None = None
+
+    def __post_init__(self):
+        if self.backend not in ("local", "docker"):
+            raise ValueError("workspace.backend must be local or docker")
+        _validate_docker_limits(self, "workspace")
+        if self.network not in ("none", "bridge"):
+            raise ValueError("workspace.network must be none or bridge")
+        if self.timeout is not None and (
+            type(self.timeout) not in (int, float) or not math.isfinite(self.timeout) or self.timeout <= 0
+        ):
+            raise ValueError("workspace.timeout must be a positive finite number or null")
+
+    @property
+    def restricted(self) -> bool:
+        return self.backend == "docker"
 
 
 @dataclass
@@ -245,7 +278,11 @@ class Config:
     durable_execution: bool = False
     context_offloading: ContextOffloadingConfig = field(default_factory=ContextOffloadingConfig)
 
+    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
+
     def __post_init__(self):
+        if not isinstance(self.workspace, WorkspaceConfig):
+            raise ValueError("workspace must be a WorkspaceConfig")
         if not isinstance(self.context_offloading, ContextOffloadingConfig):
             raise ValueError("context_offloading must be a ContextOffloadingConfig")
         if type(self.durable_execution) is not bool:
@@ -266,6 +303,10 @@ class Config:
             self.project_root = self.workdir
         if self.app_home is None:
             self.app_home = self.workdir / ".minibot"
+        if self.workspace.restricted:
+            sessions_dir = Path(self.session.sessions_dir).expanduser()
+            if not sessions_dir.is_absolute():
+                self.session = dataclass_replace(self.session, sessions_dir=str(self.app_home / sessions_dir))
         if self.trace_dir is not None:
             trace_path = Path(self.trace_dir).expanduser()
             self.trace_dir = trace_path if trace_path.is_absolute() else self.app_home / trace_path

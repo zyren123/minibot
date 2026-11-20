@@ -14,9 +14,10 @@ import uuid
 from openai import AsyncOpenAI
 
 from ..config import Config, load_config
+from ..config.workspace import require_outside_workspace, validate_workspace_runtime
 from ..config.writer import update_default_config, update_mcp_server_config, upsert_env_value
 from ..core.run_store import DurableRunError, RunStore
-from ..core.workspace import legacy_workspace_identity
+from ..core.workspace import configured_workspace_identity
 from ..memory.manager import MemoryManager
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
@@ -62,6 +63,7 @@ class AgentManager:
 
     def __init__(self, *, workdir: Path | None = None) -> None:
         self._base_config = load_config(workdir=workdir)
+        validate_workspace_runtime(self._base_config)
         self.app_home = Path(self._base_config.app_home).resolve()
         self._bot_store = BotStore(app_home=self.app_home)
         self._dashboard_store = DashboardStore(app_home=self.app_home)
@@ -563,6 +565,7 @@ class AgentManager:
             return existing
         home = self._bot_store.bot_home(bot_id)
         sessions_dir = (home / "sessions").resolve()
+        require_outside_workspace(self._base_config, sessions_dir, "session.sessions_dir")
         mgr = SessionManager(sessions_dir)
         self._sessions[bot_id] = mgr
         return mgr
@@ -756,11 +759,12 @@ class AgentManager:
     @contextmanager
     def _guard_session_edit(self, bot_id: str, session_id: str, sessions: SessionManager) -> Iterator[None]:
         home = self._bot_store.bot_home(bot_id)
+        require_outside_workspace(self._base_config, home / "runs", "Run journal")
         if not self._base_config.durable_execution and not (home / "runs" / "journal.sqlite3").is_file():
             yield
             return
         try:
-            store = RunStore(home, legacy_workspace_identity(self._base_config), sessions.sessions_dir)
+            store = RunStore(home, configured_workspace_identity(self._base_config), sessions.sessions_dir)
             with store.guard_session_mutation(session_id):
                 yield
         except DurableRunError as exc:
@@ -819,11 +823,15 @@ class AgentManager:
         }
 
     def skills_snapshot(self) -> list[dict[str, Any]]:
+        if self._base_config.workspace.restricted:
+            return []
         records = self._skill_records()
         records.sort(key=lambda item: (item["name"], item["source_type"], item["resolved_path"]))
         return records
 
     async def create_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._base_config.workspace.restricted:
+            raise ValueError("Host skills are unavailable in a restricted Docker workspace")
         async with self._global_lock:
             raw_name = str(payload.get("name") or "").strip()
             if not raw_name:
@@ -862,6 +870,8 @@ class AgentManager:
             return created
 
     async def delete_skill(self, *, scope: str, folder_name: str) -> dict[str, Any]:
+        if self._base_config.workspace.restricted:
+            raise ValueError("Host skills are unavailable in a restricted Docker workspace")
         async with self._global_lock:
             normalized_scope = str(scope or "").strip().lower()
             if normalized_scope != "user":
@@ -892,6 +902,8 @@ class AgentManager:
             }
 
     async def _ensure_admin_mcp_manager(self) -> MCPManager:
+        if self._base_config.workspace.restricted:
+            raise ValueError("Host MCP servers are unavailable in a restricted Docker workspace")
         async with self._global_lock:
             if self._admin_mcp_manager is not None:
                 return self._admin_mcp_manager
@@ -901,7 +913,7 @@ class AgentManager:
             return manager
 
     async def mcp_servers_snapshot(self) -> list[dict[str, Any]]:
-        manager = await self._ensure_admin_mcp_manager()
+        manager = None if self._base_config.workspace.restricted else await self._ensure_admin_mcp_manager()
         servers: list[dict[str, Any]] = []
         for s in self._base_config.mcp.servers:
             servers.append(
@@ -913,7 +925,7 @@ class AgentManager:
                     "args": list(s.args or []),
                     "url": s.url,
                     "env_keys": sorted(list((s.env or {}).keys())),
-                    "connected": manager.is_connected(s.name),
+                    "connected": manager is not None and manager.is_connected(s.name),
                 }
             )
         servers.sort(key=lambda d: d["name"])
@@ -1200,6 +1212,8 @@ class AgentManager:
         return cfg, data
 
     def _memory_manager_for(self, bot_id: str) -> MemoryManager:
+        if self._base_config.workspace.restricted:
+            raise ValueError("Host memory is unavailable in a restricted Docker workspace")
         cfg, _data = self._build_bot_config(bot_id)
         return MemoryManager(cfg.memory, cfg.app_home, cfg.project_root)
 
@@ -1379,8 +1393,16 @@ class AgentManager:
                 return existing
 
             cfg, data = self._build_bot_config(bot_id)
+            validate_workspace_runtime(cfg)
             plugin_paths = list(data.get("tool_plugins") or [])
-            plugin_tools = self._load_plugin_tools(plugin_paths)
+            if cfg.workspace.restricted:
+                if plugin_paths:
+                    raise ValueError("Host tool plugins are unavailable in a restricted Docker workspace")
+                if data.get("attached_subagent_bot_ids"):
+                    raise ValueError("Attached subagent bots are unavailable in a restricted Docker workspace")
+                plugin_tools = []
+            else:
+                plugin_tools = self._load_plugin_tools(plugin_paths)
 
             soul = self._bot_store.read_soul(bot_id).strip()
             extra_system_prompt = f"# Soul\n\n{soul}" if soul else None
@@ -1464,6 +1486,8 @@ class AgentManager:
 
     async def _run_bot_subagent(self, *, subagent_bot_id: str, description: str, prompt: str) -> str:
         cfg, data = self._build_bot_config(subagent_bot_id)
+        if cfg.workspace.restricted:
+            raise ValueError("Attached subagent bots are unavailable in a restricted Docker workspace")
         if not self._bot_enabled(data):
             raise ValueError(f"Subagent bot '{subagent_bot_id}' is disabled")
 

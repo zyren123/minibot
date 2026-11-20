@@ -5,6 +5,9 @@ skills_dir: ../skills
 file_checkpoints: false
 durable_execution: false
 
+workspace:
+  backend: local
+
 # LLM configuration
 llm:
   # Use environment variables: OPENAI_BASE_URL, OPENAI_API_KEY, MODEL_ID

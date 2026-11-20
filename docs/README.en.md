@@ -323,7 +323,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [x] **Model task evaluations**. Opt in to run fixed tasks repeatedly with a model provider. [Run model evaluations](model-evals.md)
 - [x] **Unified tool permissions and approvals**. Supports one-time human approval and AI review for configured file paths. [Configure approvals](tool-approvals.md)
 - [x] **Built-in `Task` tracing**. One JSONL file links the parent invocation to child model calls, tool outcomes, and terminal status. [Follow a Task subagent](run-traces.md#follow-a-task-subagent)
-- [ ] **Isolation for tools beyond Bash**.
+- [x] **Docker workspace**. Bash and file tools share a restricted workspace, with workspace-scoped durable runs and artifacts. [Configure a Docker workspace](workspace-backends.md)
 - [ ] **Call tracing for Teams, custom handlers, and attached bots**.
 - [x] **Pre-request context checks and tool output limits**. Fit recent turns and tool results within the configured model window. [Configure model context](model-context.md)
 - [x] **Large tool output offloading**. Store complete text for range reads and keyword searches within a session. [Configure context offloading](context-offloading.md)

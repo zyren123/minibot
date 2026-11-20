@@ -8,7 +8,7 @@ from ..base import ResultTool
 from ..result import ToolOutcome
 from ...config.schema import BashConfig
 from ...core.artifacts import current_artifacts
-from .bash_execution import LocalBackend, DockerBackend
+from .workspace_backend import LocalBackend, WorkspaceBackend
 from ...teams.context import get_team_execution_context
 
 
@@ -20,14 +20,16 @@ class BashTool(ResultTool):
 
     DANGEROUS_PATTERNS = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs"]
 
-    def __init__(self, workdir: Path, timeout: int | float = 60, *, config: BashConfig | None = None):
+    def __init__(
+        self, workdir: Path, timeout: int | float = 60, *,
+        config: BashConfig | None = None, backend: WorkspaceBackend | None = None,
+    ):
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be a positive finite number")
         self.workdir = workdir
         self.timeout = timeout
         self.config = config or BashConfig()
-        self._backend = (DockerBackend(workdir, self.config)
-                         if self.config.backend == "docker" else LocalBackend(workdir))
+        self._backend = backend if backend is not None else LocalBackend(workdir, bash=self.config)
 
     @property
     def input_schema(self) -> dict[str, Any]:

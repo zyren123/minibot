@@ -12,10 +12,17 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, BaseTool] = {}
+        self._sealed = False
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool."""
+        if self._sealed:
+            raise ValueError("Host tools are unavailable in a restricted Docker workspace")
         self._tools[tool.name] = tool
+
+    def seal(self) -> None:
+        """Prevent additions once the permitted tools have been registered."""
+        self._sealed = True
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""

@@ -16,6 +16,7 @@ from .schema import (
     ToolsConfig,
     ToolPermissionsConfig,
     BashConfig,
+    WorkspaceConfig,
     HooksConfig,
     MCPConfig,
     MCPServerConfig,
@@ -26,6 +27,7 @@ from .schema import (
     SubagentsConfig,
     SessionConfig,
 )
+from .workspace import require_outside_root, validate_workspace_runtime
 from ..utils.path import resolve_app_home, resolve_project_root
 
 _config: Config | None = None
@@ -37,6 +39,9 @@ skills_dir: ../skills
 trace_dir: null
 file_checkpoints: false
 durable_execution: false
+
+workspace:
+  backend: local
 
 llm:
   base_url: ${OPENAI_BASE_URL}
@@ -139,13 +144,16 @@ def _resolve_env_vars(value: Any, env_defaults: dict[str, str] | None = None) ->
     return value
 
 
-def _load_yaml(path: Path, env_defaults: dict[str, str] | None = None) -> dict:
-    """Load a YAML file and resolve environment variables."""
+def _read_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
     with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return _resolve_env_vars(data, env_defaults)
+        return yaml.safe_load(f) or {}
+
+
+def _load_yaml(path: Path, env_defaults: dict[str, str] | None = None) -> dict:
+    """Load a YAML file and resolve environment variables."""
+    return _resolve_env_vars(_read_yaml(path), env_defaults)
 
 
 
@@ -389,11 +397,30 @@ def load_config(
     project_root = (project_root or resolve_project_root(workdir)).resolve()
     global_config_dir = (app_home / "config").resolve()
 
-    _bootstrap_global_config(app_home, project_root)
-
-    env_defaults = _load_env_files(app_home, project_root)
-
-    default_config = _load_yaml(global_config_dir / "default.yaml", env_defaults)
+    default_path = global_config_dir / "default.yaml"
+    existing_default = default_path.is_file()
+    raw_default = _read_yaml(default_path) if existing_default else {}
+    raw_workspace = raw_default.get("workspace")
+    backend = raw_workspace.get("backend") if isinstance(raw_workspace, dict) else None
+    if backend is not None and backend != "local":
+        for path in (app_home, app_home / "config", default_path, app_home / ".env"):
+            require_outside_root(workdir, path, "Workspace backend configuration")
+    env_defaults = _load_env_files(app_home)
+    default_config = _resolve_env_vars(raw_default, env_defaults)
+    workspace = _parse_workspace_config(default_config.get("workspace", {}))
+    if workspace.restricted:
+        require_outside_root(workdir, app_home, "app_home")
+        for path in (app_home / ".env", global_config_dir, default_path,
+                     global_config_dir / "hooks.yaml", global_config_dir / "mcp_servers.yaml"):
+            require_outside_root(workdir, path, "App configuration")
+        _bootstrap_global_config(app_home)
+    else:
+        _bootstrap_global_config(app_home, project_root)
+        env_defaults = _load_env_files(app_home, project_root)
+        if not existing_default:
+            raw_default = _read_yaml(default_path)
+        default_config = _resolve_env_vars(raw_default, env_defaults)
+        workspace = _parse_workspace_config(default_config.get("workspace", {}))
     hooks_config = _load_yaml(global_config_dir / "hooks.yaml", env_defaults)
     mcp_config = _load_yaml(global_config_dir / "mcp_servers.yaml", env_defaults)
 
@@ -411,13 +438,14 @@ def load_config(
         base_dir=global_config_dir,
     )
 
-    _config = Config(
+    config = Config(
         workdir=workdir,
         app_home=app_home,
         project_root=project_root,
         skills_dir=skills_dir,
         llm=_parse_llm_config(default_config.get("llm", {}), env_defaults),
         tools=_parse_tools_config(default_config.get("tools", {})),
+        workspace=workspace,
         hooks=_parse_hooks_config(hooks_config, hooks_dir),
         mcp=_parse_mcp_config(mcp_config),
         memory=_parse_memory_config(default_config.get("memory"), app_home),
@@ -432,7 +460,18 @@ def load_config(
         durable_execution=default_config.get("durable_execution", False),
     )
 
-    return _config
+    validate_workspace_runtime(config)
+    _config = config
+    return config
+
+
+def _parse_workspace_config(data: Any) -> WorkspaceConfig:
+    if not isinstance(data, dict):
+        raise ValueError("workspace must be a mapping")
+    try:
+        return WorkspaceConfig(**data)
+    except TypeError as exc:
+        raise ValueError(f"Invalid workspace configuration: {exc}") from exc
 
 
 def _parse_context_offloading(data: Any) -> ContextOffloadingConfig:

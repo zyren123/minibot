@@ -2,7 +2,7 @@
 
 from .ask_user import AskUserQuestionTool
 from .bash import BashTool
-from .file import ReadFileTool, WriteFileTool, EditFileTool
+from .file import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from .todo import TodoWriteTool, TodoManager
 from .memory import (
     CreateMemoryTool,
@@ -20,6 +20,7 @@ __all__ = [
     "ReadFileTool",
     "WriteFileTool",
     "EditFileTool",
+    "ListDirTool",
     "TodoWriteTool",
     "TodoManager",
     "CreateMemoryTool",

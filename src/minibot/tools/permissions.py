@@ -8,17 +8,18 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import json
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import uuid4
 
 from ..config.schema import ToolPermissionsConfig
 from .base import BaseTool
-from .builtin.file import EditFileTool, ReadFileTool, WriteFileTool, safe_path
+from .builtin.file import EditFileTool, ListDirTool, ReadFileTool, WorkspaceFileTool, WriteFileTool
+from .builtin.workspace_backend import WorkspacePath
 
 ApprovalSource = Literal["policy", "human", "auto_review"]
 ReviewDecision = Literal["approve", "deny", "ask"]
-_FILE_TYPES = (ReadFileTool, WriteFileTool, EditFileTool)
+_FILE_TYPES = (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool)
 _WRITE_TYPES = (WriteFileTool, EditFileTool)
 _MAX_REVIEW_INPUT = 4_000
 
@@ -52,19 +53,19 @@ def parse_review(text: str) -> ReviewDecision:
 @dataclass(frozen=True)
 class ApprovedCall:
     args: dict[str, Any]
-    file: Path | None = None
+    file: WorkspacePath | None = None
     requires_active_run: bool = False
 
     def still_targets(self, tool: BaseTool) -> bool:
         return self.file is None or _resolve_target(tool, self.args) == self.file
 
 
-def _resolve_target(tool: BaseTool, args: dict[str, Any]) -> Path | None:
+def _resolve_target(tool: BaseTool, args: dict[str, Any]) -> WorkspacePath | None:
     path = args.get("path")
-    if not isinstance(path, str) or not path:
+    if not isinstance(tool, WorkspaceFileTool) or not isinstance(path, str) or not path:
         return None
     try:
-        return safe_path(tool.workdir.resolve(), path)
+        return tool.permission_target(path)
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -96,7 +97,7 @@ class PermissionRun:
             return None
 
         if target is not None:
-            arguments["path"] = target.relative_to(tool.workdir.resolve()).as_posix()
+            arguments["path"] = target.relative
             encoded = json.dumps(arguments, ensure_ascii=True, allow_nan=False, indent=2)
 
         call = ApprovedCall(arguments, target, requires_active_run=choice == "ask")
@@ -141,7 +142,7 @@ class PermissionRun:
             or call.file is None or len(preview) > _MAX_REVIEW_INPUT
         ):
             return False
-        target = Path(call.args["path"])
+        target = PurePosixPath(call.args["path"])
         if any(part.startswith(".") for part in target.parts):
             return False
         return any(fnmatchcase(target.as_posix(), pattern) for pattern in self.policy.auto_review_paths)

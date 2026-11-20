@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Callable, Iterable, Iterator
 
 from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
+from ..config.workspace import validate_workspace_runtime
 from ..core.model_context import ContextWindowExceeded
 from ..core.run_store import DurableRunError, DurableRunPaused, RunState, RunStore, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded
@@ -113,6 +114,9 @@ class Minibot:
         if sessions_dir is not None:
             config.session.sessions_dir = str(Path(sessions_dir).expanduser().resolve())
 
+        validate_workspace_runtime(config)
+        if tools and config.workspace.restricted:
+            raise ValueError("Custom Python tools are unavailable in a restricted Docker workspace")
         self.config = config
         self._event_router = RouterEventSink()
         self._session_manager = (
@@ -618,6 +622,8 @@ class Minibot:
 
     def register_tool(self, tool: ToolInput) -> None:
         """Register a tool (BaseTool, Python function, or ToolSpec dict)."""
+        if self.agent.restricted_workspace:
+            raise ValueError("Custom Python tools are unavailable in a restricted Docker workspace")
         if isinstance(tool, BaseTool):
             self.agent.tool_registry.register(tool)
             return

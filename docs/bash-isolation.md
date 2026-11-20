@@ -44,6 +44,8 @@ Successful output keeps the existing text format. A failed command includes its 
 
 ## Isolation limits
 
+To put both Bash and file tools in Docker, [configure a Docker workspace](workspace-backends.md).
+
 This policy isolates only the built-in Bash tool. File tools, Python tools, hooks, MCP tools, and custom SDK tools retain their existing access. Files and credentials already inside the workspace are available to the command and can be changed or deleted. The Docker daemon and selected image must be trusted. A container is not protection against a compromised daemon or kernel.
 
 Local mode is host execution, not a sandbox. On POSIX, Minibot kills and reaps its shell process and stops ordinary children in the same process group on completion, timeout, or cancellation. A process that creates a separate session can escape that group. Windows uses best-effort process-tree termination through `taskkill /T /F`. Windows runtime behavior was not verified for this change.

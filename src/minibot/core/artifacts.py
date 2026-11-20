@@ -46,6 +46,7 @@ class ArtifactMetadata:
     size_bytes: int
     content_type: str
     location: str
+    workspace_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,11 +65,15 @@ class ArtifactStore:
 
     def __init__(
         self, app_home: Path, workdir: Path, sessions_dir: Path, session_id: str, max_bytes: int,
+        *, workspace_id: str | None = None,
     ) -> None:
         self.root = app_home.resolve() / "artifacts"
         identity = b"\0".join([
             os.fsencode(workdir.resolve()), os.fsencode(sessions_dir.resolve()), session_id.encode("utf-8"),
         ])
+        self.workspace_id = workspace_id
+        if workspace_id is not None:
+            identity += b"\0" + workspace_id.encode("ascii")
         self.directory = self.root / sha256(identity).hexdigest()
         self.max_bytes = max_bytes
 
@@ -93,9 +98,12 @@ class ArtifactStore:
         artifact_id = base64.urlsafe_b64encode(uuid4().bytes).decode("ascii").rstrip("=")
         metadata = ArtifactMetadata(
             artifact_id, run_id, tool_name, datetime.now(timezone.utc).isoformat(),
-            len(content), "text/plain; charset=utf-8", f"{artifact_id}.artifact",
+            len(content), "text/plain; charset=utf-8", f"{artifact_id}.artifact", self.workspace_id,
         )
-        header = json.dumps(asdict(metadata), ensure_ascii=True).encode("ascii") + b"\n"
+        fields = asdict(metadata)
+        if metadata.workspace_id is None:
+            del fields["workspace_id"]
+        header = json.dumps(fields, ensure_ascii=True).encode("ascii") + b"\n"
         if len(header) > _HEADER_LIMIT:
             raise ArtifactError("Artifact metadata exceeds its storage limit.")
         temporary = None
@@ -153,6 +161,8 @@ class ArtifactStore:
             path = self.directory / f"{artifact_id}.artifact"
             with open(path, "rb", opener=self._open_record) as file:
                 metadata = self._metadata(file, artifact_id)
+                if metadata.workspace_id != self.workspace_id:
+                    raise ArtifactError("Artifact unavailable in this workspace.")
                 if not include_content:
                     return metadata, ""
                 if metadata.size_bytes > self.max_bytes:

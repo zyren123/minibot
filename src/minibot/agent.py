@@ -13,14 +13,15 @@ from pathlib import Path
 import uuid
 from typing import Any, Literal
 
-from .config import Config, get_config
+from .config import Config, HooksConfig, MCPConfig, get_config
+from .config.workspace import validate_workspace_runtime
 from .file_checkpoints import GitFileCheckpoints
 from .traces import RunTrace, RunStatus
 from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
 from .core.model_context import ContextWindowExceeded, prepare_model_request
 from .core.run_store import DurableRunError, DurableRunPaused, RunJournal, RunStore, StepState
-from .core.workspace import WorkspaceIdentity, legacy_workspace_identity
+from .core.workspace import WorkspaceIdentity
 from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
@@ -32,6 +33,7 @@ from .tools.permissions import (
 )
 from .tools.builtin.artifact import ReadArtifactTool, SearchArtifactTool
 from .tools.builtin.bash_execution import ExecutionCleanupCancelledError
+from .tools.builtin.workspace_backend import DockerBackend, LocalBackend, WorkspaceBackend
 from .tools.builtin.ask_user import normalize_ask_user_prompt_and_options
 from .tools.builtin import (
     AskUserQuestionTool,
@@ -39,6 +41,7 @@ from .tools.builtin import (
     ReadFileTool,
     WriteFileTool,
     EditFileTool,
+    ListDirTool,
     TodoWriteTool,
     TodoManager,
     CreateMemoryTool,
@@ -144,8 +147,22 @@ class Agent:
             raise ValueError(f"Unknown role: {role}")
 
         self.config = config or get_config()
+        validate_workspace_runtime(self.config)
         self.workdir = self.config.workdir
-        self.workspace_identity = workspace_identity or legacy_workspace_identity(self.config)
+        self.restricted_workspace = self.config.workspace.restricted
+        self.file_checkpoints = (
+            GitFileCheckpoints(self.workdir, self.config.app_home) if self.config.file_checkpoints else None
+        )
+        self.workspace_backend: WorkspaceBackend = (
+            DockerBackend(self.config) if self.restricted_workspace
+            else LocalBackend(self.workdir, bash=self.config.tools.bash, checkpoints=self.file_checkpoints)
+        )
+        if self.restricted_workspace:
+            if workspace_identity is not None and workspace_identity != self.workspace_backend.identity:
+                raise ValueError("Workspace identity differs from the restricted Docker backend")
+            if role != "solo" or team_runtime is not None:
+                raise ValueError("Team execution requires a trusted local workspace")
+        self.workspace_identity = workspace_identity or self.workspace_backend.identity
         self.run_store = (
             RunStore(self.config.app_home, self.workspace_identity, Path(self.config.session.sessions_dir))
             if self.config.durable_execution and role != "teammate" else None
@@ -158,8 +175,10 @@ class Agent:
         self.team_role: Literal["lead", "teammate"] = "teammate" if role == "teammate" else "lead"
         self.team_id = team_id
         self.member_id = member_id
-        self.allow_subagent_delegation = bool(allow_subagent_delegation) and role != "teammate"
-        self.allow_team_tools = bool(allow_team_tools)
+        self.allow_subagent_delegation = (
+            bool(allow_subagent_delegation) and role != "teammate" and not self.restricted_workspace
+        )
+        self.allow_team_tools = bool(allow_team_tools) and not self.restricted_workspace
         self.ask_user_handler = ask_user_handler
         self.tool_approval_handler = tool_approval_handler
         self._permission_actor: str | None = None
@@ -180,18 +199,19 @@ class Agent:
         )
 
         resolved_skills_dir = skills_dir if skills_dir is not None else self.config.skills_dir
-        self._skills_dir_source = resolved_skills_dir
-        self.skill_loader = SkillLoader(resolved_skills_dir, disabled_skills=disabled_skills)
+        self._skills_dir_source = [] if self.restricted_workspace else resolved_skills_dir
+        self.skill_loader = SkillLoader(
+            self._skills_dir_source, disabled_skills=disabled_skills, include_defaults=not self.restricted_workspace,
+        )
         self.todo_manager = TodoManager()
         self.agent_registry = AgentRegistry()
         self.agent_registry.apply_config(self.config.subagents)
         self.tool_registry = ToolRegistry()
-        self.file_checkpoints = (
-            GitFileCheckpoints(self.workdir, self.config.app_home) if self.config.file_checkpoints else None
-        )
 
-        self.hook_manager = HookManager(self.config.hooks, self.workdir)
-        self.mcp_manager = MCPManager(self.config.mcp, self.workdir)
+        hooks = HooksConfig(enabled=False) if self.restricted_workspace else self.config.hooks
+        mcp = MCPConfig(enabled=False) if self.restricted_workspace else self.config.mcp
+        self.hook_manager = HookManager(hooks, self.workdir)
+        self.mcp_manager = MCPManager(mcp, self.workdir)
 
         self.memory_manager = (
             MemoryManager(
@@ -199,7 +219,7 @@ class Agent:
                 self.config.app_home,
                 self.config.project_root,
             )
-            if self.config.memory.enabled
+            if self.config.memory.enabled and not self.restricted_workspace
             else None
         )
         if self.memory_manager is not None:
@@ -232,6 +252,8 @@ class Agent:
         )
 
         self._register_tools()
+        if self.restricted_workspace:
+            self.tool_registry.seal()
         self.system_prompt = self._build_system_prompt()
 
     def _ui_enabled(self) -> bool:
@@ -274,6 +296,7 @@ class Agent:
         self.skill_loader = SkillLoader(
             self._skills_dir_source,
             disabled_skills=disabled_skills,
+            include_defaults=not self.restricted_workspace,
         )
 
         tool = self.tool_registry.get("Skill")
@@ -345,18 +368,23 @@ class Agent:
         """Register all available tools."""
         self.tool_registry.register(AskUserQuestionTool())
         if self.config.tools.bash.backend != "disabled":
+            timeout = self.config.tools.timeout
+            if self.restricted_workspace and self.config.workspace.timeout is not None:
+                timeout = self.config.workspace.timeout
             self.tool_registry.register(BashTool(
-                self.workdir, self.config.tools.timeout, config=self.config.tools.bash,
+                self.workdir, timeout, config=self.config.tools.bash, backend=self.workspace_backend,
             ))
-        self.tool_registry.register(ReadFileTool(self.workdir))
+        self.tool_registry.register(ReadFileTool(self.workdir, backend=self.workspace_backend))
+        self.tool_registry.register(ListDirTool(self.workdir, backend=self.workspace_backend))
         if self.config.context_offloading.enabled:
             output_chars = self.config.llm.max_tool_output_chars
             self.tool_registry.register(ReadArtifactTool(output_chars))
             self.tool_registry.register(SearchArtifactTool(output_chars))
-        self.tool_registry.register(WriteFileTool(self.workdir, checkpoints=self.file_checkpoints))
-        self.tool_registry.register(EditFileTool(self.workdir, checkpoints=self.file_checkpoints))
+        self.tool_registry.register(WriteFileTool(self.workdir, backend=self.workspace_backend))
+        self.tool_registry.register(EditFileTool(self.workdir, backend=self.workspace_backend))
         self.tool_registry.register(TodoWriteTool(self.todo_manager))
-        self.tool_registry.register(SkillTool(self.skill_loader))
+        if not self.restricted_workspace:
+            self.tool_registry.register(SkillTool(self.skill_loader))
 
         # Teammates are explicitly blocked from recursive delegation.
         if self.allow_subagent_delegation:
@@ -405,6 +433,10 @@ class Agent:
             self.tool_registry.register(TeamShutdownTool(self.team_runtime))
 
     async def set_team_tools_enabled(self, *, enabled: bool) -> None:
+        if self.restricted_workspace:
+            if enabled:
+                raise ValueError("Team execution requires a trusted local workspace")
+            return
         self._unregister_team_tools()
         self.config.teams.enabled = bool(enabled)
 
@@ -555,26 +587,31 @@ Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when exter
         capability_lines = [
             "## Tool Capability Hierarchy",
             "Choose the most specific reliable capability for the job:",
-            "- **Core Skills** (High Precision):",
-            f"  {self.skill_loader.get_descriptions()}",
-            "  Rule: If a user request matches a Skill description, prefer the `Skill` tool over manual improvisation.",
         ]
+        if self.restricted_workspace:
+            capability_lines.append("Use workspace file, shell, and todo tools. File paths are relative to /workspace.")
+        else:
+            capability_lines.extend([
+                "- **Core Skills** (High Precision):",
+                f"  {self.skill_loader.get_descriptions()}",
+                "  Rule: If a user request matches a Skill description, prefer the `Skill` tool over manual improvisation.",
+            ])
         subagent_section = self._build_subagent_prompt_section()
         if subagent_section:
             capability_lines.append(subagent_section)
-        capability_lines.extend(
-            [
+        if not self.restricted_workspace:
+            capability_lines.extend([
                 "- **Standard Tools** (Atomic Actions):",
                 "  Use file, shell, todo, memory, and coordination tools for precise steps when no higher-level capability fits.",
-            ]
-        )
+            ])
+        workspace_path = "/workspace" if self.restricted_workspace else self.workdir
         capability_section = "\n".join(capability_lines)
 
         prompt = self._join_prompt_sections(
-            f"""You are Minibot, a production-grade engineering agent operating in `{self.workdir}`.
+            f"""You are Minibot, a production-grade engineering agent operating in `{workspace_path}`.
 Your default stance is engineering-first: strong at coding, debugging, planning, review, research, and technical writing, while still handling general productivity tasks reliably.""",
             f"""## Environment Context
-- Working Directory: {self.workdir}
+- Working Directory: {workspace_path}
 - User: Current active developer
 - Date: {datetime.now().strftime("%Y-%m-%d")}
 - Role: {self.role}""",
@@ -694,9 +731,10 @@ You are now live. Await instructions and begin the loop.""",
             or self.hook_manager.get_hooks(HookEvent.POST_TOOL_CALL)
         ):
             return False
-        return type(self.tool_registry.get(name)) in {
-            ReadFileTool, ReadArtifactTool, SearchArtifactTool, AskUserQuestionTool,
-        }
+        tool = self.tool_registry.get(name)
+        if type(tool) in (ReadFileTool, ListDirTool):
+            return tool.backend is self.workspace_backend
+        return type(tool) in (ReadArtifactTool, SearchArtifactTool, AskUserQuestionTool)
 
     async def _execute_tool_with_hooks(
         self,
@@ -1511,6 +1549,8 @@ You are now live. Await instructions and begin the loop.""",
         publish_messages: Callable[[list[dict]], None] | None = None,
     ) -> list[dict]:
         """Run a new turn or attach to a stored durable turn."""
+        if isinstance(self.workspace_backend, DockerBackend):
+            self.workspace_backend.validate_root()
         if self.run_store is None:
             if resume_run_id is not None:
                 raise DurableRunError("Durable execution is disabled.")
@@ -1636,6 +1676,7 @@ You are now live. Await instructions and begin the loop.""",
                 store = ArtifactStore(
                     self.config.app_home, self.workdir, Path(self.config.session.sessions_dir),
                     self.session_id, offloading.max_artifact_bytes,
+                    workspace_id=self.workspace_identity.value if self.restricted_workspace else None,
                 )
                 async with budget.time_limit():
                     catalog = await asyncio.to_thread(store.recent)

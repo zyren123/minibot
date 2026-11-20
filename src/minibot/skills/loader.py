@@ -25,24 +25,21 @@ class SkillLoader:
         skills_dir: Path | Iterable[Path],
         *,
         disabled_skills: Iterable[str] | None = None,
+        include_defaults: bool = True,
     ):
-        self.skills_dirs = self._normalize_dirs(skills_dir)
+        self.skills_dirs = self._normalize_dirs(skills_dir, include_defaults=include_defaults)
         self.disabled_skills = {str(name) for name in (disabled_skills or [])}
         self.skills: dict[str, dict[str, Any]] = {}
         self.load_skills()
 
-    def _normalize_dirs(self, skills_dir: Path | Iterable[Path]) -> list[Path]:
+    def _normalize_dirs(self, skills_dir: Path | Iterable[Path], *, include_defaults: bool) -> list[Path]:
         if isinstance(skills_dir, (str, Path)):
             dirs = [Path(skills_dir)]
         else:
             dirs = [Path(path) for path in skills_dir]
 
-        # Explicit or configured directories win over bundled defaults.
-        dirs.append(self.BUILTIN_SKILLS_DIR)
-
-        # Common external directories come last.
-        for common_dir in self.COMMON_SKILL_DIRS:
-            dirs.append(common_dir)
+        if include_defaults:
+            dirs.extend((self.BUILTIN_SKILLS_DIR, *self.COMMON_SKILL_DIRS))
 
         normalized: list[Path] = []
         for path in dirs:

@@ -399,7 +399,7 @@ teams:
 - [x] **模型任务评估**。可选择接入真实模型提供方，重复运行固定任务。[运行评估](docs/model-evals.md)
 - [x] **统一工具权限和审批**。支持单次人工确认和限定路径的 AI 代审。[审批配置](docs/tool-approvals.md)
 - [x] **内置 `Task` 父子追踪**。在同一个 JSONL 文件中关联父调用、子代理的模型调用、工具结果和终止状态。[追踪说明](docs/run-traces.md#follow-a-task-subagent)
-- [ ] **将隔离扩展到 Bash 之外的工具**。
+- [x] **Docker 工作区**。Bash 和文件工具共用受限工作区，持久运行与大型输出均关联同一工作区。[配置 Docker 工作区](docs/workspace-backends.md)
 - [ ] **Team、自定义处理器和附加 Bot 的调用链追踪**。
 - [x] **请求前的上下文检查和工具输出上限**。按模型窗口保留近期对话，限制发给模型的工具输出。[上下文说明](docs/model-context.md)
 - [x] **大型工具输出卸载**。保存完整文本，支持同一会话内按范围读取及关键词搜索。[配置和使用](docs/context-offloading.md)
