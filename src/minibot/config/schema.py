@@ -137,12 +137,13 @@ class HooksConfig:
 class MCPServerConfig:
     """Single MCP server configuration."""
     name: str
-    transport: str = "stdio"  # stdio or sse
+    transport: str = "stdio"  # stdio, sse, or streamable_http
     command: str | None = None  # For stdio
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    url: str | None = None  # For sse
+    url: str | None = None  # For sse and streamable_http
     enabled: bool = True
+    headers: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 @dataclass

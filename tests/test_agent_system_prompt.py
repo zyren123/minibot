@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,7 +116,7 @@ def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(t
         memory_enabled=True,
         mcp_enabled=True,
     )
-    agent.mcp_manager._clients["docs"] = object()
+    agent.mcp_manager._clients["docs"] = SimpleNamespace(is_connected=True)
     agent.refresh_system_prompt()
 
     prompt = agent.system_prompt

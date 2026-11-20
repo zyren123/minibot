@@ -643,7 +643,7 @@ export default function ConfigView(props: {
           .split(/\r?\n/)
           .map((item) => item.trim())
           .filter(Boolean);
-      } else if (mcpDraft.transport === "sse") {
+      } else if (mcpDraft.transport === "sse" || mcpDraft.transport === "streamable_http") {
         payload.url = mcpDraft.url.trim() || null;
       }
       await updateMcpServer(mcpDraft.name, payload);

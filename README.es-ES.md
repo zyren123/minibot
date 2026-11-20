@@ -117,7 +117,7 @@ En lugar de utilizar Pydantic para generar esquemas, se analizan directamente la
 ### 3. 🔗 Integración MCP (Protocolo de contexto del modelo)
 Compatible con el protocolo MCP de Claude, conecta con todo.
 - **Implementación**: `src/minibot/mcp/`
-- **Puntos destacados**: Implementa las capas de transporte basadas en `stdio` y `sse`, y adapta automáticamente los recursos MCP como herramientas que el agente puede invocar.
+- **Puntos destacados**: Implementa las capas de transporte basadas en `stdio`, `sse` y `streamable_http`, y adapta automáticamente los recursos MCP como herramientas que el agente puede invocar.
 
 ### 4. 🎣 Hooks y ciclo de vida (ganchos del ciclo de vida)
 Basado en un simple patrón de observador, es una capa de seguridad y supervisión.
@@ -400,7 +400,7 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 - [ ] **Aislamiento de otras herramientas además de Bash**.
 - [ ] **Trazas de llamadas para equipos, manejadores personalizados y bots adjuntos**.
 - [x] **Control del contexto y límites de salida de herramientas**. Ajusta los turnos recientes y los resultados al límite del modelo. [Configurar el contexto](docs/model-context.md)
-- [ ] **Transporte Streamable HTTP para MCP**.
+- [x] **Transporte Streamable HTTP para MCP**. Conecta con servidores remotos que usan las revisiones de protocolo de 2025. [Configuración](docs/mcp-streamable-http.md)
 - [ ] **Puntos de control y reversión de cambios en archivos**.
 - [ ] **Recuperación general de tareas tras reiniciar un proceso**.
 - [ ] **Visión**. Soporte nativo para la comprensión de imágenes multimodales.

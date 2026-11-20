@@ -1,11 +1,12 @@
 """MCP client implementation."""
 
-import asyncio
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from ..config.schema import MCPServerConfig
 from .protocol import MCPTool, MCPToolResult, MCPResource, MCPServerInfo, MCPCapabilities
+from .streamable_http import STREAMABLE_HTTP_VERSIONS, StreamableHTTPTransport
 from .transport import MCPTransport, StdioTransport, SSETransport
 
 
@@ -24,11 +25,14 @@ class MCPClient:
 
     @property
     def is_connected(self) -> bool:
-        return self._transport is not None and self._transport.is_connected
+        return self._server_info is not None and self._transport is not None and self._transport.is_connected
 
     async def connect(self) -> None:
         """Connect to the MCP server."""
-        # Create transport
+        if self.is_connected:
+            return
+        await self.disconnect()
+        protocol_version = "2024-11-05"
         if self.config.transport == "stdio":
             self._transport = StdioTransport(
                 command=self.config.command,
@@ -38,25 +42,35 @@ class MCPClient:
             )
         elif self.config.transport == "sse":
             self._transport = SSETransport(url=self.config.url)
+        elif self.config.transport == "streamable_http":
+            self._transport = StreamableHTTPTransport(self.config.url, self.config.headers)
+            protocol_version = STREAMABLE_HTTP_VERSIONS[0]
         else:
             raise ValueError(f"Unknown transport: {self.config.transport}")
 
-        await self._transport.connect()
-        await self._initialize()
+        try:
+            await self._transport.connect()
+            await self._initialize(protocol_version)
+        except BaseException:
+            with suppress(Exception):
+                await self.disconnect()
+            raise
 
     async def disconnect(self) -> None:
         """Disconnect from the MCP server."""
-        if self._transport:
-            await self._transport.disconnect()
-            self._transport = None
+        transport, self._transport = self._transport, None
+        self._server_info = None
+        self._tools.clear()
+        self._resources.clear()
+        if transport is not None:
+            await transport.disconnect()
 
-    async def _initialize(self) -> None:
+    async def _initialize(self, protocol_version: str) -> None:
         """Initialize the MCP session."""
-        # Send initialize request
         result = await self._transport.send({
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": protocol_version,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "minibot",
@@ -69,7 +83,7 @@ class MCPClient:
         server_info = result.get("serverInfo", {})
         capabilities = result.get("capabilities", {})
 
-        self._server_info = MCPServerInfo(
+        info = MCPServerInfo(
             name=server_info.get("name", self.name),
             version=server_info.get("version", "unknown"),
             capabilities=MCPCapabilities(
@@ -85,12 +99,14 @@ class MCPClient:
         })
 
         # Load tools if available
-        if self._server_info.capabilities.tools:
+        if info.capabilities.tools:
             await self._load_tools()
 
         # Load resources if available
-        if self._server_info.capabilities.resources:
+        if info.capabilities.resources:
             await self._load_resources()
+
+        self._server_info = info
 
     async def _load_tools(self) -> None:
         """Load available tools from the server."""

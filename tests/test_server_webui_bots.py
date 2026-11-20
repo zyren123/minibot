@@ -302,7 +302,7 @@ def test_mcp_servers_endpoint_includes_connected_state(
     async def fake_connect_all(self: MCPManager) -> dict[str, Exception | None]:
         for server in self.config.servers:
             if server.enabled:
-                self._clients[server.name] = object()
+                self._clients[server.name] = SimpleNamespace(is_connected=True)
         return {server.name: None for server in self.config.servers}
 
     monkeypatch.setattr(MCPManager, "connect_all", fake_connect_all)
@@ -344,11 +344,11 @@ def test_put_mcp_server_updates_stdio_config_and_runtime_state(
     async def fake_connect_all(self: MCPManager) -> dict[str, Exception | None]:
         for server in self.config.servers:
             if server.enabled:
-                self._clients[server.name] = object()
+                self._clients[server.name] = SimpleNamespace(is_connected=True)
         return {server.name: None for server in self.config.servers}
 
     async def fake_connect_server(self: MCPManager, name: str) -> Exception | None:
-        self._clients[name] = object()
+        self._clients[name] = SimpleNamespace(is_connected=True)
         return None
 
     async def fake_disconnect_server(self: MCPManager, name: str) -> None:
@@ -376,13 +376,16 @@ def test_put_mcp_server_updates_stdio_config_and_runtime_state(
     assert "enabled: false" in saved
 
 
-def test_put_mcp_server_updates_sse_url(
+@pytest.mark.parametrize("transport", ["sse", "streamable_http"])
+def test_put_mcp_server_updates_http_url(
     server_env: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
+    transport: str,
 ) -> None:
     from src.minibot.mcp.manager import MCPManager
     from src.minibot.server.app import create_app
 
+    monkeypatch.setenv("MINIBOT_TEST_MCP_HEADER", "Bearer synthetic-token")
     config_dir = server_env["home"] / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "mcp_servers.yaml"
@@ -391,8 +394,10 @@ def test_put_mcp_server_updates_sse_url(
             "enabled: true\n"
             "servers:\n"
             "  - name: remote\n"
-            "    transport: sse\n"
+            f"    transport: {transport}\n"
             "    url: https://old.example.invalid/mcp\n"
+            "    headers:\n"
+            "      Authorization: ${MINIBOT_TEST_MCP_HEADER}\n"
             "    enabled: false\n"
         ),
         encoding="utf-8",
@@ -402,7 +407,7 @@ def test_put_mcp_server_updates_sse_url(
         return {}
 
     async def fake_connect_server(self: MCPManager, name: str) -> Exception | None:
-        self._clients[name] = object()
+        self._clients[name] = SimpleNamespace(is_connected=True)
         return None
 
     monkeypatch.setattr(MCPManager, "connect_all", fake_connect_all)
@@ -418,10 +423,13 @@ def test_put_mcp_server_updates_sse_url(
     assert body["url"] == "https://new.example.invalid/mcp"
     assert body["enabled_default"] is True
     assert body["connected"] is True
+    assert "headers" not in body
+    assert "synthetic-token" not in resp.text
 
     saved = config_path.read_text(encoding="utf-8")
     assert "https://new.example.invalid/mcp" in saved
     assert "enabled: true" in saved
+    assert "${MINIBOT_TEST_MCP_HEADER}" in saved
 
 
 def test_sessions_are_isolated_and_deletable(client: TestClient) -> None:

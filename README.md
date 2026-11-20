@@ -119,7 +119,7 @@ MiniBot 采用极其精简的模块化设计，没有任何复杂的类继承链
 ### 3. 🔗 MCP Integration (模型上下文协议)
 完全兼容 Claude 的 MCP 协议，连接万物。
 - **实现**：`src/minibot/mcp/`
-- **亮点**：实现了基于 `stdio` 和 `sse` 的传输层，自动将 MCP 资源适配为 Agent 可调用的 Tools。
+- **亮点**：实现了基于 `stdio`、`sse` 和 `streamable_http` 的传输层，自动将 MCP 资源适配为 Agent 可调用的 Tools。
 
 ### 4. 🎣 Hooks & Lifecycle (生命周期钩子)
 基于简单的观察者模式实现的安全与监控层。
@@ -402,7 +402,7 @@ teams:
 - [ ] **将隔离扩展到 Bash 之外的工具**。
 - [ ] **Team、自定义处理器和附加 Bot 的调用链追踪**。
 - [x] **请求前的上下文检查和工具输出上限**。按模型窗口保留近期对话，限制发给模型的工具输出。[上下文说明](docs/model-context.md)
-- [ ] **MCP Streamable HTTP 传输**。
+- [x] **MCP Streamable HTTP 传输**。支持采用 2025 协议版本的远程端点。[配置说明](docs/mcp-streamable-http.md)
 - [ ] **文件检查点和回滚**。
 - [ ] **进程重启后的通用任务恢复**。
 - [ ] **Vision**。原生支持多模态图像理解。

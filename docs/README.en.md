@@ -119,7 +119,7 @@ No Pydantic for Schema generation—direct parsing of Python function signatures
 ### 3. 🔗 MCP Integration (Model Context Protocol)
 Fully compatible with Claude's MCP protocol, connecting everything.
 - **Implementation**: `src/minibot/mcp/`
-- **Highlights**: Implements transport layers based on `stdio` and `sse`, automatically adapting MCP resources into Agent-callable Tools.
+- **Highlights**: Implements transport layers based on `stdio`, `sse`, and `streamable_http`, automatically adapting MCP resources into Agent-callable Tools.
 
 ### 4. 🎣 Hooks & Lifecycle (Lifecycle Hooks)
 A security and monitoring layer based on a simple observer pattern.
@@ -326,7 +326,7 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 - [ ] **Isolation for tools beyond Bash**.
 - [ ] **Call tracing for Teams, custom handlers, and attached bots**.
 - [x] **Pre-request context checks and tool output limits**. Fit recent turns and tool results within the configured model window. [Configure model context](model-context.md)
-- [ ] **MCP Streamable HTTP transport**.
+- [x] **MCP Streamable HTTP transport**. Connect to remote endpoints using the 2025 protocol revisions. [Configuration](mcp-streamable-http.md)
 - [ ] **File checkpoints and rollback**.
 - [ ] **General task recovery after a process restart**.
 - [ ] **Vision**. Native multimodal image understanding.

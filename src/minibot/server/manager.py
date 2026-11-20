@@ -915,7 +915,7 @@ class AgentManager:
                 if "args" in patch:
                     raw_args = patch.get("args") or []
                     update_payload["args"] = [str(item).strip() for item in raw_args if str(item).strip()]
-            elif cfg.transport == "sse":
+            elif cfg.transport in ("sse", "streamable_http"):
                 if "url" in patch:
                     url = self._optional_text(patch.get("url"))
                     update_payload["url"] = url

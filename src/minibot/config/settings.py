@@ -292,6 +292,7 @@ def _parse_mcp_config(data: dict | None) -> MCPConfig:
             args=server_data.get("args", []),
             env=server_data.get("env", {}),
             url=server_data.get("url"),
+            headers=server_data.get("headers") or {},
             enabled=server_data.get("enabled", True),
         ))
 

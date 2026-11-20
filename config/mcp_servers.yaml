@@ -35,3 +35,11 @@ servers:
   #   transport: sse
   #   url: https://api.example.com/mcp
   #   enabled: false
+
+  # Example: Remote Streamable HTTP server
+  # - name: remote-http
+  #   transport: streamable_http
+  #   url: https://api.example.com/mcp
+  #   headers:
+  #     Authorization: '${MINIBOT_REMOTE_MCP_AUTHORIZATION}'
+  #   enabled: false

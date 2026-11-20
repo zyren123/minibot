@@ -19,42 +19,21 @@ class MCPManager:
         self.enabled = config.enabled
 
         self._clients: dict[str, MCPClient] = {}
+        self._connection_locks: dict[str, asyncio.Lock] = {}
 
     async def connect_all(self) -> dict[str, Exception | None]:
         """Connect to all configured servers. Returns errors by server name."""
         if not self.enabled:
             return {}
 
-        errors: dict[str, Exception | None] = {}
-
-        # Connect to each server in parallel
-        tasks = []
-        for server_config in self.config.servers:
-            if server_config.enabled:
-                client = MCPClient(server_config, self.workdir)
-                self._clients[server_config.name] = client
-                tasks.append((server_config.name, client.connect()))
-
-        results = await asyncio.gather(
-            *[t[1] for t in tasks],
-            return_exceptions=True,
-        )
-
-        for (name, _), result in zip(tasks, results):
-            if isinstance(result, Exception):
-                errors[name] = result
-                # Remove failed client
-                self._clients.pop(name, None)
-            else:
-                errors[name] = None
-
-        return errors
+        names = [server.name for server in self.config.servers if server.enabled]
+        results = await asyncio.gather(*(self.connect_server(name) for name in names))
+        return dict(zip(names, results))
 
     async def disconnect_all(self) -> None:
         """Disconnect from all servers."""
-        tasks = [client.disconnect() for client in self._clients.values()]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self._clients.clear()
+        names = self._clients.keys() | self._connection_locks.keys()
+        await asyncio.gather(*(self.disconnect_server(name) for name in names), return_exceptions=True)
 
     def get_client(self, name: str) -> MCPClient | None:
         """Get a client by server name."""
@@ -64,20 +43,24 @@ class MCPManager:
         """Get all tools from all connected servers."""
         tools = []
         for client in self._clients.values():
-            tools.extend(client.get_tools())
+            if client.is_connected:
+                tools.extend(client.get_tools())
         return tools
 
     def get_all_resources(self) -> list[MCPResource]:
         """Get all resources from all connected servers."""
         resources = []
         for client in self._clients.values():
-            resources.extend(client.get_resources())
+            if client.is_connected:
+                resources.extend(client.get_resources())
         return resources
 
     def register_tools(self, registry: ToolRegistry) -> int:
         """Register all MCP tools with the tool registry. Returns count."""
         count = 0
         for client in self._clients.values():
+            if not client.is_connected:
+                continue
             for mcp_tool in client.get_tools():
                 adapter = MCPToolAdapter(mcp_tool, client)
                 registry.register(adapter)
@@ -86,7 +69,7 @@ class MCPManager:
 
     def list_servers(self) -> list[str]:
         """List all connected server names."""
-        return list(self._clients.keys())
+        return [name for name in self._clients if self.is_connected(name)]
 
     def get_all_server_configs(self) -> list[MCPServerConfig]:
         """Return every configured server (connected or not)."""
@@ -94,35 +77,38 @@ class MCPManager:
 
     def is_connected(self, name: str) -> bool:
         """Whether a server is currently connected."""
-        return name in self._clients
+        client = self._clients.get(name)
+        return client is not None and client.is_connected
 
     async def connect_server(self, name: str) -> Exception | None:
         """Connect a single server by config name. Returns error or None."""
         cfg = next((s for s in self.config.servers if s.name == name), None)
         if cfg is None:
             return ValueError(f"Unknown server: {name}")
-        if name in self._clients:
-            return None  # already connected
-        client = MCPClient(cfg, self.workdir)
-        try:
-            await client.connect()
-        except Exception as exc:
-            return exc
-        self._clients[name] = client
+        async with self._connection_locks.setdefault(name, asyncio.Lock()):
+            client = self._clients.get(name)
+            if client is None:
+                client = MCPClient(cfg, self.workdir)
+            try:
+                await client.connect()
+            except Exception as exc:
+                return exc
+            self._clients[name] = client
         return None
 
     async def disconnect_server(self, name: str) -> None:
         """Disconnect a single server by name."""
-        client = self._clients.pop(name, None)
-        if client is not None:
-            await client.disconnect()
+        async with self._connection_locks.setdefault(name, asyncio.Lock()):
+            client = self._clients.pop(name, None)
+            if client is not None:
+                await client.disconnect()
 
     @property
     def server_count(self) -> int:
         """Number of connected servers."""
-        return len(self._clients)
+        return len(self.list_servers())
 
     @property
     def tool_count(self) -> int:
         """Total number of MCP tools."""
-        return sum(len(c.get_tools()) for c in self._clients.values())
+        return len(self.get_all_tools())
