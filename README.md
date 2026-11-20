@@ -389,11 +389,22 @@ teams:
 
 ## 🗺️ Roadmap
 
-- [x] **长期记忆支持**: 基于本地文件系统的持久化上下文记忆
-- [x] **Agent Teams (MVP)**: 会话内并发团队、消息总线、任务板、锁冲突保护
-- [ ] **Vision**: 原生支持多模态图像理解
-- [ ] **Sandboxing**: 基于 Docker 的工具执行沙箱
-- [ ] **Web Interface**: 基于 FastAPI 的轻量级 API
+- [x] **长期记忆**。持久化保存上下文记忆。
+- [x] **Agent Teams (MVP)**。会话内并发协作，支持消息、任务板和锁。
+- [x] **WebUI 和 FastAPI**。通过 `minibot-web` 启动 WebUI 和 API。
+- [x] **Bash 的 Docker 隔离**。可为内置 Bash 工具启用 Docker。[配置说明](docs/bash-isolation.md)
+- [x] **Subagent 工具允许列表**。执行内置子代理的工具调用前校验权限。`explore` 和 `plan` 默认仅可使用 `read_file`，可显式启用 Bash。
+- [x] **运行预算**。主 Agent 与通过 `Task` 启动的子代理共享同一执行段的预算。[预算说明](docs/runtime-budget.md)
+- [x] **执行追踪和离线任务回归**。JSONL 追踪与可重复的任务检查。[追踪和回归说明](docs/run-traces.md)
+- [x] **模型任务评估**。可选择接入真实模型提供方，重复运行固定任务。[运行评估](docs/model-evals.md)
+- [ ] **统一工具权限和审批**。
+- [ ] **将隔离扩展到 Bash 之外的工具**。
+- [ ] **父子 Agent 调用链追踪**。
+- [ ] **请求前的上下文检查和统一工具输出管理**。
+- [ ] **MCP Streamable HTTP 传输**。
+- [ ] **文件检查点和回滚**。
+- [ ] **进程重启后的通用任务恢复**。
+- [ ] **Vision**。原生支持多模态图像理解。
 
 ---
 

@@ -387,11 +387,22 @@ El agente principal (solo/ líder) habilita de forma predeterminada la salida fl
 
 ## 🗺️ Hoja de ruta
 
-- [x] **Soporte de memoria a largo plazo**: Memoria de contexto persistente basada en el sistema de archivos local
-- [x] **Equipos de agentes (MVP)**: Equipos concurrentes en una sesión, bus de mensajes, tablero de tareas, protección contra bloqueos de concurrencia
-- [ ] **Visión**: Soporte nativo para la comprensión de imágenes multimodales
-- [ ] **Sandbox**: Sandbox de ejecución de herramientas basado en Docker
-- [ ] **Interfaz web**: API ligera basada en FastAPI
+- [x] **Memoria a largo plazo**. Memoria de contexto persistente.
+- [x] **Equipos de agentes (MVP)**. Agentes concurrentes dentro de una sesión, con mensajes, un tablero de tareas y bloqueos.
+- [x] **WebUI y FastAPI**. Inicia la WebUI y la API con `minibot-web`.
+- [x] **Aislamiento de Bash con Docker**. Activa Docker para la herramienta Bash integrada. [Configuración de Docker](docs/bash-isolation.md)
+- [x] **Listas de herramientas permitidas para subagentes**. MiniBot comprueba los permisos antes de ejecutar una llamada a una herramienta desde un subagente integrado. Por defecto, `explore` y `plan` solo pueden usar `read_file`. La configuración permite habilitar Bash de forma explícita.
+- [x] **Presupuestos de ejecución**. El agente principal y sus subagentes de `Task` comparten un presupuesto por segmento de ejecución. [Presupuestos de ejecución](docs/runtime-budget.md)
+- [x] **Trazas de ejecución y pruebas de regresión sin conexión**. Trazas JSONL y pruebas repetibles de tareas. [Trazas y pruebas de regresión](docs/run-traces.md)
+- [x] **Evaluación de tareas con modelos**. Puedes ejecutar tareas fijas varias veces con un proveedor de modelos. [Ejecutar evaluaciones](docs/model-evals.md)
+- [ ] **Permisos y aprobaciones unificados para herramientas**.
+- [ ] **Aislamiento de otras herramientas además de Bash**.
+- [ ] **Trazas de llamadas entre agentes principales y subagentes**.
+- [ ] **Control del contexto antes de cada solicitud y gestión unificada de la salida de las herramientas**.
+- [ ] **Transporte Streamable HTTP para MCP**.
+- [ ] **Puntos de control y reversión de cambios en archivos**.
+- [ ] **Recuperación general de tareas tras reiniciar un proceso**.
+- [ ] **Visión**. Soporte nativo para la comprensión de imágenes multimodales.
 
 ---
 

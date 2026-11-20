@@ -313,11 +313,22 @@ The main Agent (solo/lead) has streaming body output enabled by default; if the 
 
 ## 🗺️ Roadmap
 
-- [x] **Long-term memory**: Persistent context memory based on local file system
-- [x] **Agent Teams (MVP)**: In-session concurrent teams, message bus, task board, lock conflict protection
-- [ ] **Vision**: Native multimodal image understanding
-- [ ] **Sandboxing**: Docker-based tool execution sandbox
-- [ ] **Web Interface**: Lightweight FastAPI-based API
+- [x] **Long-term memory**. Persistent context memory.
+- [x] **Agent Teams (MVP)**. Concurrent agents within a session, with messaging, a task board, and locks.
+- [x] **WebUI and FastAPI**. Start the WebUI and API with `minibot-web`.
+- [x] **Docker isolation for Bash**. Enable Docker for the built-in Bash tool. [Docker configuration](bash-isolation.md)
+- [x] **Subagent tool allowlists**. MiniBot checks permissions before executing a tool call from a built-in subagent. By default, `explore` and `plan` can use only `read_file`. An explicit configuration can enable Bash.
+- [x] **Runtime budgets**. The main agent and its `Task` subagents share one budget per execution segment. [Runtime budgets](runtime-budget.md)
+- [x] **Run traces and offline task regression checks**. JSONL traces and repeatable task checks. [Traces and regression checks](run-traces.md)
+- [x] **Model task evaluations**. Opt in to run fixed tasks repeatedly with a model provider. [Run model evaluations](model-evals.md)
+- [ ] **Unified tool permissions and approvals**.
+- [ ] **Isolation for tools beyond Bash**.
+- [ ] **Parent-child agent call tracing**.
+- [ ] **Pre-request context checks and unified tool-output management**.
+- [ ] **MCP Streamable HTTP transport**.
+- [ ] **File checkpoints and rollback**.
+- [ ] **General task recovery after a process restart**.
+- [ ] **Vision**. Native multimodal image understanding.
 
 ---
 
