@@ -79,6 +79,7 @@ Thumbs.db
 docs/superpowers/specs/
 docs/superpowers/plans/
 .codex/
+/.audit/
 
 # WebUI
 webui/node_modules/
