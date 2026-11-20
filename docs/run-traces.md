@@ -63,3 +63,21 @@ The contract tests read generated files and exercise failures, repeated IDs, con
 ```bash
 uv run --with pytest --with pytest-asyncio pytest tests/test_run_traces.py tests/test_server_webui_bots.py -q
 ```
+
+## Run the task regression checks
+
+From the repository root, run the fixed tasks with a scripted model and temporary workspaces.
+
+```bash
+uv run --with pytest --with pytest-asyncio pytest -v tests/test_task_regression.py
+```
+
+The suite covers file creation and editing, pre-tool hook refusal, tool failure with a fallback,
+cancellation during tool execution, and resuming a persisted question through a new server instance.
+The scenarios run without model credentials, a Docker daemon, or a running web server.
+
+For each task, pytest checks the trace steps and terminal status, the operation journal, and the final
+files. A task can pass with a tool error when the scenario expects that error and the fallback works.
+An unusable trace or a mismatch fails the task with a diagnostic and a nonzero exit status. The same
+command runs probes that corrupt a captured trace or its effects and verify the corresponding failures.
+The existing CI pytest step discovers this suite automatically.
