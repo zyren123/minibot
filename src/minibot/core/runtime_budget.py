@@ -40,6 +40,8 @@ class RuntimeBudget:
         self.tool_calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self._reserved_output_tokens = 0
+        self._output_released = asyncio.Event()
 
     def _check_time(self) -> None:
         if self.loop.time() >= self.deadline:
@@ -66,10 +68,26 @@ class RuntimeBudget:
             self.deadline += self.loop.time() - started
 
     def output_headroom(self, requested: int) -> int:
-        remaining = self.limits.max_output_tokens - self.output_tokens
+        remaining = self.limits.max_output_tokens - self.output_tokens - self._reserved_output_tokens
         if remaining <= 0:
             raise RuntimeBudgetExceeded("max_output_tokens")
         return min(requested, remaining)
+
+    async def wait_for_output(self) -> None:
+        while self.output_tokens < self.limits.max_output_tokens <= self.output_tokens + self._reserved_output_tokens:
+            self._output_released.clear()
+            async with self.time_limit():
+                await self._output_released.wait()
+
+    @contextmanager
+    def reserve_output(self, allowance: ModelAllowance):
+        """Hold unused output capacity until a concurrent model request finishes."""
+        self._reserved_output_tokens += allowance.max_tokens
+        try:
+            yield
+        finally:
+            self._reserved_output_tokens -= allowance.max_tokens
+            self._output_released.set()
 
     def start_model(self, *, input_estimate: int, max_tokens: int) -> ModelAllowance:
         self._check_time()

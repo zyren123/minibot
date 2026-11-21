@@ -214,6 +214,10 @@ class RunStore:
                     name TEXT NOT NULL UNIQUE,
                     container_id TEXT
                 );
+                CREATE TABLE IF NOT EXISTS child_deliveries (
+                    run_id TEXT PRIMARY KEY REFERENCES child_runs(run_id),
+                    receipt TEXT NOT NULL
+                );
                 """)
 
     @contextmanager
@@ -572,6 +576,23 @@ class RunJournal:
             ).rowcount != 1:
                 raise DurableRunError("Docker lease is unavailable.")
 
+    def child_delivery(self) -> str | None:
+        with self.store._connection() as db:
+            self.store._find(db, self.session_id, self.run_id)
+            row = db.execute("SELECT receipt FROM child_deliveries WHERE run_id = ?", (self.run_id,)).fetchone()
+        return row["receipt"] if row is not None else None
+
+    def finish_child_delivery(self, receipt: str) -> None:
+        with self.store._connection() as db:
+            self.store._find(db, self.session_id, self.run_id)
+            if not db.execute(
+                "INSERT INTO child_deliveries(run_id, receipt) SELECT run_id, ? FROM runs "
+                "WHERE run_id = ? AND status = 'completed' AND NOT EXISTS "
+                "(SELECT 1 FROM child_containers WHERE run_id = runs.run_id)",
+                (receipt, self.run_id),
+            ).rowcount:
+                raise DurableRunError("Child delivery requires a completed run and confirmed Docker cleanup.")
+
     def plan_batch(
         self, messages: list[Message], assistant: Message,
         calls: list[tuple[str, str, str]],
@@ -707,8 +728,18 @@ class RunJournal:
             self._set_status(db, "interrupted")
 
     def abandon(self) -> None:
-        run = self.state()
-        if run.status in _TERMINAL:
-            raise DurableRunError("The durable run has already ended.")
         with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = self.store._find(db, self.session_id, self.run_id)
+            if run.status in _TERMINAL:
+                raise DurableRunError("The durable run has already ended.")
+            if db.execute("SELECT 1 FROM child_containers WHERE run_id = ?", (self.run_id,)).fetchone():
+                raise DurableRunError("Confirm Docker cleanup before abandoning this run.")
+            if db.execute(
+                "SELECT 1 FROM child_runs JOIN runs ON runs.run_id = child_runs.run_id "
+                "LEFT JOIN child_containers ON child_containers.run_id = runs.run_id WHERE runs.parent_run_id = ? "
+                "AND (runs.status NOT IN ('completed', 'failed', 'abandoned') OR child_containers.run_id IS NOT NULL)",
+                (self.run_id,),
+            ).fetchone():
+                raise DurableRunError("Resolve or abandon the child runs before abandoning this run.")
             self._set_status(db, "abandoned")

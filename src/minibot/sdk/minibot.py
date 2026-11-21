@@ -13,12 +13,15 @@ from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
 from ..config.workspace import validate_workspace_runtime
 from ..core.model_context import ContextWindowExceeded
+from ..core.artifacts import ArtifactError
 from ..core.run_store import ChildRun, DurableRunError, DurableRunPaused, RunState, RunStore, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
 from ..file_checkpoints import FileCheckpoint, FileCheckpointError, GitFileCheckpoints, finish_file_operation
 from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
+from ..subagents.deliverables import ChildArtifact, apply_child_artifact, parse_deliverable_paths
+from ..subagents.durable import DurableSubagents
 from ..tools.base import BaseTool
 from ..tools.permissions import ToolApprovalHandler, ToolApprovalRequest
 
@@ -522,6 +525,34 @@ class Minibot:
         """Inspect durable children of a run in the active parent session."""
         return self._durable_store().list_children(self.session_id, parent_run_id)
 
+    def _child_runtime(self, parent_run_id: str, child_run_id: str) -> tuple[DurableSubagents, ChildRun]:
+        child = self._durable_store().get_child(self.session_id, parent_run_id, child_run_id)
+        runtime = self.agent.durable_subagents
+        if runtime is None:
+            raise DurableRunError("Durable child execution is disabled.")
+        return runtime, child
+
+    def list_child_artifacts(self, parent_run_id: str, child_run_id: str) -> list[ChildArtifact]:
+        """Return a child's committed deliverable manifest."""
+        runtime, child = self._child_runtime(parent_run_id, child_run_id)
+        return runtime.list_artifacts(child)
+
+    def read_child_artifact(self, parent_run_id: str, child_run_id: str, path: str) -> str:
+        """Verify and read a committed child deliverable."""
+        runtime, child = self._child_runtime(parent_run_id, child_run_id)
+        return runtime.read_artifact(child, path)
+
+    def apply_child_artifact(
+        self, parent_run_id: str, child_run_id: str, path: str, destination: str,
+    ) -> bool:
+        """Create a chosen parent file. Return False if identical bytes are already present."""
+        content = self.read_child_artifact(parent_run_id, child_run_id, path)
+        [relative] = parse_deliverable_paths([destination])
+        workdir = self.agent.workdir.resolve()
+        if (workdir / relative).is_relative_to(self._durable_store().root):
+            raise ArtifactError("A child deliverable cannot be applied to durable run storage.")
+        return apply_child_artifact(workdir, relative, content)
+
     def list_child_run_steps(self, parent_run_id: str, child_run_id: str) -> list[StepState]:
         store = self._durable_store()
         child = store.get_child(self.session_id, parent_run_id, child_run_id)
@@ -539,18 +570,12 @@ class Minibot:
         """Record a verified result after confirming Docker cleanup."""
         if not isinstance(output, str) or type(is_error) is not bool:
             raise ValueError("Recovery requires tool result text and a boolean error flag.")
-        child = self._durable_store().get_child(self.session_id, parent_run_id, child_run_id)
-        runtime = self.agent.durable_subagents
-        if runtime is None:
-            raise DurableRunError("Durable child execution is disabled.")
+        runtime, child = self._child_runtime(parent_run_id, child_run_id)
         await runtime.resolve(child, step_id, output, is_error=is_error)
 
     async def abandon_child_run(self, parent_run_id: str, child_run_id: str) -> None:
         """Close a stopped child after verifying its workspace and Docker cleanup."""
-        child = self._durable_store().get_child(self.session_id, parent_run_id, child_run_id)
-        runtime = self.agent.durable_subagents
-        if runtime is None:
-            raise DurableRunError("Durable child execution is disabled.")
+        runtime, child = self._child_runtime(parent_run_id, child_run_id)
         await runtime.abandon(child)
 
     def resolve_run_step(self, run_id: str, step_id: str, output: str, *, is_error: bool = False) -> None:
