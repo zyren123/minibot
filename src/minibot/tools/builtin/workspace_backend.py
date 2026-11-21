@@ -11,7 +11,7 @@ from ...config.schema import BashConfig, Config
 from ...core.workspace import WorkspaceIdentity, configured_workspace_identity, trusted_workspace_identity
 from ...file_checkpoints import GitFileCheckpoints, finish_file_operation
 from ...utils.path import safe_path
-from .bash_execution import DockerCommand, ExecutionResult, LocalCommand
+from .bash_execution import DockerCommand, DockerLease, ExecutionResult, LocalCommand
 from .workspace_files import (
     MAX_MUTATION_BYTES, OUTPUT_LIMIT_EXIT, FileOutputLimit, bounded_file_text, bounded_listing, restricted_parts,
 )
@@ -128,14 +128,21 @@ class LocalBackend:
 class DockerBackend:
     """Run each operation in a fresh container with the same read-write bind mount."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, lease: DockerLease | None = None) -> None:
         self.timeout = config.workspace.timeout or config.tools.timeout
-        self._command = DockerCommand(config.workdir.resolve(), config.workspace)
+        self._command = DockerCommand(config.workdir.resolve(), config.workspace, lease)
         self.identity = configured_workspace_identity(config)
         self.validate_root()
 
     def validate_root(self) -> None:
         self._command.bind_root()
+
+    async def reconcile(self) -> None:
+        await self._command.reconcile()
+
+    def cleanup_pending(self) -> bool:
+        lease = self._command.lease
+        return lease is not None and lease.pending() is not None
 
     def target(self, path: str) -> WorkspacePath:
         return WorkspacePath("/".join(restricted_parts(path)) or ".")

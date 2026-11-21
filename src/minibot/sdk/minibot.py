@@ -13,7 +13,7 @@ from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
 from ..config.workspace import validate_workspace_runtime
 from ..core.model_context import ContextWindowExceeded
-from ..core.run_store import DurableRunError, DurableRunPaused, RunState, RunStore, StepState
+from ..core.run_store import ChildRun, DurableRunError, DurableRunPaused, RunState, RunStore, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
 from ..file_checkpoints import FileCheckpoint, FileCheckpointError, GitFileCheckpoints, finish_file_operation
@@ -517,6 +517,41 @@ class Minibot:
     def pause_run(self, run_id: str) -> bool:
         """Request a pause at the next safe boundary of an active run."""
         return self._durable_store().pause(self.session_id, run_id)
+
+    def list_child_runs(self, parent_run_id: str) -> list[ChildRun]:
+        """Inspect durable children of a run in the active parent session."""
+        return self._durable_store().list_children(self.session_id, parent_run_id)
+
+    def list_child_run_steps(self, parent_run_id: str, child_run_id: str) -> list[StepState]:
+        store = self._durable_store()
+        child = store.get_child(self.session_id, parent_run_id, child_run_id)
+        return store.for_child(child).list_steps(child.run.session_id, child.run.run_id)
+
+    def pause_child_run(self, parent_run_id: str, child_run_id: str) -> bool:
+        """Request interruption and cleanup of an active child."""
+        store = self._durable_store()
+        child = store.get_child(self.session_id, parent_run_id, child_run_id)
+        return store.for_child(child).pause(child.run.session_id, child.run.run_id)
+
+    async def resolve_child_run_step(
+        self, parent_run_id: str, child_run_id: str, step_id: str, output: str, *, is_error: bool = False,
+    ) -> None:
+        """Record a verified result after confirming Docker cleanup."""
+        if not isinstance(output, str) or type(is_error) is not bool:
+            raise ValueError("Recovery requires tool result text and a boolean error flag.")
+        child = self._durable_store().get_child(self.session_id, parent_run_id, child_run_id)
+        runtime = self.agent.durable_subagents
+        if runtime is None:
+            raise DurableRunError("Durable child execution is disabled.")
+        await runtime.resolve(child, step_id, output, is_error=is_error)
+
+    async def abandon_child_run(self, parent_run_id: str, child_run_id: str) -> None:
+        """Close a stopped child after verifying its workspace and Docker cleanup."""
+        child = self._durable_store().get_child(self.session_id, parent_run_id, child_run_id)
+        runtime = self.agent.durable_subagents
+        if runtime is None:
+            raise DurableRunError("Durable child execution is disabled.")
+        await runtime.abandon(child)
 
     def resolve_run_step(self, run_id: str, step_id: str, output: str, *, is_error: bool = False) -> None:
         """Record the verified outcome of an ambiguous step without running the tool."""

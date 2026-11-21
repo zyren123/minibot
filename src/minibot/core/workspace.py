@@ -21,6 +21,12 @@ class WorkspaceIdentity:
         return cls(sha256(identity.encode("ascii")).hexdigest())
 
 
+@dataclass(frozen=True)
+class DockerContainer:
+    name: str
+    container_id: str | None
+
+
 def legacy_workspace_identity(config: Config) -> WorkspaceIdentity:
     return trusted_workspace_identity(config.workdir, config.tools.bash)
 

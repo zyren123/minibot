@@ -1,25 +1,28 @@
 import asyncio
 import csv
-from contextlib import suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 import io
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import sys
 from tempfile import TemporaryDirectory, gettempdir
 import uuid
+from typing import Protocol
 
 from ...config.schema import BashConfig, WorkspaceConfig
 from ...config.workspace import require_outside_root
-from ...core.workspace import restricted_root_key
+from ...core.workspace import DockerContainer, restricted_root_key
 
 _OUTPUT_LIMIT = 50000
 _ADMIN_TIMEOUT = 10.0
+_DURABLE_LABEL = "io.minibot.durable-container"
 
 
 class ExecutionCleanupCancelledError(asyncio.CancelledError):
@@ -229,14 +232,94 @@ def _trusted_docker_cli(workdir: Path, env: dict[str, str]) -> str:
 
 
 @dataclass(frozen=True)
+class DockerEngine:
+    endpoint: str
+    engine_id: str
+
+
+class DockerLease(Protocol):
+    @property
+    def engine(self) -> DockerEngine: ...
+    def pending(self) -> DockerContainer | None: ...
+    def reserve(self, name: str) -> None: ...
+    def confirm(self, name: str, container_id: str) -> None: ...
+    def release(self, name: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class _DockerClient:
+    executable: str
+    cwd: Path
+    env: dict[str, str]
+
+    async def cli(self, *args: str) -> ExecutionResult:
+        async with asyncio.timeout(_ADMIN_TIMEOUT):
+            return await _process(self.executable, *args, cwd=self.cwd, env=self.env)
+
+    async def checked(self, *args: str) -> str:
+        result = await self.cli(*args)
+        if result.exit_code or result.incomplete_output:
+            raise RuntimeError(f"Docker {' '.join(args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}")
+        return result.stdout
+
+    async def image_id(self, image: str) -> str:
+        details = json.loads(await self.checked("image", "inspect", image))[0]
+        if details.get("Config", {}).get("Volumes"):
+            raise RuntimeError("Docker Bash rejects image-declared volumes")
+        return details["Id"]
+
+    async def engine(self) -> DockerEngine:
+        engine_id = (await self.checked("info", "--format", "{{.ID}}")).strip()
+        if not engine_id:
+            raise RuntimeError("Docker did not report a daemon ID")
+        return DockerEngine(self.env["DOCKER_HOST"], engine_id)
+
+    async def reconcile(self, record: DockerContainer) -> None:
+        # The exact name supplies the evidence of a committed create if its
+        # response did not reach MiniBot. A known ID also covers a prior rm.
+        async def matches() -> list[str]:
+            result = await self.checked(
+                "ps", "--all", "--no-trunc", "--filter", f"name=^/{record.name}$",
+                "--format", "{{.ID}}",
+            )
+            return result.split()
+
+        found = await matches()
+        if not found:
+            if record.container_id is None:
+                raise RuntimeError("Docker create may still be in flight")
+            # Also find renamed containers by ID. A late start uses this ID.
+            found = (await self.checked(
+                "ps", "--all", "--no-trunc", "--filter", f"id={record.container_id}", "--format", "{{.ID}}",
+            )).split()
+            if not found:
+                return
+        if len(found) != 1 or (record.container_id is not None and found != [record.container_id]):
+            raise RuntimeError("Docker container identity changed")
+        container_id = found[0]
+        labels = json.loads(await self.checked("inspect", "--format", "{{json .Config.Labels}}", container_id))
+        if not isinstance(labels, dict) or labels.get(_DURABLE_LABEL) != record.name:
+            raise RuntimeError("Docker container is not owned by this execution")
+        await self.checked("rm", "-f", "--volumes", container_id)
+        remaining = await self.checked(
+            "ps", "--all", "--no-trunc", "--filter", f"id={container_id}", "--format", "{{.ID}}",
+        )
+        if remaining.strip():
+            raise RuntimeError("Docker container removal could not be confirmed")
+
+
+@dataclass(frozen=True)
 class DockerCommand:
     workdir: Path
     config: BashConfig | WorkspaceConfig
+    lease: DockerLease | None = None
     _root_key: tuple[int, int] | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.config, WorkspaceConfig):
             object.__setattr__(self, "_root_key", restricted_root_key(self.workdir))
+        elif self.lease is not None:
+            raise ValueError("A durable Docker lease requires a restricted workspace")
 
     def bind_root(self) -> Path:
         if self._root_key is None:
@@ -250,29 +333,66 @@ class DockerCommand:
     ) -> ExecutionResult:
         return await self.execute("/bin/sh", "-c", command, timeout=timeout, output_limit=output_limit)
 
+    @asynccontextmanager
+    async def _client(self):
+        restricted = isinstance(self.config, WorkspaceConfig)
+        env = dict(os.environ)
+        executable = _trusted_docker_cli(self.bind_root(), env) if restricted else "docker"
+        client = _DockerClient(executable, Path(self.workdir.anchor) if restricted else self.workdir, env)
+        endpoint = env.get("DOCKER_HOST") if not env.get("DOCKER_CONTEXT") else None
+        if not endpoint:
+            context = env.get("DOCKER_CONTEXT") or (await client.checked("context", "show")).strip()
+            contexts = json.loads(await client.checked("context", "inspect", context))
+            endpoint = contexts[0]["Endpoints"]["docker"]["Host"]
+        if not endpoint.startswith(("unix://", "npipe://")):
+            raise RuntimeError("Docker Bash requires a local Unix socket or Windows named pipe endpoint")
+        env.pop("DOCKER_CONTEXT", None)
+        env["DOCKER_HOST"] = endpoint
+        if not restricted:
+            yield client
+            return
+        # The original Docker CLI config can automatically inject proxy settings.
+        temp_parent = Path(gettempdir())
+        require_outside_root(self.workdir, temp_parent, "Docker CLI temporary directory")
+        with TemporaryDirectory(prefix="minibot-docker-", dir=temp_parent) as cli_config:
+            env["DOCKER_CONFIG"] = cli_config
+            if self.lease is not None and await client.engine() != self.lease.engine:
+                raise RuntimeError("Docker daemon identity changed")
+            yield client
+
+    async def probe(self) -> tuple[DockerEngine, str]:
+        async with self._client() as client:
+            return await client.engine(), await client.image_id(self.config.image)
+
+    async def reconcile(self) -> None:
+        if self.lease is None:
+            return
+        async with self._client() as client:
+            if (record := self.lease.pending()) is not None:
+                await client.reconcile(record)
+                self.lease.release(record.name)
+
     async def execute(
         self, program: str, *arguments: str, timeout: float, output_limit: int | None = None,
         stdin: bytes | None = None,
     ) -> ExecutionResult:
+        async with AsyncExitStack() as resources:
+            return await self._execute(
+                resources, program, *arguments, timeout=timeout, output_limit=output_limit, stdin=stdin,
+            )
+
+    async def _execute(
+        self, resources: AsyncExitStack, program: str, *arguments: str, timeout: float, output_limit: int | None,
+        stdin: bytes | None,
+    ) -> ExecutionResult:
         restricted = isinstance(self.config, WorkspaceConfig)
         label = "workspace" if restricted else "bash"
         name = f"minibot-{label}-{uuid.uuid4().hex}"
-        cli_config = None
-        env = dict(os.environ)
         create_task = None
         may_exist = False
-        executable = _trusted_docker_cli(self.bind_root(), env) if restricted else "docker"
-        client_cwd = Path(self.workdir.anchor) if restricted else self.workdir
-
-        async def cli(*args: str) -> ExecutionResult:
-            async with asyncio.timeout(_ADMIN_TIMEOUT):
-                return await _process(executable, *args, cwd=client_cwd, env=env)
-
-        async def checked(*args: str) -> str:
-            result = await cli(*args)
-            if result.exit_code:
-                raise RuntimeError(f"Docker {' '.join(args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}")
-            return result.stdout
+        lease = self.lease
+        if lease is not None and lease.pending() is not None:
+            raise RuntimeError("Docker cleanup is still pending for this child")
 
         async def cleanup():
             create_uncertain = False
@@ -284,8 +404,15 @@ class DockerCommand:
                     create_uncertain = True
                 except Exception:
                     create_failed = True
-            removal = await cli("rm", "-f", "--volumes", name)
-            remaining = await checked("ps", "--all", "--filter", f"name=^{name}$", "--format", "{{.ID}}")
+            if lease is not None:
+                record = lease.pending()
+                if record is None or record.name != name:
+                    raise RuntimeError("Docker container lease changed")
+                await client.reconcile(record)
+                lease.release(name)
+                return
+            removal = await client.cli("rm", "-f", "--volumes", name)
+            remaining = await client.checked("ps", "--all", "--filter", f"name=^{name}$", "--format", "{{.ID}}")
             if create_uncertain:
                 raise RuntimeError("create exceeded its administrative deadline; daemon completion cannot be proved")
             if remaining.strip() or (removal.exit_code and not create_failed):
@@ -293,25 +420,8 @@ class DockerCommand:
 
         try:
             async with asyncio.timeout(timeout):
-                # DOCKER_CONTEXT takes precedence over DOCKER_HOST in the Docker CLI.
-                endpoint = env.get("DOCKER_HOST") if not env.get("DOCKER_CONTEXT") else None
-                if not endpoint:
-                    context = env.get("DOCKER_CONTEXT") or (await checked("context", "show")).strip()
-                    contexts = json.loads(await checked("context", "inspect", context))
-                    endpoint = contexts[0]["Endpoints"]["docker"]["Host"]
-                if not endpoint.startswith(("unix://", "npipe://")):
-                    raise RuntimeError("Docker Bash requires a local Unix socket or Windows named pipe endpoint")
-                env.pop("DOCKER_CONTEXT", None)
-                env["DOCKER_HOST"] = endpoint
-                if restricted:
-                    # Docker CLI config can automatically add proxy environment variables.
-                    temp_parent = Path(gettempdir())
-                    require_outside_root(self.workdir, temp_parent, "Docker CLI temporary directory")
-                    cli_config = TemporaryDirectory(prefix="minibot-docker-", dir=temp_parent)
-                    env["DOCKER_CONFIG"] = cli_config.name
-                image = json.loads(await checked("image", "inspect", self.config.image))[0]
-                if image.get("Config", {}).get("Volumes"):
-                    raise RuntimeError("Docker Bash rejects image-declared volumes")
+                client = await resources.enter_async_context(self._client())
+                image_id = await client.image_id(self.config.image)
                 mount = io.StringIO(newline="")
                 mount_options = ["type=bind", f"src={self.bind_root()}", "dst=/workspace"]
                 if restricted:
@@ -329,21 +439,35 @@ class DockerCommand:
                     args += ["--user", f"{os.getuid()}:{os.getgid()}"]
                 if stdin is not None:
                     args.append("--interactive")
-                args += ["--entrypoint", program, image["Id"], *arguments]
+                if lease is not None:
+                    args += ["--label", f"{_DURABLE_LABEL}={name}"]
+                args += ["--entrypoint", program, image_id, *arguments]
+
+                async def create() -> str:
+                    container_id = (await client.checked(*args)).strip()
+                    if lease is None:
+                        return name
+                    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+                        raise RuntimeError("Docker did not return a full container ID")
+                    lease.confirm(name, container_id)
+                    return container_id
+
+                if lease is not None:
+                    lease.reserve(name)
                 may_exist = True
-                create_task = asyncio.create_task(checked(*args))
-                await asyncio.shield(create_task)
+                create_task = asyncio.create_task(create())
+                attached_id = await asyncio.shield(create_task)
                 if restricted:
                     self.bind_root()
-                attach = [executable, "start", "--attach"]
+                attach = [client.executable, "start", "--attach"]
                 input_options = {}
                 if stdin is not None:
                     attach.append("--interactive")
                     input_options["stdin"] = stdin
                 result = await _process(
-                    *attach, name, cwd=client_cwd, env=env, output_limit=output_limit, **input_options,
+                    *attach, attached_id, cwd=client.cwd, env=client.env, output_limit=output_limit, **input_options,
                 )
-                state = json.loads(await checked("inspect", "--format", "{{json .State}}", name))
+                state = json.loads(await client.checked("inspect", "--format", "{{json .State}}", attached_id))
                 if state["Running"] or state.get("Error"):
                     raise RuntimeError(f"Docker command did not finish: {state.get('Error') or 'still running'}")
                 if result.exit_code != state["ExitCode"]:
@@ -351,16 +475,12 @@ class DockerCommand:
                 return result
         finally:
             interrupted = isinstance(sys.exception(), asyncio.CancelledError)
-            try:
-                if may_exist:
-                    try:
-                        await _settle(asyncio.create_task(cleanup()))
-                    except (Exception, ExecutionCleanupCancelledError) as exc:
-                        diagnostic = f"Docker cleanup uncertain for {name}: {exc}"
-                        if interrupted or isinstance(exc, asyncio.CancelledError):
-                            logging.getLogger(__name__).error(diagnostic)
-                            raise ExecutionCleanupCancelledError(diagnostic) from exc
-                        raise RuntimeError(diagnostic) from exc
-            finally:
-                if cli_config is not None:
-                    cli_config.cleanup()
+            if may_exist:
+                try:
+                    await _settle(asyncio.create_task(cleanup()))
+                except (Exception, ExecutionCleanupCancelledError) as exc:
+                    diagnostic = f"Docker cleanup uncertain for {name}: {exc}"
+                    if interrupted or isinstance(exc, asyncio.CancelledError):
+                        logging.getLogger(__name__).error(diagnostic)
+                        raise ExecutionCleanupCancelledError(diagnostic) from exc
+                    raise RuntimeError(diagnostic) from exc

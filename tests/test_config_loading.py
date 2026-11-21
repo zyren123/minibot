@@ -239,6 +239,9 @@ tool_permissions:
     write_file: ask
   auto_review_paths: ["笔记/**"]
   timeout: 12.5
+durable_child_workspace:
+  image: minibot-child:测试
+  timeout: 13
 tools:
   bash:
     backend: docker
@@ -282,6 +285,10 @@ tools:
     assert config.tool_permissions.rules == {"write_file": "ask"}
     assert config.tool_permissions.auto_review_paths == ("笔记/**",)
     assert config.tool_permissions.timeout == 12.5
+    assert config.durable_child_workspace.backend == "docker"
+    assert config.durable_child_workspace.network == "none"
+    assert config.durable_child_workspace.image == "minibot-child:测试"
+    assert config.durable_child_workspace.timeout == 13
     assert config.tools.bash.backend == "docker"
     assert config.tools.bash.memory_mb == 256
     assert config.tools.bash.cpus == 0.5

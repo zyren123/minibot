@@ -17,7 +17,7 @@ from typing import Any, Literal, TypeVar
 from uuid import UUID, uuid4
 
 from .tool_args import parse_tool_arguments
-from .workspace import WorkspaceIdentity
+from .workspace import DockerContainer, WorkspaceIdentity
 
 
 RunStatus = Literal[
@@ -208,6 +208,11 @@ class RunStore:
                     workspace_path TEXT NOT NULL UNIQUE,
                     execution TEXT NOT NULL,
                     UNIQUE(parent_step_id, ordinal)
+                );
+                CREATE TABLE IF NOT EXISTS child_containers (
+                    run_id TEXT PRIMARY KEY REFERENCES child_runs(run_id),
+                    name TEXT NOT NULL UNIQUE,
+                    container_id TEXT
                 );
                 """)
 
@@ -535,6 +540,37 @@ class RunJournal:
     def check_pause(self) -> None:
         if self.state().pause_requested:
             raise DurableRunPaused("Paused at a durable execution boundary.")
+
+    def require_recovery(self, error: str) -> None:
+        with self.store._connection() as db:
+            if self.store._find(db, self.session_id, self.run_id).status not in _TERMINAL:
+                self._set_status(db, "recovery_required", error=error)
+
+    def pending_container(self) -> DockerContainer | None:
+        with self.store._connection() as db:
+            row = db.execute(
+                "SELECT name, container_id FROM child_containers WHERE run_id = ?", (self.run_id,),
+            ).fetchone()
+        return DockerContainer(**dict(row)) if row is not None else None
+
+    def reserve_container(self, name: str) -> None:
+        with self.store._connection() as db:
+            db.execute("INSERT INTO child_containers(run_id, name) VALUES (?, ?)", (self.run_id, name))
+
+    def confirm_container(self, name: str, container_id: str) -> None:
+        with self.store._connection() as db:
+            if db.execute(
+                "UPDATE child_containers SET container_id = ? WHERE run_id = ? AND name = ? AND container_id IS NULL",
+                (container_id, self.run_id, name),
+            ).rowcount != 1:
+                raise DurableRunError("Docker lease is unavailable.")
+
+    def release_container(self, name: str) -> None:
+        with self.store._connection() as db:
+            if db.execute(
+                "DELETE FROM child_containers WHERE run_id = ? AND name = ?", (self.run_id, name),
+            ).rowcount != 1:
+                raise DurableRunError("Docker lease is unavailable.")
 
     def plan_batch(
         self, messages: list[Message], assistant: Message,

@@ -67,6 +67,7 @@ from .tools.meta import (
 from .skills.loader import SkillLoader
 from .subagents.registry import AgentRegistry
 from .subagents.executor import SubagentExecutor
+from .subagents.durable import DurableSubagents
 from .hooks.events import HookEvent
 from .hooks.manager import HookManager
 from .mcp.manager import MCPManager
@@ -142,6 +143,9 @@ class Agent:
         ask_user_handler: Any = None,
         tool_approval_handler: ToolApprovalHandler | None = None,
         workspace_identity: WorkspaceIdentity | None = None,
+        sandbox_backend: DockerBackend | None = None,
+        tool_allowlist: tuple[str, ...] | None = None,
+        model_client: LLMClient | None = None,
     ):
         if role not in {"solo", "lead", "teammate"}:
             raise ValueError(f"Unknown role: {role}")
@@ -150,11 +154,13 @@ class Agent:
         validate_workspace_runtime(self.config)
         self.workdir = self.config.workdir
         self.restricted_workspace = self.config.workspace.restricted
+        if sandbox_backend is not None and not self.restricted_workspace:
+            raise ValueError("A sandbox backend requires a restricted workspace")
         self.file_checkpoints = (
             GitFileCheckpoints(self.workdir, self.config.app_home) if self.config.file_checkpoints else None
         )
         self.workspace_backend: WorkspaceBackend = (
-            DockerBackend(self.config) if self.restricted_workspace
+            (sandbox_backend or DockerBackend(self.config)) if self.restricted_workspace
             else LocalBackend(self.workdir, bash=self.config.tools.bash, checkpoints=self.file_checkpoints)
         )
         if self.restricted_workspace:
@@ -192,7 +198,7 @@ class Agent:
         self.stream_enabled = bool(self.config.llm.stream_enabled)
         self.stream_degraded = False
 
-        self.client = LLMClient(
+        self.client = model_client if model_client is not None else LLMClient(
             base_url=self.config.llm.base_url,
             api_key=self.config.llm.api_key,
             model=self.config.llm.model,
@@ -250,8 +256,13 @@ class Agent:
             budget_limits=self.config.runtime_budget,
             llm_config=self.config.llm,
         )
+        self.durable_subagents = DurableSubagents(self) if self.run_store and self.allow_subagent_delegation else None
 
         self._register_tools()
+        if tool_allowlist is not None:
+            for tool in self.tool_registry.get_all():
+                if tool.name not in tool_allowlist:
+                    self.tool_registry.unregister(tool.name)
         if self.restricted_workspace:
             self.tool_registry.seal()
         self.system_prompt = self._build_system_prompt()
@@ -549,6 +560,11 @@ Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when exter
         """Describe subagent delegation rules for the prompt."""
         if not self.allow_subagent_delegation:
             return ""
+        if self.durable_subagents is not None:
+            return (
+                "Use Task to delegate a focused job to an isolated Docker workspace. Each child starts "
+                "with an empty workspace. Put the relevant task context in its prompt."
+            )
         return f"""- **Specialized Subagents** (Delegation):
   {self.agent_registry.get_descriptions()}
   Rule: Use `Task` to delegate broad, ambiguous, or multi-step sub-problems to the best-matched agent.
@@ -755,11 +771,26 @@ You are now live. Await instructions and begin the loop.""",
             if durable is None:
                 return await execute_with_hooks(self.tool_registry, self.hook_manager, name, args, actor=actor)
             journal, step = durable
-            return await execute_with_hooks(
+            if self.durable_subagents is not None and (
+                step.child_run_id is not None or type(self.tool_registry.get(name)) is TaskTool
+            ):
+                async def run_child(approved_args: dict[str, Any]) -> ToolOutcome:
+                    return await self.durable_subagents.dispatch(journal, step, approved_args)
+
+                if step.child_run_id is not None:
+                    return await run_child(args)
+                return await execute_with_hooks(
+                    self.tool_registry, None, name, args, actor=actor, invoke=run_child,
+                    wait_for_approval=lambda operation: journal.wait(step, "approval", operation),
+                )
+            outcome = await execute_with_hooks(
                 self.tool_registry, self.hook_manager, name, args, actor=actor,
                 before_effects=lambda: journal.begin_step(step, retryable=self._durable_retry_allowed(name)),
                 wait_for_approval=lambda operation: journal.wait(step, "approval", operation),
             )
+            if isinstance(self.workspace_backend, DockerBackend) and self.workspace_backend.cleanup_pending():
+                raise DurableRunPaused("Docker cleanup could not be confirmed.")
+            return outcome
 
     async def _execute_interruptible_tool(
         self, name: str, args: dict[str, Any], interrupt_queue: "asyncio.Queue[None] | None",
@@ -1560,72 +1591,94 @@ You are now live. Await instructions and begin the loop.""",
             )
         durable_id = resume_run_id or run_id or uuid.uuid4().hex
         with self.run_store.claim(self.session_id, durable_id, new=resume_run_id is None) as journal:
-            if resume_run_id is None:
-                seed = seed_messages() if seed_messages is not None else messages
-                journal.create(seed, parent_run_id, reasoning_effort)
-                messages[:] = seed
-                if publish_messages is not None:
-                    publish_messages(messages)
-            else:
-                state = journal.recover(retry_allowed=self._durable_retry_allowed)
-                if state.status in {"failed", "abandoned", "recovery_required"}:
-                    raise DurableRunError(f"Durable run {journal.run_id} is {state.status}.")
-                checkpoint = journal.checkpoint()
-                if state.status == "completed":
-                    return checkpoint.messages
-                messages[:] = checkpoint.messages
-                if reasoning_effort is None:
-                    reasoning_effort = checkpoint.reasoning_effort
-                if checkpoint.finished:
-                    if publish_messages is not None:
-                        publish_messages(messages)
-                    journal.end_segment("completed")
-                    return messages
-                if durable_answer is not None:
-                    interaction = journal.question_step(durable_answer.get("question_id"))
-                    if interaction is None:
-                        raise DurableRunError("The answer does not match the durable run's pending question.")
-                    normalized = self._normalize_ask_user_answer(durable_answer, question=interaction.question)
-                    if interaction.result is not None and (
-                        normalized["answer_text"] != interaction.result["content"]
-                        or normalized["selected_option_value"] != interaction.result["selected_option_value"]
-                    ):
-                        raise DurableRunError("The durable run already recorded a different answer.")
-            segment = journal.start_segment()
-            try:
-                await self._emit({"type": "system", "data": {
-                    "code": "durable_run_started", "run_id": journal.run_id, "segment": segment,
-                }})
-                await self._run_segment(
-                    messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
-                    run_id=journal.run_id if segment == 1 else None,
-                    parent_run_id=parent_run_id if segment == 1 else journal.run_id,
-                    journal=journal, durable_answer=durable_answer,
-                    publish_messages=publish_messages,
-                )
-            except (DurableRunPaused, RuntimeBudgetExceeded, asyncio.CancelledError, KeyboardInterrupt):
-                journal.end_segment("interrupted")
-                if publish_messages is not None:
-                    publish_messages(messages)
-                raise
-            except UserInterruptedError:
-                status = "waiting" if journal.state().wait_reason == "user_question" else "interrupted"
-                journal.end_segment(status)
-                if publish_messages is not None:
-                    publish_messages(messages)
-                raise
-            except Exception as exc:
-                if journal.checkpoint().finished:
-                    journal.end_segment("interrupted")
-                else:
-                    journal.end_segment("failed", error=type(exc).__name__)
-                if publish_messages is not None:
-                    publish_messages(messages)
-                raise
+            return await self._run_claimed(
+                journal, messages, resume=resume_run_id is not None, interrupt_queue=interrupt_queue,
+                reasoning_effort=reasoning_effort, parent_run_id=parent_run_id, durable_answer=durable_answer,
+                seed_messages=seed_messages, publish_messages=publish_messages,
+            )
+
+    async def _run_claimed(
+        self,
+        journal: RunJournal,
+        messages: list[dict],
+        *,
+        resume: bool,
+        interrupt_queue: asyncio.Queue[None] | None = None,
+        reasoning_effort: str | None = None,
+        parent_run_id: str | None = None,
+        durable_answer: dict[str, Any] | None = None,
+        seed_messages: Callable[[], list[dict]] | None = None,
+        publish_messages: Callable[[list[dict]], None] | None = None,
+        shared_budget: RuntimeBudget | None = None,
+    ) -> list[dict]:
+        if not resume:
+            seed = seed_messages() if seed_messages is not None else messages
+            journal.create(seed, parent_run_id, reasoning_effort)
+            messages[:] = seed
             if publish_messages is not None:
                 publish_messages(messages)
-            journal.end_segment("completed")
-            return messages
+        else:
+            state = journal.recover(retry_allowed=self._durable_retry_allowed)
+            if state.status in {"failed", "abandoned", "recovery_required"}:
+                raise DurableRunError(f"Durable run {journal.run_id} is {state.status}.")
+            checkpoint = journal.checkpoint()
+            if state.status == "completed":
+                if publish_messages is not None:
+                    publish_messages(checkpoint.messages)
+                return checkpoint.messages
+            messages[:] = checkpoint.messages
+            if reasoning_effort is None:
+                reasoning_effort = checkpoint.reasoning_effort
+            if checkpoint.finished:
+                if publish_messages is not None:
+                    publish_messages(messages)
+                journal.end_segment("completed")
+                return messages
+            if durable_answer is not None:
+                interaction = journal.question_step(durable_answer.get("question_id"))
+                if interaction is None:
+                    raise DurableRunError("The answer does not match the durable run's pending question.")
+                normalized = self._normalize_ask_user_answer(durable_answer, question=interaction.question)
+                if interaction.result is not None and (
+                    normalized["answer_text"] != interaction.result["content"]
+                    or normalized["selected_option_value"] != interaction.result["selected_option_value"]
+                ):
+                    raise DurableRunError("The durable run already recorded a different answer.")
+        segment = journal.start_segment()
+        try:
+            await self._emit({"type": "system", "data": {
+                "code": "durable_run_started", "run_id": journal.run_id, "segment": segment,
+            }})
+            await self._run_segment(
+                messages, interrupt_queue=interrupt_queue, reasoning_effort=reasoning_effort,
+                run_id=journal.run_id if segment == 1 else None,
+                parent_run_id=parent_run_id if segment == 1 else journal.run_id,
+                journal=journal, durable_answer=durable_answer, shared_budget=shared_budget,
+                publish_messages=publish_messages,
+            )
+        except (DurableRunPaused, RuntimeBudgetExceeded, asyncio.CancelledError, KeyboardInterrupt):
+            journal.end_segment("interrupted")
+            if publish_messages is not None:
+                publish_messages(messages)
+            raise
+        except UserInterruptedError:
+            status = "waiting" if journal.state().wait_reason == "user_question" else "interrupted"
+            journal.end_segment(status)
+            if publish_messages is not None:
+                publish_messages(messages)
+            raise
+        except Exception as exc:
+            if journal.checkpoint().finished:
+                journal.end_segment("interrupted")
+            else:
+                journal.end_segment("failed", error=type(exc).__name__)
+            if publish_messages is not None:
+                publish_messages(messages)
+            raise
+        if publish_messages is not None:
+            publish_messages(messages)
+        journal.end_segment("completed")
+        return messages
 
     async def _run_segment(
         self,
@@ -1638,6 +1691,7 @@ You are now live. Await instructions and begin the loop.""",
         journal: RunJournal | None = None,
         durable_answer: dict[str, Any] | None = None,
         publish_messages: Callable[[list[dict]], None] | None = None,
+        shared_budget: RuntimeBudget | None = None,
     ) -> list[dict]:
         """Run one execution segment, recording only allowlisted metadata when enabled."""
         trace = (
@@ -1646,7 +1700,7 @@ You are now live. Await instructions and begin the loop.""",
             if self.config.trace_dir is not None else None
         )
         token = self._trace_context.set(trace)
-        budget = RuntimeBudget(self.config.runtime_budget)
+        budget = shared_budget if shared_budget is not None else RuntimeBudget(self.config.runtime_budget)
         budget_token = current_budget.set(budget)
         inherited = self._inherited_permissions()
         permissions = inherited

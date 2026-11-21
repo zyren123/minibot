@@ -43,6 +43,9 @@ durable_execution: false
 workspace:
   backend: local
 
+durable_child_workspace:
+  image: python:3.12-slim
+
 llm:
   base_url: ${OPENAI_BASE_URL}
   api_key: ${OPENAI_API_KEY}
@@ -446,6 +449,9 @@ def load_config(
         llm=_parse_llm_config(default_config.get("llm", {}), env_defaults),
         tools=_parse_tools_config(default_config.get("tools", {})),
         workspace=workspace,
+        durable_child_workspace=_parse_workspace_config(
+            default_config.get("durable_child_workspace", {}), default_backend="docker",
+        ),
         hooks=_parse_hooks_config(hooks_config, hooks_dir),
         mcp=_parse_mcp_config(mcp_config),
         memory=_parse_memory_config(default_config.get("memory"), app_home),
@@ -465,11 +471,11 @@ def load_config(
     return config
 
 
-def _parse_workspace_config(data: Any) -> WorkspaceConfig:
+def _parse_workspace_config(data: Any, *, default_backend: str = "local") -> WorkspaceConfig:
     if not isinstance(data, dict):
         raise ValueError("workspace must be a mapping")
     try:
-        return WorkspaceConfig(**data)
+        return WorkspaceConfig(**{"backend": default_backend, **data})
     except TypeError as exc:
         raise ValueError(f"Invalid workspace configuration: {exc}") from exc
 

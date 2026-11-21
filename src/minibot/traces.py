@@ -200,6 +200,13 @@ class RunTrace:
         if child is not None:
             child.close(status, budget_limit=budget_limit)
 
+    def link_durable_child(self, child_run_id: str, parent_step_id: str, agent_type: str) -> None:
+        invocation = self.pending
+        self._write(
+            "durable_child", child_run_id=child_run_id, parent_step_id=parent_step_id,
+            agent_type=agent_type, parent_invocation_id=invocation.id if invocation is not None else None,
+        )
+
     @contextmanager
     def subagent(self, agent_type: str) -> Iterator[SubagentTrace | None]:
         parent = self.pending

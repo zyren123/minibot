@@ -279,10 +279,14 @@ class Config:
     context_offloading: ContextOffloadingConfig = field(default_factory=ContextOffloadingConfig)
 
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
+    durable_child_workspace: WorkspaceConfig = field(default_factory=lambda: WorkspaceConfig(backend="docker"))
 
     def __post_init__(self):
         if not isinstance(self.workspace, WorkspaceConfig):
             raise ValueError("workspace must be a WorkspaceConfig")
+        child_workspace = self.durable_child_workspace
+        if not isinstance(child_workspace, WorkspaceConfig) or not child_workspace.restricted or child_workspace.network != "none":
+            raise ValueError("durable_child_workspace requires the Docker backend with network disabled")
         if not isinstance(self.context_offloading, ContextOffloadingConfig):
             raise ValueError("context_offloading must be a ContextOffloadingConfig")
         if type(self.durable_execution) is not bool:

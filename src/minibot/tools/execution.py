@@ -16,10 +16,11 @@ from .result import ToolOutcome
 
 
 async def execute_with_hooks(
-    registry: ToolRegistry, hooks: HookManager, name: str, args: dict[str, Any],
+    registry: ToolRegistry, hooks: HookManager | None, name: str, args: dict[str, Any],
     *, actor: str = "agent",
     before_effects: Callable[[], None] | None = None,
     wait_for_approval: Callable[[Callable[[], Awaitable[ApprovedCall | None]]], Awaitable[ApprovedCall | None]] | None = None,
+    invoke: Callable[[dict[str, Any]], Awaitable[ToolOutcome]] | None = None,
 ) -> ToolOutcome:
     permissions = current_permissions.get()
     call = None
@@ -38,26 +39,28 @@ async def execute_with_hooks(
 
     if before_effects is not None:
         before_effects()
-    try:
-        blocked, reason = await hooks.trigger_pre_tool_call(name, deepcopy(args) if call is not None else args)
-    except Exception as exc:
-        return ToolOutcome(
-            f"Error: Pre-tool hook failed: {exc}", "error",
-            hook_error=str(exc), hook_phase="pre",
-        )
-    if blocked:
-        return ToolOutcome(f"Blocked by hook: {reason}", "refused")
+    if hooks is not None:
+        try:
+            blocked, reason = await hooks.trigger_pre_tool_call(name, deepcopy(args) if call is not None else args)
+        except Exception as exc:
+            return ToolOutcome(
+                f"Error: Pre-tool hook failed: {exc}", "error",
+                hook_error=str(exc), hook_phase="pre",
+            )
+        if blocked:
+            return ToolOutcome(f"Blocked by hook: {reason}", "refused")
 
     if call is not None and (
         (call.requires_active_run and not permissions.active)
         or registry.get(name) is not tool or not call.still_targets(tool)
     ):
         return ToolOutcome("Approved tool or target changed before execution.", "refused")
-    outcome = await registry.execute_result(name, args)
-    try:
-        await hooks.trigger_post_tool_call(name, args, outcome.text)
-    except Exception as exc:
-        outcome = replace(outcome, hook_error=str(exc), hook_phase="post")
+    outcome = await registry.execute_result(name, args) if invoke is None else await invoke(args)
+    if hooks is not None:
+        try:
+            await hooks.trigger_post_tool_call(name, args, outcome.text)
+        except Exception as exc:
+            outcome = replace(outcome, hook_error=str(exc), hook_phase="post")
 
     scope = current_artifacts.get()
     if scope is None or not outcome.artifact_eligible or isinstance(
