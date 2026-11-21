@@ -1,4 +1,4 @@
-"""SQLite journal for one-agent durable execution."""
+"""SQLite journal for durable agent execution."""
 
 from __future__ import annotations
 
@@ -21,10 +21,11 @@ from .workspace import WorkspaceIdentity
 
 
 RunStatus = Literal[
-    "created", "running", "waiting", "completed", "failed", "interrupted", "recovery_required", "abandoned",
+    "created", "running", "waiting", "waiting_child", "completed", "failed", "interrupted",
+    "recovery_required", "abandoned",
 ]
-StepStatus = Literal["planned", "waiting", "executing", "completed", "recovery_required"]
-WaitReason = Literal["approval", "user_question"]
+StepStatus = Literal["planned", "waiting", "waiting_child", "executing", "completed", "recovery_required"]
+WaitReason = Literal["approval", "user_question", "child"]
 Message = dict[str, Any]
 _T = TypeVar("_T")
 _TERMINAL = ("completed", "failed", "abandoned")
@@ -59,6 +60,15 @@ class RunState:
     pause_requested: bool
     wait_reason: WaitReason | None
     error: str | None
+
+
+@dataclass(frozen=True)
+class ChildRun:
+    run: RunState
+    parent_step_id: str
+    workspace_path: Path
+    execution: dict[str, Any]
+    ordinal: int = 0
 
 
 @dataclass(frozen=True)
@@ -189,6 +199,16 @@ class RunStore:
                     child_run_id TEXT,
                     UNIQUE(run_id, ordinal)
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS steps_child_run ON steps(child_run_id)
+                WHERE child_run_id IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS child_runs (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                    parent_step_id TEXT NOT NULL REFERENCES steps(step_id),
+                    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+                    workspace_path TEXT NOT NULL UNIQUE,
+                    execution TEXT NOT NULL,
+                    UNIQUE(parent_step_id, ordinal)
+                );
                 """)
 
     @contextmanager
@@ -201,7 +221,7 @@ class RunStore:
                 yield db
 
     @staticmethod
-    def _run(row: sqlite3.Row) -> RunState:
+    def _run(row: sqlite3.Row | dict[str, Any]) -> RunState:
         return RunState(**{**dict(row), "pause_requested": bool(row["pause_requested"])})
 
     @staticmethod
@@ -276,13 +296,57 @@ class RunStore:
             rows = db.execute("SELECT * FROM steps WHERE run_id = ? ORDER BY ordinal", (run_id,)).fetchall()
         return [self._step(row) for row in rows]
 
+    def _children(
+        self, db: sqlite3.Connection, parent_run_id: str, *,
+        step_id: str | None = None, child_run_id: str | None = None, ordinal: int | None = None,
+    ) -> list[ChildRun]:
+        rows = db.execute(
+            "SELECT runs.*, child_runs.parent_step_id, child_runs.workspace_path, child_runs.execution, "
+            "child_runs.ordinal AS child_ordinal "
+            "FROM steps JOIN child_runs ON child_runs.parent_step_id = steps.step_id "
+            "JOIN runs ON runs.run_id = child_runs.run_id AND runs.parent_run_id = steps.run_id "
+            "WHERE steps.run_id = ? AND (? IS NULL OR steps.step_id = ?) "
+            "AND (? IS NULL OR runs.run_id = ?) AND (? IS NULL OR child_runs.ordinal = ?) "
+            "ORDER BY steps.ordinal, child_runs.ordinal",
+            (parent_run_id, step_id, step_id, child_run_id, child_run_id, ordinal, ordinal),
+        ).fetchall()
+        children = []
+        for row in rows:
+            fields = dict(row)
+            step = fields.pop("parent_step_id")
+            path = Path(fields.pop("workspace_path"))
+            execution = json.loads(fields.pop("execution"))
+            child_ordinal = fields.pop("child_ordinal")
+            children.append(ChildRun(self._run(fields), step, path, execution, child_ordinal))
+        return children
+
+    def list_children(self, session_id: str, parent_run_id: str) -> list[ChildRun]:
+        """List child runs belonging to a parent in this workspace and session."""
+        parent_run_id = _canonical_id(parent_run_id)
+        with self._connection() as db:
+            self._find(db, session_id, parent_run_id)
+            return self._children(db, parent_run_id)
+
+    def get_child(self, session_id: str, parent_run_id: str, child_run_id: str) -> ChildRun:
+        parent_run_id, child_run_id = _canonical_id(parent_run_id), _canonical_id(child_run_id)
+        with self._connection() as db:
+            self._find(db, session_id, parent_run_id)
+            children = self._children(db, parent_run_id, child_run_id=child_run_id)
+        if not children:
+            raise DurableRunError("Child run is unavailable for this parent run.")
+        return children[0]
+
+    def for_child(self, child: ChildRun) -> "RunStore":
+        """Open the child journal scope in the same database."""
+        return RunStore(self.root.parent, WorkspaceIdentity(child.run.workspace_id), Path(child.run.sessions_dir))
+
     def pause(self, session_id: str, run_id: str) -> bool:
         run_id = _canonical_id(run_id)
         with self._connection() as db:
             self._find(db, session_id, run_id)
             return bool(db.execute(
                 "UPDATE runs SET pause_requested = 1, updated_at = ? WHERE run_id = ? "
-                "AND owner_pid IS NOT NULL AND status IN ('running', 'waiting')",
+                "AND owner_pid IS NOT NULL AND status IN ('running', 'waiting', 'waiting_child')",
                 (_now(), run_id),
             ).rowcount)
 
@@ -298,22 +362,87 @@ class RunJournal:
     ) -> None:
         with self.store._connection() as db:
             self.store._require_resolved_session(db, self.session_id)
-            now = _now()
+            self._insert_run(
+                db, self.run_id, self.session_id, self.store.workspace_id, messages, parent_run_id, reasoning_effort,
+            )
+
+    def _insert_run(
+        self, db: sqlite3.Connection, run_id: str, session_id: str, workspace_id: str,
+        messages: list[Message], parent_run_id: str | None, reasoning_effort: str | None = None,
+    ) -> None:
+        now = _now()
+        db.execute(
+            "INSERT INTO runs(run_id, workspace_id, sessions_dir, session_id, status, created_at, "
+            "updated_at, parent_run_id) VALUES (?, ?, ?, ?, 'created', ?, ?, ?)",
+            (run_id, workspace_id, self.store.sessions_dir, session_id, now, now, parent_run_id),
+        )
+        user_intent = next(
+            (message.get("content") for message in reversed(messages) if message.get("role") == "user"), None,
+        )
+        db.execute(
+            "INSERT INTO checkpoints(run_id, version, messages, user_intent, reasoning_effort) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run_id, _CHECKPOINT_VERSION, _encode(messages),
+             user_intent if isinstance(user_intent, str) else None, reasoning_effort),
+        )
+
+    def child_for_step(self, step: StepState, *, ordinal: int = 0) -> ChildRun | None:
+        with self.store._connection() as db:
+            children = self.store._children(db, self.run_id, step_id=step.step_id, ordinal=ordinal)
+        return children[0] if children else None
+
+    def create_child(
+        self, step: StepState, *, child_run_id: str, workspace_path: Path, workspace_identity: WorkspaceIdentity,
+        execution: dict[str, Any], messages: list[Message], ordinal: int = 0,
+    ) -> ChildRun:
+        """Commit the child identity and its parent step before the child can run."""
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = self.store._children(db, self.run_id, step_id=step.step_id, ordinal=ordinal)
+            if existing:
+                return existing[0]
+            child_run_id = _canonical_id(child_run_id)
+            if child_run_id == self.session_id:
+                raise DurableRunError("Child run requires a separate session.")
+            self._wait_for_child(db)
+            self.store._require_resolved_session(db, child_run_id)
+            self._insert_run(db, child_run_id, child_run_id, workspace_identity.value, messages, self.run_id)
+            if not db.execute(
+                "UPDATE steps SET status = 'waiting_child', child_run_id = COALESCE(child_run_id, ?), "
+                "started_at = COALESCE(started_at, ?) WHERE step_id = ? AND run_id = ? "
+                "AND status IN ('planned', 'waiting', 'executing', 'waiting_child')",
+                (child_run_id, _now(), step.step_id, self.run_id),
+            ).rowcount:
+                raise DurableRunError("Parent step is unavailable for child delegation.")
             db.execute(
-                "INSERT INTO runs(run_id, workspace_id, sessions_dir, session_id, status, created_at, "
-                "updated_at, parent_run_id) VALUES (?, ?, ?, ?, 'created', ?, ?, ?)",
-                (self.run_id, self.store.workspace_id, self.store.sessions_dir, self.session_id, now, now,
-                 parent_run_id),
+                "INSERT INTO child_runs(run_id, parent_step_id, ordinal, workspace_path, execution) VALUES (?, ?, ?, ?, ?)",
+                (child_run_id, step.step_id, ordinal, str(workspace_path.resolve()), _encode(execution)),
             )
-            user_intent = next(
-                (message.get("content") for message in reversed(messages) if message.get("role") == "user"), None,
-            )
-            db.execute(
-                "INSERT INTO checkpoints(run_id, version, messages, user_intent, reasoning_effort) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (self.run_id, _CHECKPOINT_VERSION, _encode(messages),
-                 user_intent if isinstance(user_intent, str) else None, reasoning_effort),
-            )
+            [child] = self.store._children(db, self.run_id, step_id=step.step_id, ordinal=ordinal)
+            return child
+
+    def wait_for_child(self, step: StepState) -> None:
+        """Continue waiting on a child without reopening the parent tool step."""
+        with self.store._connection() as db:
+            if not db.execute(
+                "SELECT 1 FROM steps WHERE step_id = ? AND run_id = ? AND status = 'waiting_child'",
+                (step.step_id, self.run_id),
+            ).fetchone():
+                raise DurableRunError("Parent step has no pending child run.")
+            self._wait_for_child(db)
+
+    def _wait_for_child(self, db: sqlite3.Connection) -> None:
+        if not db.execute(
+            "UPDATE runs SET status = 'waiting_child', wait_reason = 'child', updated_at = ? "
+            "WHERE run_id = ? AND owner_pid IS NOT NULL AND pause_requested = 0",
+            (_now(), self.run_id),
+        ).rowcount:
+            raise DurableRunPaused("Paused at a durable execution boundary.")
+
+    def _waiting_child(self, db: sqlite3.Connection) -> bool:
+        return db.execute(
+            "SELECT 1 FROM steps WHERE run_id = ? AND status = 'waiting_child' LIMIT 1", (self.run_id,),
+        ).fetchone() is not None
 
     def state(self) -> RunState:
         with self.store._connection() as db:
@@ -339,7 +468,8 @@ class RunJournal:
             return run
         with self.store._connection() as db:
             rows = db.execute(
-                "SELECT step_id, name, retryable FROM steps WHERE run_id = ? AND status = 'executing'",
+                "SELECT step_id, name, retryable FROM steps WHERE run_id = ? AND status = 'executing' "
+                "AND child_run_id IS NULL",
                 (self.run_id,),
             ).fetchall()
             for row in rows:
@@ -362,16 +492,20 @@ class RunJournal:
                 self._set_status(db, "recovery_required", error=_UNKNOWN_EFFECT)
             elif run.status == "waiting" and run.wait_reason == "user_question":
                 self._set_status(db, "waiting", wait_reason="user_question")
+            elif self._waiting_child(db):
+                self._set_status(db, "waiting_child", wait_reason="child")
             else:
                 self._set_status(db, "interrupted")
         return self.state()
 
     def start_segment(self) -> int:
         with self.store._connection() as db:
+            waiting_child = self._waiting_child(db)
             db.execute(
-                "UPDATE runs SET status = 'running', segment = segment + 1, owner_pid = ?, "
-                "pause_requested = 0, wait_reason = NULL, error = NULL, updated_at = ? WHERE run_id = ?",
-                (os.getpid(), _now(), self.run_id),
+                "UPDATE runs SET status = ?, segment = segment + 1, owner_pid = ?, "
+                "pause_requested = 0, wait_reason = ?, error = NULL, updated_at = ? WHERE run_id = ?",
+                ("waiting_child" if waiting_child else "running", os.getpid(),
+                 "child" if waiting_child else None, _now(), self.run_id),
             )
         return self.state().segment
 
@@ -381,7 +515,7 @@ class RunJournal:
             return
         if status != "completed":
             recovered = self.recover()
-            if recovered.status == "recovery_required":
+            if recovered.status in {"recovery_required", "waiting_child"}:
                 return
             if status == "waiting" and recovered.wait_reason == "user_question":
                 return
@@ -440,21 +574,23 @@ class RunJournal:
 
     def begin_step(self, step: StepState, *, retryable: bool) -> None:
         with self.store._connection() as db:
-            if not db.execute(
-                "UPDATE runs SET status = 'running', wait_reason = NULL, updated_at = ? "
-                "WHERE run_id = ? AND pause_requested = 0", (_now(), self.run_id),
-            ).rowcount:
+            if not self._mark_active(db, check_pause=True):
                 raise DurableRunPaused("Paused at a durable execution boundary.")
-            db.execute(
-                "UPDATE steps SET status = 'executing', retryable = ?, started_at = COALESCE(started_at, ?) WHERE step_id = ?",
-                (retryable, _now(), step.step_id),
-            )
+            if not db.execute(
+                "UPDATE steps SET status = 'executing', retryable = ?, started_at = COALESCE(started_at, ?) "
+                "WHERE step_id = ? AND run_id = ? AND child_run_id IS NULL",
+                (retryable, _now(), step.step_id, self.run_id),
+            ).rowcount:
+                raise DurableRunError("Tool step is unavailable for execution.")
 
-    def _mark_active(self, db: sqlite3.Connection) -> None:
-        db.execute(
-            "UPDATE runs SET status = 'running', wait_reason = NULL, updated_at = ? WHERE run_id = ?",
-            (_now(), self.run_id),
-        )
+    def _mark_active(self, db: sqlite3.Connection, *, check_pause: bool = False) -> bool:
+        waiting_child = self._waiting_child(db)
+        return bool(db.execute(
+            "UPDATE runs SET status = ?, wait_reason = ?, updated_at = ? "
+            "WHERE run_id = ? AND (NOT ? OR pause_requested = 0)",
+            ("waiting_child" if waiting_child else "running", "child" if waiting_child else None,
+             _now(), self.run_id, check_pause),
+        ).rowcount)
 
     def finish_step(
         self, step: StepState, result: Message, *, artifact_id: str | None = None, error: str | None = None,
@@ -480,11 +616,12 @@ class RunJournal:
         *, question: Message | None = None,
     ) -> _T:
         with self.store._connection() as db:
-            db.execute(
+            if not db.execute(
                 "UPDATE steps SET status = 'waiting', question = ?, "
-                "started_at = COALESCE(started_at, ?) WHERE step_id = ?",
-                (_encode(question) if question is not None else None, _now(), step.step_id),
-            )
+                "started_at = COALESCE(started_at, ?) WHERE step_id = ? AND run_id = ? AND child_run_id IS NULL",
+                (_encode(question) if question is not None else None, _now(), step.step_id, self.run_id),
+            ).rowcount:
+                raise DurableRunError("Tool step is unavailable for approval or a question.")
             db.execute(
                 "UPDATE runs SET status = 'waiting', wait_reason = ?, updated_at = ? WHERE run_id = ?",
                 (reason, _now(), self.run_id),
