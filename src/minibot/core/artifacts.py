@@ -85,7 +85,14 @@ class ArtifactStore:
             if not stat.S_ISDIR(info.st_mode) or not _private(info) or path.resolve() != path:
                 raise ArtifactError("Artifact storage is not private.")
 
-    def save(self, text: str, run_id: str, tool_name: str) -> ArtifactMetadata:
+    def _keyed_identifier(self, content: bytes, run_id: str, tool_name: str, key: str) -> bytes:
+        scope = json.dumps([self.directory.name, run_id, tool_name, key], ensure_ascii=True)
+        return sha256(scope.encode("ascii") + b"\0" + content).digest()[:16]
+
+    def save(
+        self, text: str, run_id: str, tool_name: str, *, key: str | None = None,
+    ) -> ArtifactMetadata:
+        """Save text, optionally reusing the immutable record for a key and content."""
         if len(text) > self.max_bytes:
             raise ArtifactError(f"Output exceeds the {self.max_bytes}-byte artifact limit.")
         try:
@@ -95,7 +102,8 @@ class ArtifactStore:
         if len(content) > self.max_bytes:
             raise ArtifactError(f"Output exceeds the {self.max_bytes}-byte artifact limit.")
 
-        artifact_id = base64.urlsafe_b64encode(uuid4().bytes).decode("ascii").rstrip("=")
+        identifier = uuid4().bytes if key is None else self._keyed_identifier(content, run_id, tool_name, key)
+        artifact_id = base64.urlsafe_b64encode(identifier).decode("ascii").rstrip("=")
         metadata = ArtifactMetadata(
             artifact_id, run_id, tool_name, datetime.now(timezone.utc).isoformat(),
             len(content), "text/plain; charset=utf-8", f"{artifact_id}.artifact", self.workspace_id,
@@ -115,7 +123,17 @@ class ArtifactStore:
                 file.write(content)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary, self.directory / metadata.location)
+            destination = self.directory / metadata.location
+            if key is None:
+                os.replace(temporary, destination)
+            else:
+                try:
+                    os.link(temporary, destination)
+                except FileExistsError:
+                    existing, payload = self.read_all(artifact_id)
+                    if existing.run_id != run_id or existing.tool_name != tool_name or payload != text:
+                        raise ArtifactError("Immutable artifact record does not match its contents.")
+                    return existing
         except OSError as exc:
             raise ArtifactError("Artifact storage unavailable.") from exc
         finally:
@@ -185,6 +203,15 @@ class ArtifactStore:
         if offset > len(text):
             raise InvalidArtifactRequest("Offset is past the end of the artifact.")
         return metadata, text[offset:offset + limit]
+
+    def read_all(self, artifact_id: str, *, key: str | None = None) -> tuple[ArtifactMetadata, str]:
+        """Read a bounded record and verify its key when supplied."""
+        metadata, content = self._load(artifact_id, include_content=True)
+        if key is not None:
+            identifier = self._keyed_identifier(content.encode("utf-8"), metadata.run_id, metadata.tool_name, key)
+            if base64.urlsafe_b64encode(identifier).decode("ascii").rstrip("=") != artifact_id:
+                raise ArtifactError("Immutable artifact record does not match its key and contents.")
+        return metadata, content
 
     def search(self, artifact_id: str, query: str) -> tuple[ArtifactMetadata, list[ArtifactMatch]]:
         if not isinstance(query, str) or not 1 <= len(query) <= MAX_QUERY_CHARS:
