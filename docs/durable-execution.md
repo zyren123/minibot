@@ -61,13 +61,12 @@ verified result. Then resume the run. If you cannot establish a safe outcome,
 already occurred in place. The SDK scopes every operation to the selected
 workspace and session.
 
-MiniBot can retry an interrupted invocation of an exact built-in
-`read_file`, `read_artifact`, `search_artifact`, or `askuserquestion` tool when
-the tool had no pre- or post-tool hooks and remains eligible when it resumes.
-Bash, file writes and edits, custom or MCP tools, and the parent `Task` tool
-require operator recovery when the outcome is lost. Calls that already
-committed their results are reused in order, including offloaded artifact
-references.
+MiniBot can retry interrupted built-in reads and question handling when the
+tool had no pre- or post-tool hooks and remains eligible on resume. Bash,
+file writes and edits, custom tools, and MCP tools require operator recovery
+when the outcome is lost. Calls that already committed their results are
+reused in order, including offloaded artifact references. A journaled
+`Task` continues with the Child Run attached to the original step.
 
 ## CLI and WebUI
 
@@ -95,6 +94,6 @@ for each execution segment.
 
 The journal stores prompts, tool arguments, and result previews. Protect the
 app home as you would your session history. Keep the app home stable across
-processes sharing a session. This version recovers the single-agent loop.
-Team and subagent process state remains outside the journal. Recovery of
-external effects depends on what the destination system can verify.
+processes sharing a session. Durable subagents use this same journal and have
+their own run and session claims. Team state has its existing storage and
+lifecycle. [Durable sandbox subagents](durable-sandbox-subagents.md)

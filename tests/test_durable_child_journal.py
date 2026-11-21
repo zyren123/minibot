@@ -130,5 +130,27 @@ def test_child_slots_are_scoped_and_failed_publication_rolls_back(tmp_path):
         assert parent.state().status == "waiting_child"
 
 
+def test_parent_abandon_requires_children_and_delivery_containers_to_settle(tmp_path):
+    store = parent_store(tmp_path)
+    with store.claim(SESSION, uuid4().hex, new=True) as parent:
+        child = create_child(parent, plan(parent), tmp_path)
+        with pytest.raises(DurableRunError, match="child runs"):
+            parent.abandon()
+
+        with store.for_child(child).claim(child.run.session_id, child.run.run_id) as journal:
+            complete_child(journal)
+            journal.reserve_container("delivery-container")
+            with pytest.raises(DurableRunError, match="confirmed Docker cleanup"):
+                journal.finish_child_delivery("{}")
+            with pytest.raises(DurableRunError, match="child runs"):
+                parent.abandon()
+            journal.release_container("delivery-container")
+            journal.finish_child_delivery('{"artifacts":[]}')
+            assert journal.child_delivery() == '{"artifacts":[]}'
+
+        parent.abandon()
+        assert parent.state().status == "abandoned"
+
+
 if __name__ == "__main__":
     checkpoint_worker(Path(sys.argv[1]), bool(int(sys.argv[2])))

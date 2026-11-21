@@ -64,6 +64,7 @@ from .tools.meta import (
     TeamWaitTool,
     TeamShutdownTool,
 )
+from .tools.meta.task import DurableTaskTool, JournalTool, ReadChildArtifactTool, TaskBatchTool
 from .skills.loader import SkillLoader
 from .subagents.registry import AgentRegistry
 from .subagents.executor import SubagentExecutor
@@ -399,9 +400,14 @@ class Agent:
 
         # Teammates are explicitly blocked from recursive delegation.
         if self.allow_subagent_delegation:
-            self.tool_registry.register(TaskTool(
-                self.agent_registry, self.subagent_executor, trace_for_run=self._trace_context.get,
-            ))
+            if self.durable_subagents is None:
+                self.tool_registry.register(TaskTool(
+                    self.agent_registry, self.subagent_executor, trace_for_run=self._trace_context.get,
+                ))
+            else:
+                self.tool_registry.register(DurableTaskTool(self.agent_registry))
+                self.tool_registry.register(TaskBatchTool(self.agent_registry))
+                self.tool_registry.register(ReadChildArtifactTool(self.config.llm.max_tool_output_chars))
 
         if self.memory_manager is not None:
             self.tool_registry.register(CreateMemoryTool(self.memory_manager))
@@ -562,8 +568,9 @@ Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when exter
             return ""
         if self.durable_subagents is not None:
             return (
-                "Use Task to delegate a focused job to an isolated Docker workspace. Each child starts "
-                "with an empty workspace. Put the relevant task context in its prompt."
+                "Use Task for a focused job and TaskBatch for independent jobs. Start dependent work in a "
+                "later call. Each child starts with an empty Docker workspace. Put the relevant context in "
+                "its prompt. Declare required file paths in deliverables, then use ReadChildArtifact to view them."
             )
         return f"""- **Specialized Subagents** (Delegation):
   {self.agent_registry.get_descriptions()}
@@ -771,8 +778,10 @@ You are now live. Await instructions and begin the loop.""",
             if durable is None:
                 return await execute_with_hooks(self.tool_registry, self.hook_manager, name, args, actor=actor)
             journal, step = durable
+            if step.child_run_id is not None and self.durable_subagents is None:
+                raise DurableRunPaused("Enable durable child delegation to resume the waiting child run.")
             if self.durable_subagents is not None and (
-                step.child_run_id is not None or type(self.tool_registry.get(name)) is TaskTool
+                step.child_run_id is not None or isinstance(self.tool_registry.get(name), JournalTool)
             ):
                 async def run_child(approved_args: dict[str, Any]) -> ToolOutcome:
                     return await self.durable_subagents.dispatch(journal, step, approved_args)
@@ -802,7 +811,7 @@ You are now live. Await instructions and begin the loop.""",
             permissions is not None and permissions.policy.mode != "off"
             and permissions.policy.rules.get(name, permissions.policy.default) == "ask"
         )
-        if interrupt_queue is None or not (may_wait_for_approval or isinstance(tool, (BashTool, TaskTool))):
+        if interrupt_queue is None or not (may_wait_for_approval or isinstance(tool, (BashTool, TaskTool, JournalTool))):
             return await self._execute_tool_with_hooks(name, args, **({"durable": durable} if durable else {}))
         try:
             interrupt_queue.get_nowait()
@@ -1497,28 +1506,30 @@ You are now live. Await instructions and begin the loop.""",
         trim_history: bool = True,
     ) -> Any:
         llm = self.config.llm
+        await budget.wait_for_output()
         request = prepare_model_request(
             messages, system, tools, budget.output_headroom(max_tokens if max_tokens is not None else llm.max_tokens),
             window_tokens=int(llm.max_context_tokens), tool_output_chars=llm.max_tool_output_chars,
             trim_history=trim_history,
         )
         allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
-        async with budget.time_limit():
-            response = await self._create_message_with_interrupt(
-                messages=request.messages,
-                system=system,
-                tools=tools,
-                max_tokens=allowance.max_tokens,
-                interrupt_queue=interrupt_queue,
-                reasoning_effort=reasoning_effort,
-            )
-        choice = self._first_choice(response)
-        payload = self._field(choice, "message") or response
-        budget.finish_model(allowance, self._field(response, "usage"), (
-            self._extract_stream_text(payload),
-            self._extract_reasoning_text(payload),
-            self._extract_tool_calls(payload),
-        ))
+        with budget.reserve_output(allowance):
+            async with budget.time_limit():
+                response = await self._create_message_with_interrupt(
+                    messages=request.messages,
+                    system=system,
+                    tools=tools,
+                    max_tokens=allowance.max_tokens,
+                    interrupt_queue=interrupt_queue,
+                    reasoning_effort=reasoning_effort,
+                )
+            choice = self._first_choice(response)
+            payload = self._field(choice, "message") or response
+            budget.finish_model(allowance, self._field(response, "usage"), (
+                self._extract_stream_text(payload),
+                self._extract_reasoning_text(payload),
+                self._extract_tool_calls(payload),
+            ))
         return response
 
     async def _review_tool_permission(self, brief: str) -> ReviewDecision:

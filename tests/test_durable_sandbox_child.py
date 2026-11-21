@@ -14,7 +14,7 @@ import pytest
 from src.minibot import Minibot
 from src.minibot.config import Config, HooksConfig, LLMConfig, MCPConfig, TeamsConfig
 from src.minibot.config.schema import SessionConfig
-from src.minibot.core.run_store import DurableRunBusy, DurableRunPaused, RunJournal
+from src.minibot.core.run_store import DurableRunBusy, DurableRunError, DurableRunPaused, RunJournal
 from src.minibot.session.store import SessionStore
 from src.minibot.subagents.durable import DurableSubagents
 from src.minibot.tools.builtin import bash_execution
@@ -88,6 +88,15 @@ def worker(root, fault, parent_id=None):
 
         RunJournal.create_child = create_then_stop
 
+    if fault == "create_intent":
+        reserve = RunJournal.reserve_container
+
+        def reserve_then_stop(journal, name):
+            reserve(journal, name)
+            mark_and_stop(root, name)
+
+        RunJournal.reserve_container = reserve_then_stop
+
     if fault in {"effect", "parent_result"}:
         finish = RunJournal.finish_step
 
@@ -121,8 +130,8 @@ def worker(root, fault, parent_id=None):
         asyncio.run(bot.chat("Parent delegates"))
 
 
-def spawn(root, fault, parent_id=None):
-    args = [sys.executable, str(Path(__file__).resolve()), str(root), fault]
+def spawn(root, fault, parent_id=None, *, script=None):
+    args = [sys.executable, str((script or Path(__file__)).resolve()), str(root), fault]
     if parent_id is not None:
         args.append(parent_id)
     return subprocess.Popen(
@@ -132,8 +141,9 @@ def spawn(root, fault, parent_id=None):
 
 
 def kill_worker(process):
-    if process.poll() is None:
-        process.send_signal(signal.SIGKILL)
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGKILL)
     process.communicate(timeout=10)
     assert process.returncode == -signal.SIGKILL
 
@@ -222,6 +232,8 @@ async def test_same_child_lock_and_unconfirmed_docker_cleanup(tmp_path, monkeypa
     finally:
         kill_worker(owner)
     assert docker("inspect", "--format", "{{.State.Running}}", record.container_id) == "true"
+    with pytest.raises(DurableRunError, match="child"):
+        bot.abandon_run(parent.run_id)
     real_process = bash_execution._process
 
     async def removal_unavailable(executable, verb, *args, **kwargs):
@@ -237,12 +249,10 @@ async def test_same_child_lock_and_unconfirmed_docker_cleanup(tmp_path, monkeypa
         [blocked] = bot.list_child_runs(parent.run_id)
         assert blocked.run.status == "recovery_required"
         assert lines(child.workspace_path / "effects.txt") == ["effect"]
-        with pytest.raises(DurableRunPaused, match="recovery_required"):
-            await bot.resume_run(parent.run_id)
-        assert child_container(child, bot) is None
         [step] = bot.list_child_run_steps(parent.run_id, child.run.run_id)
-        assert step.status == "recovery_required"
+        assert step.status == "executing"
         await bot.resolve_child_run_step(parent.run_id, child.run.run_id, step.step_id, "Verified one effect")
+        assert child_container(child, bot) is None
         await bot.resume_run(parent.run_id)
         assert lines(child.workspace_path / "effects.txt") == ["effect"]
     finally:
@@ -303,6 +313,27 @@ async def test_replaced_workspace_blocks_before_child_model_or_tool(tmp_path):
         moved.rename(child.workspace_path)
         assert (await bot.resume_run(parent.run_id)).assistant_text == "done"
         assert lines(child.workspace_path / "effects.txt") == ["effect"]
+    finally:
+        await bot.agent.close_client()
+
+
+async def test_docker_create_without_acknowledgement_fails_closed(tmp_path):
+    (tmp_path / "host.txt").write_text("host", encoding="utf-8")
+    process = spawn(tmp_path, "create_intent")
+    try:
+        name = await wait_for_file(tmp_path / "ready", process)
+    finally:
+        kill_worker(process)
+    bot = bot_for(tmp_path)
+    try:
+        [parent] = bot.list_runs()
+        assert docker("ps", "-aq", "--filter", f"name=^/{name}$") == ""
+        with pytest.raises(DurableRunPaused, match="create may still be in flight"):
+            await bot.resume_run(parent.run_id)
+        [blocked] = bot.list_child_runs(parent.run_id)
+        assert blocked.run.status == "recovery_required"
+        assert not (blocked.workspace_path / "effects.txt").exists()
+        assert lines(tmp_path / "child-model.log") == ["start"]
     finally:
         await bot.agent.close_client()
 

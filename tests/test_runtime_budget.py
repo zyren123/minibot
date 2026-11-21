@@ -7,7 +7,7 @@ import pytest
 from src.minibot.agent import Agent
 from src.minibot.config import RuntimeBudgetConfig
 from src.minibot.config.schema import SessionConfig
-from src.minibot.core.runtime_budget import RuntimeBudgetExceeded
+from src.minibot.core.runtime_budget import RuntimeBudget, RuntimeBudgetExceeded
 from src.minibot.events import AsyncQueueEventSink
 from src.minibot.sdk import Minibot
 from src.minibot.tools.function import FunctionTool
@@ -129,6 +129,49 @@ async def test_token_usage_clamps_next_request_and_stops_before_third(tmp_path):
     with pytest.raises(RuntimeBudgetExceeded, match="max_output_tokens"):
         await agent.run_loop([user_message()])
     assert [request["max_tokens"] for request in agent.client.requests] == [10, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_concurrent_model_calls_wait_for_shared_output_capacity(tmp_path, cancel_first):
+    agent = make_agent(tmp_path, max_output_tokens=10)
+    budget = RuntimeBudget(agent.config.runtime_budget)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    first = _response(content="done")
+    first.usage = {"prompt_tokens": 3, "completion_tokens": 7}
+    second = _response(content="ok")
+    second.usage = {"prompt_tokens": 3, "completion_tokens": 3}
+
+    class BlockingClient(RepeatingClient):
+        async def create_message_async(self, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                entered.set()
+                await release.wait()
+                return first
+            return second
+
+    agent.client = BlockingClient(first)
+
+    async def ask():
+        return await agent._budgeted_message(budget, [user_message()], "", None, interrupt_queue=None)
+
+    async with asyncio.timeout(3):
+        owner = asyncio.create_task(ask())
+        await entered.wait()
+        sibling = asyncio.create_task(ask())
+        await asyncio.sleep(0)
+        assert len(agent.client.requests) == 1
+        if cancel_first:
+            owner.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner
+        else:
+            release.set()
+            assert await owner is first
+        assert await sibling is second
+    assert [request["max_tokens"] for request in agent.client.requests] == [10, 10 if cancel_first else 3]
 
 
 @pytest.mark.asyncio

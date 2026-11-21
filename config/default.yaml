@@ -8,6 +8,9 @@ durable_execution: false
 workspace:
   backend: local
 
+durable_child_workspace:
+  image: python:3.12-slim
+
 # LLM configuration
 llm:
   # Use environment variables: OPENAI_BASE_URL, OPENAI_API_KEY, MODEL_ID
