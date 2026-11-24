@@ -16,7 +16,6 @@ from src.minibot.config import Config, HooksConfig, LLMConfig, MCPConfig, TeamsC
 from src.minibot.config.schema import SessionConfig
 from src.minibot.core.run_store import DurableRunBusy, DurableRunError, DurableRunPaused, RunJournal
 from src.minibot.session.store import SessionStore
-from src.minibot.subagents.durable import DurableSubagents
 from src.minibot.tools.builtin import bash_execution
 from tests.test_durable_execution import append_line, call, lines, response, wait_for_file
 
@@ -111,12 +110,13 @@ def worker(root, fault, parent_id=None):
         RunJournal.finish_step = stop_around_finish
 
     if fault == "child_result":
-        completed = DurableSubagents._completed
+        finish_delivery = RunJournal.finish_child_delivery
 
-        def stop_before_delivery(runtime, child, journal):
-            mark_and_stop(root, child.run.run_id)
+        def stop_after_delivery(journal, receipt):
+            finish_delivery(journal, receipt)
+            mark_and_stop(root, journal.run_id)
 
-        DurableSubagents._completed = stop_before_delivery
+        RunJournal.finish_child_delivery = stop_after_delivery
 
     if fault in {"owner", "contender"}:
         [child] = bot.list_child_runs(parent_id)
