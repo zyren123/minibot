@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID, uuid5
 
 from ..config.schema import Config, HooksConfig, MCPConfig, SessionConfig, WorkspaceConfig
-from ..core.artifacts import ArtifactError, ArtifactStore, MAX_READ_CHARS
+from ..core.artifacts import ArtifactError, MAX_READ_CHARS
 from ..core.run_store import ChildRun, DurableRunBusy, DurableRunError, DurableRunPaused, RunJournal, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded, current_budget
 from ..core.workspace import DockerContainer, configured_workspace_identity, restricted_root_key
@@ -21,7 +21,7 @@ from ..tools.builtin.bash_execution import DockerCommand, DockerEngine
 from ..tools.builtin.workspace_backend import DockerBackend
 from ..tools.meta.task import MAX_BATCH_CHILDREN, ReadChildArtifactTool, TaskBatchTool
 from ..tools.result import ToolOutcome
-from .deliverables import ChildArtifact, export_child_artifacts, parse_deliverable_paths, read_child_artifact
+from .deliverables import ChildDeliverables, child_outcome, parse_deliverable_paths
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -229,10 +229,9 @@ class DurableSubagents:
             if state.status in {"failed", "abandoned"}:
                 if journal.pending_container() is not None:
                     await self._backend(child, journal)
-                return self._outcome(child, state.status, state.error or "")
+                return child_outcome(child, state.status, state.error or "")
             if state.status == "completed":
-                await self._deliver(child, journal)
-                return self._completed(child, journal)
+                return await self._complete_delivery(child, journal)
             config, execution, backend = await self._backend(child, journal)
             try:
                 agent = self.factory.build(child, config, execution, backend)
@@ -254,67 +253,25 @@ class DurableSubagents:
                 raise
             except DurableRunError as exc:
                 if journal.state().status == "failed":
-                    return self._outcome(child, "failed", type(exc).__name__)
+                    return child_outcome(child, "failed", type(exc).__name__)
                 raise DurableRunPaused(f"Child {child.run.run_id} stopped. {exc}") from exc
             except Exception as exc:
                 if journal.state().status != "failed":
                     raise
-                return self._outcome(child, "failed", type(exc).__name__)
-            await self._deliver(child, journal, backend=backend)
-            return self._completed(child, journal)
+                return child_outcome(child, "failed", type(exc).__name__)
+            return await self._complete_delivery(child, journal, backend=backend)
 
-    def _artifact_store(self, child: ChildRun) -> ArtifactStore:
-        config = self.parent.config
-        return ArtifactStore(
-            config.app_home, child.workspace_path, Path(child.run.sessions_dir), child.run.session_id,
-            config.context_offloading.max_artifact_bytes, workspace_id=child.run.workspace_id,
-        )
-
-    async def _deliver(
+    async def _complete_delivery(
         self, child: ChildRun, journal: RunJournal, *, backend: DockerBackend | None = None,
-    ) -> None:
-        if journal.child_delivery() is not None:
-            return
-        paths = ChildExecution.load(child.execution).deliverables
-        if journal.pending_container() is not None or (paths and backend is None):
-            _, _, backend = await self._backend(child, journal)
-        artifacts: tuple[ChildArtifact, ...] = ()
-        delivery_error = None
-        if paths:
-            assert backend is not None
-            try:
-                artifacts = await export_child_artifacts(child, backend, self._artifact_store(child), paths)
-            except (ArtifactError, OSError, ValueError, RuntimeError) as exc:
-                if journal.pending_container() is not None:
-                    raise DurableRunPaused(f"Child {child.run.run_id} requires Docker cleanup before delivery.") from exc
-                delivery_error = str(exc)
-        summary = next(
-            (msg.get("content", "") for msg in reversed(journal.checkpoint().messages) if msg.get("role") == "assistant"),
-            "",
-        )
-        status = "completed" if delivery_error is None else "delivery_failed"
-        journal.finish_child_delivery(self._outcome(child, status, summary, artifacts, delivery_error).text)
-
-    def _completed(self, child: ChildRun, journal: RunJournal) -> ToolOutcome:
-        receipt = journal.child_delivery()
-        if receipt is None:
-            raise DurableRunError("Completed child has no delivery receipt.")
-        status = "success" if json.loads(receipt)["status"] == "completed" else "error"
-        return ToolOutcome(receipt, status, artifact_eligible=False)
-
-    @staticmethod
-    def _outcome(
-        child: ChildRun, status: str, summary: str, artifacts: tuple[ChildArtifact, ...] = (),
-        delivery_error: str | None = None,
     ) -> ToolOutcome:
-        return ToolOutcome(json.dumps({
-            "child_run_id": child.run.run_id, "parent_step_id": child.parent_step_id,
-            "parent_run_id": child.run.parent_run_id,
-            "session_id": child.run.session_id, "workspace_id": child.run.workspace_id,
-            "status": status, "summary": summary[:8000],
-            "artifacts": [asdict(artifact) for artifact in artifacts],
-            **({"delivery_error": delivery_error} if delivery_error is not None else {}),
-        }, ensure_ascii=True), "success" if status == "completed" else "error", artifact_eligible=False)
+        async def prepare_export() -> tuple[tuple[str, ...], DockerBackend | None]:
+            paths = ChildExecution.load(child.execution).deliverables
+            if journal.pending_container() is not None or (paths and backend is None):
+                _, _, reconciled_backend = await self._backend(child, journal)
+                return paths, reconciled_backend
+            return paths, backend
+
+        return await self.deliverables(child).complete(journal, prepare_export)
 
     async def dispatch(self, journal: RunJournal, step: StepState, args: dict[str, Any]) -> ToolOutcome:
         if step.name == ReadChildArtifactTool.name:
@@ -384,18 +341,8 @@ class DurableSubagents:
             await _cancel_and_settle(tasks)
             raise
 
-    def list_artifacts(self, child: ChildRun) -> list[ChildArtifact]:
-        store = self.parent.run_store.for_child(child)
-        journal = RunJournal(store, child.run.session_id, child.run.run_id)
-        receipt = journal.child_delivery()
-        return [ChildArtifact(**entry) for entry in json.loads(receipt)["artifacts"]] if receipt is not None else []
-
-    def read_artifact(self, child: ChildRun, path: str) -> str:
-        parse_deliverable_paths([path])
-        for entry in self.list_artifacts(child):
-            if entry.path == path:
-                return read_child_artifact(child, self._artifact_store(child), entry)
-        raise ArtifactError("No committed child deliverable at that path.")
+    def deliverables(self, child: ChildRun) -> ChildDeliverables:
+        return ChildDeliverables(child, self.parent.run_store, self.parent.config)
 
     async def _read_artifact_tool(self, journal: RunJournal, args: dict[str, Any]) -> ToolOutcome:
         limit_max = min(self.parent.config.llm.max_tool_output_chars, MAX_READ_CHARS)
@@ -408,7 +355,7 @@ class DurableSubagents:
             return ToolOutcome("Supply a child run ID, a deliverable path, and a valid character range.", "invalid_arguments")
         try:
             child = journal.store.get_child(journal.session_id, journal.run_id, args["child_run_id"])
-            text = await asyncio.to_thread(self.read_artifact, child, args["path"])
+            text = await asyncio.to_thread(self.deliverables(child).read, args["path"])
         except ValueError as exc:
             return ToolOutcome(str(exc), "invalid_arguments", artifact_eligible=False)
         except (ArtifactError, DurableRunError) as exc:

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import stat
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from ..config.schema import Config
+from ..config.workspace import require_outside_root
 from ..core.artifacts import ArtifactError, ArtifactStore
-from ..core.run_store import ChildRun
+from ..core.run_store import ChildRun, DurableRunPaused, RunJournal, RunStore
 from ..tools.builtin.workspace_files import restricted_parts
+from ..tools.result import ToolOutcome
 
 if TYPE_CHECKING:
     from ..tools.builtin.workspace_backend import DockerBackend
@@ -31,6 +36,85 @@ class ChildArtifact:
     sha256: str
     artifact_id: str
     size_bytes: int
+
+
+def child_outcome(
+    child: ChildRun, status: str, summary: str, artifacts: tuple[ChildArtifact, ...] = (),
+    delivery_error: str | None = None,
+) -> ToolOutcome:
+    return ToolOutcome(json.dumps({
+        "child_run_id": child.run.run_id, "parent_step_id": child.parent_step_id,
+        "parent_run_id": child.run.parent_run_id,
+        "session_id": child.run.session_id, "workspace_id": child.run.workspace_id,
+        "status": status, "summary": summary[:8000],
+        "artifacts": [asdict(artifact) for artifact in artifacts],
+        **({"delivery_error": delivery_error} if delivery_error is not None else {}),
+    }, ensure_ascii=True), "success" if status == "completed" else "error", artifact_eligible=False)
+
+
+@dataclass(frozen=True)
+class ChildDeliverables:
+    child: ChildRun
+    store: RunStore
+    config: Config
+
+    def _artifact_store(self) -> ArtifactStore:
+        run = self.child.run
+        return ArtifactStore(
+            self.config.app_home, self.child.workspace_path, Path(run.sessions_dir), run.session_id,
+            self.config.context_offloading.max_artifact_bytes, workspace_id=run.workspace_id,
+        )
+
+    async def complete(
+        self, journal: RunJournal,
+        prepare_export: Callable[[], Awaitable[tuple[tuple[str, ...], DockerBackend | None]]],
+    ) -> ToolOutcome:
+        receipt = journal.child_delivery()
+        if receipt is not None:
+            status = "success" if json.loads(receipt)["status"] == "completed" else "error"
+            return ToolOutcome(receipt, status, artifact_eligible=False)
+
+        paths, backend = await prepare_export()
+        artifacts: tuple[ChildArtifact, ...] = ()
+        delivery_error = None
+        if paths:
+            assert backend is not None
+            try:
+                artifacts = await export_child_artifacts(self.child, backend, self._artifact_store(), paths)
+            except (OSError, ValueError, RuntimeError) as exc:
+                if journal.pending_container() is not None:
+                    raise DurableRunPaused(
+                        f"Child {self.child.run.run_id} requires Docker cleanup before delivery."
+                    ) from exc
+                delivery_error = str(exc)
+        messages = journal.checkpoint().messages
+        summary = next((msg.get("content", "") for msg in reversed(messages) if msg.get("role") == "assistant"), "")
+        status = "completed" if delivery_error is None else "delivery_failed"
+        outcome = child_outcome(self.child, status, summary, artifacts, delivery_error)
+        journal.finish_child_delivery(outcome.text)
+        return outcome
+
+    def list_artifacts(self) -> list[ChildArtifact]:
+        store = self.store.for_child(self.child)
+        receipt = RunJournal(store, self.child.run.session_id, self.child.run.run_id).child_delivery()
+        return [ChildArtifact(**entry) for entry in json.loads(receipt)["artifacts"]] if receipt is not None else []
+
+    def read(self, path: str) -> str:
+        _artifact_parts(path)
+        for entry in self.list_artifacts():
+            if entry.path == path:
+                return read_child_artifact(self.child, self._artifact_store(), entry)
+        raise ArtifactError("No committed child deliverable at that path.")
+
+    def apply(self, workdir: Path, path: str, destination: str) -> bool:
+        content = self.read(path)
+        [relative] = parse_deliverable_paths([destination])
+        workdir = workdir.resolve()
+        try:
+            require_outside_root(self.store.root, workdir / relative, "Deliverable destination")
+        except ValueError as exc:
+            raise ArtifactError("A child deliverable cannot be applied to durable run storage.") from exc
+        return apply_child_artifact(workdir, relative, content)
 
 
 def _artifact_parts(path: str) -> tuple[str, ...]:

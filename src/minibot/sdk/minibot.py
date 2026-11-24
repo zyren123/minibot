@@ -11,16 +11,15 @@ from typing import Any, AsyncIterator, Callable, Iterable, Iterator
 
 from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
-from ..config.workspace import require_outside_root, validate_workspace_runtime
+from ..config.workspace import validate_workspace_runtime
 from ..core.model_context import ContextWindowExceeded
-from ..core.artifacts import ArtifactError
 from ..core.run_store import ChildRun, DurableRunError, DurableRunPaused, RunState, RunStore, StepState
 from ..core.runtime_budget import RuntimeBudgetExceeded
 from ..events import StreamEvent
 from ..file_checkpoints import FileCheckpoint, FileCheckpointError, GitFileCheckpoints, finish_file_operation
 from ..session.manager import SessionManager
 from ..session.messages import normalize_tool_calls
-from ..subagents.deliverables import ChildArtifact, apply_child_artifact, parse_deliverable_paths
+from ..subagents.deliverables import ChildArtifact
 from ..subagents.durable import DurableSubagents
 from ..tools.base import BaseTool
 from ..tools.permissions import ToolApprovalHandler, ToolApprovalRequest
@@ -535,25 +534,19 @@ class Minibot:
     def list_child_artifacts(self, parent_run_id: str, child_run_id: str) -> list[ChildArtifact]:
         """Return a child's committed deliverable manifest."""
         runtime, child = self._child_runtime(parent_run_id, child_run_id)
-        return runtime.list_artifacts(child)
+        return runtime.deliverables(child).list_artifacts()
 
     def read_child_artifact(self, parent_run_id: str, child_run_id: str, path: str) -> str:
         """Verify and read a committed child deliverable."""
         runtime, child = self._child_runtime(parent_run_id, child_run_id)
-        return runtime.read_artifact(child, path)
+        return runtime.deliverables(child).read(path)
 
     def apply_child_artifact(
         self, parent_run_id: str, child_run_id: str, path: str, destination: str,
     ) -> bool:
         """Create a chosen parent file. Return False if identical bytes are already present."""
-        content = self.read_child_artifact(parent_run_id, child_run_id, path)
-        [relative] = parse_deliverable_paths([destination])
-        workdir = self.agent.workdir.resolve()
-        try:
-            require_outside_root(self._durable_store().root, workdir / relative, "Deliverable destination")
-        except ValueError as exc:
-            raise ArtifactError("A child deliverable cannot be applied to durable run storage.") from exc
-        return apply_child_artifact(workdir, relative, content)
+        runtime, child = self._child_runtime(parent_run_id, child_run_id)
+        return runtime.deliverables(child).apply(self.agent.workdir, path, destination)
 
     def list_child_run_steps(self, parent_run_id: str, child_run_id: str) -> list[StepState]:
         store = self._durable_store()
