@@ -26,6 +26,7 @@ from ..tools.permissions import ToolApprovalHandler, ToolApprovalRequest
 
 from ._active_streams import own_stream
 from ._event_router import RouterEventSink
+from ._pending_questions import PendingQuestions
 from .types import ChatResult
 
 
@@ -334,18 +335,7 @@ class Minibot:
         event_type = event.get("type")
         if self.agent.run_store is not None:
             if event_type == "ask_user_question":
-                durable_run_id = (event.get("data") or {}).get("durable_run_id")
-                self._session_manager.save_runtime_state(state.session_id, {
-                    "version": 1,
-                    "state": "awaiting_user_answer",
-                    "durable_run_id": durable_run_id,
-                    "assistant_message_id": event.get("message_id"),
-                    "pending_question": {
-                        key: event[key] for key in (
-                            "message_id", "question_id", "prompt", "options", "allow_free_text", "required",
-                        )
-                    },
-                })
+                PendingQuestions(self._session_manager, state.session_id).save_durable(event)
             return
         message_id = self._event_message_id(event)
         parent_user_message_id = self._event_parent_user_message_id(event)
@@ -454,22 +444,16 @@ class Minibot:
                     "question_pending": True,
                 },
             )
-            self._session_manager.save_runtime_state(
-                state.session_id,
+            PendingQuestions(self._session_manager, state.session_id).save_legacy(
                 {
-                    "version": 1,
-                    "state": "awaiting_user_answer",
-                    **({"trace_run_id": state.run_id} if self.config.trace_dir is not None else {}),
-                    "assistant_message_id": message_id,
-                    "pending_question": {
-                        "question_id": question_id,
-                        "message_id": message_id,
-                        "prompt": prompt,
-                        "options": options,
-                        "allow_free_text": allow_free_text,
-                        "required": required,
-                    },
+                    "question_id": question_id,
+                    "message_id": message_id,
+                    "prompt": prompt,
+                    "options": options,
+                    "allow_free_text": allow_free_text,
+                    "required": required,
                 },
+                trace_run_id=state.run_id if self.config.trace_dir is not None else None,
             )
             return
 
@@ -483,10 +467,7 @@ class Minibot:
                     lambda current: {**current, "question_pending": False},
                 )
             self._persist_answer_message_for_question(question_id=question_id, state=state)
-            saved = self._session_manager.load_runtime_state(state.session_id)
-            if (saved and saved.get("state") == "awaiting_user_answer"
-                    and saved.get("assistant_message_id") == message_id):
-                self._session_manager.delete_runtime_state(state.session_id, expected=saved)
+            PendingQuestions(self._session_manager, state.session_id).clear_live_answer(message_id)
 
     def _clear_streaming_state(self, state: _StreamPersistenceState, *, interrupted: bool = False) -> None:
         if self._session_manager is None:
@@ -585,14 +566,7 @@ class Minibot:
         with self._durable_store().claim(self.session_id, run_id) as journal:
             journal.abandon()
             if self._session_manager is not None:
-                saved = self._session_manager.load_runtime_state(self.session_id)
-                if saved and saved.get("durable_run_id") == journal.run_id:
-                    message_id = saved.get("assistant_message_id")
-                    if message_id:
-                        self._session_manager.update_message(
-                            self.session_id, message_id, lambda message: {**message, "question_pending": False},
-                        )
-                    self._session_manager.delete_runtime_state(self.session_id, expected=saved)
+                PendingQuestions(self._session_manager, self.session_id).abandon_durable_run(journal.run_id)
 
     async def resume_run(
         self,
@@ -945,9 +919,7 @@ class Minibot:
                     trace_parent_run_id = parent_run_id
                     if (self.agent.run_store is None and self.config.trace_dir is not None and prompt is None
                             and trace_parent_run_id is None and self._session_manager is not None):
-                        saved = self._session_manager.load_runtime_state(state.session_id)
-                        if saved and saved.get("state") == "awaiting_user_answer":
-                            trace_parent_run_id = saved.get("trace_run_id")
+                        trace_parent_run_id = PendingQuestions(self._session_manager, state.session_id).trace_run_id()
                     await self._event_router.set_queue(None if detached else queue)
                     await self._event_router.set_tap(
                         lambda event: self._handle_stream_persistence_event(event, state)
@@ -1131,12 +1103,7 @@ class Minibot:
                 self.messages = messages
                 return
             self._session_manager.store.project_durable_messages(session_id, messages)
-            saved = self._session_manager.load_runtime_state(session_id)
-            if saved and saved.get("state") == "awaiting_user_answer":
-                question = saved.get("pending_question") or {}
-                if any(message.get("answer_to_question_id") == question.get("question_id") for message in messages
-                       if message.get("answer_to_question_id")):
-                    self._session_manager.delete_runtime_state(session_id, expected=saved)
+            PendingQuestions(self._session_manager, session_id).clear_durable_answer(messages)
 
         try:
             result = await self.agent.run_loop(

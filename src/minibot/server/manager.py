@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 import copy
+from functools import partial
 from pathlib import Path
 import re
 import shutil
 from typing import Any, AsyncIterator, Iterator
-import uuid
 
 from openai import AsyncOpenAI
 
@@ -21,7 +21,7 @@ from ..core.workspace import configured_workspace_identity
 from ..memory.manager import MemoryManager
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
-from ..sdk._active_streams import is_active_stream
+from ..sdk._pending_questions import PendingQuestions
 from ..session.manager import SessionManager
 from ..skills.loader import SkillLoader
 from ..subagents.registry import AgentType
@@ -576,63 +576,6 @@ class AgentManager:
             raise ValueError("Session not found")
         return self._serialize_messages(session_mgr.load(session_id))
 
-    @staticmethod
-    def _normalize_pending_question_answer(
-        question: dict[str, Any],
-        *,
-        answer_text: Any,
-        selected_option_value: Any,
-    ) -> tuple[str, str | None]:
-        normalized_text = str(answer_text or "").strip()
-        normalized_selected = (
-            str(selected_option_value).strip()
-            if selected_option_value is not None and str(selected_option_value).strip()
-            else None
-        )
-        option_values = {str(item.get("value")) for item in question.get("options") or []}
-
-        if normalized_selected is not None and normalized_selected not in option_values:
-            raise ValueError("Pending question selected option is invalid")
-        if not question.get("allow_free_text", True) and normalized_selected is None:
-            raise ValueError("Pending question requires choosing one of the provided options")
-        if question.get("required", True) and not normalized_text and normalized_selected is None:
-            raise ValueError("Pending question requires a non-empty answer")
-
-        if normalized_selected is not None and not normalized_text:
-            for item in question.get("options") or []:
-                if item.get("value") == normalized_selected:
-                    normalized_text = str(item.get("label") or normalized_selected)
-                    break
-
-        return normalized_text, normalized_selected
-
-    def _reconcile_stale_runtime(
-        self,
-        bot_id: str,
-        session_id: str,
-        runtime_state: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if runtime_state is None or runtime_state.get("state") != "streaming":
-            return runtime_state
-
-        session_mgr = self.sessions_for(bot_id)
-        if is_active_stream(session_mgr, session_id, runtime_state.get("run_id")):
-            return runtime_state
-
-        assistant_message_id = runtime_state.get("assistant_message_id")
-        if isinstance(assistant_message_id, str) and assistant_message_id.strip():
-            session_mgr.update_message(
-                session_id,
-                assistant_message_id,
-                lambda current: (
-                    dict(current)
-                    if current.get("completion_state") == "complete"
-                    else {**current, "completion_state": "interrupted"}
-                ),
-            )
-        session_mgr.delete_runtime_state(session_id, expected=runtime_state)
-        return None
-
     def submit_tool_approval(self, bot_id: str, session_id: str, approval_id: str, approved: bool) -> None:
         """Resolve a live invocation without locking its waiting chat stream."""
         bot = self._bots.get((bot_id, session_id))
@@ -641,23 +584,8 @@ class AgentManager:
         bot.submit_tool_approval(approval_id, approved)
 
     async def pending_question_snapshot(self, bot_id: str, session_id: str) -> dict[str, Any] | None:
-        session_mgr = self.sessions_for(bot_id)
-        runtime_state = session_mgr.load_runtime_state(session_id)
-        runtime_state = self._reconcile_stale_runtime(bot_id, session_id, runtime_state)
-        if runtime_state is not None and runtime_state.get("state") == "streaming":
-            return None
-        if runtime_state is not None and runtime_state.get("state") == "awaiting_user_answer":
-            pending_question = runtime_state.get("pending_question")
-            if isinstance(pending_question, dict) and pending_question:
-                return dict(pending_question)
-
-        bot = await self.get_bot(bot_id, session_id)
-        if not hasattr(bot, "pending_question"):
-            raise ValueError("Bot does not support askuserquestion state")
-        question = bot.pending_question()
-        if not isinstance(question, dict) or not question:
-            return None
-        return dict(question)
+        pending = PendingQuestions(self.sessions_for(bot_id), session_id)
+        return await pending.snapshot(partial(self.get_bot, bot_id, session_id))
 
     async def submit_user_answer(self, bot_id: str, session_id: str, payload: dict[str, Any]) -> None:
         bot = await self.get_bot(bot_id, session_id)
@@ -682,78 +610,13 @@ class AgentManager:
         *,
         reasoning_effort: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        session_mgr = self.sessions_for(bot_id)
-        runtime_state = self._reconcile_stale_runtime(
-            bot_id,
-            session_id,
-            session_mgr.load_runtime_state(session_id),
-        )
-        if runtime_state is None or runtime_state.get("state") != "awaiting_user_answer":
-            raise ValueError("No persisted pending question is waiting for an answer")
-
-        pending_question = runtime_state.get("pending_question")
-        if not isinstance(pending_question, dict) or not pending_question:
-            raise ValueError("Persisted pending question state is invalid")
-
-        question_id = str(payload.get("question_id") or "").strip()
-        if question_id != str(pending_question.get("question_id") or "").strip():
-            raise ValueError("Pending question id does not match")
-
-        answer_text, selected_option_value = self._normalize_pending_question_answer(
-            pending_question,
-            answer_text=payload.get("answer_text"),
-            selected_option_value=payload.get("selected_option_value"),
-        )
-
-        assistant_message_id = str(
-            runtime_state.get("assistant_message_id")
-            or pending_question.get("message_id")
-            or ""
-        ).strip()
-        if not assistant_message_id:
-            raise ValueError("Persisted pending question is missing its assistant message id")
-
-        durable_run_id = runtime_state.get("durable_run_id")
-        if durable_run_id is None:
-            session_mgr.update_message(
-                session_id,
-                assistant_message_id,
-                lambda current: {**current, "question_pending": False},
-            )
-            session_mgr.append_message(
-                session_id,
-                {
-                    "role": "user",
-                    "content": answer_text,
-                    "message_id": f"msg-{uuid.uuid4().hex[:12]}",
-                    "answer_to_question_id": question_id,
-                    "selected_option_value": selected_option_value,
-                },
-            )
-            session_mgr.delete_runtime_state(session_id)
+        pending = PendingQuestions(self.sessions_for(bot_id), session_id)
+        resume = pending.prepare_resume(payload)
+        if resume.refresh_cached_bot:
             self._clear_session_cache(bot_id, session_id, preserve_lock=True)
 
         bot = await self.get_bot(bot_id, session_id)
-        if hasattr(bot, "resume_pending_question_stream"):
-            trace_options = (
-                {"parent_run_id": runtime_state["trace_run_id"]}
-                if runtime_state.get("trace_run_id") else {}
-            )
-            async for event in bot.resume_pending_question_stream(
-                question_id=question_id,
-                answer_text=answer_text,
-                selected_option_value=selected_option_value,
-                reasoning_effort=reasoning_effort,
-                **trace_options,
-                **({"durable_run_id": durable_run_id} if durable_run_id is not None else {}),
-            ):
-                yield event
-            return
-
-        if not hasattr(bot, "stream_existing_messages"):
-            raise ValueError("Bot does not support persisted pending question resume")
-
-        async for event in bot.stream_existing_messages(reasoning_effort=reasoning_effort):
+        async for event in resume.stream(bot, reasoning_effort=reasoning_effort):
             yield event
 
     @contextmanager
