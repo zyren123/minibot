@@ -39,13 +39,26 @@ async def test_answer_stream_preserves_trace_parent_after_cache_restart(server_e
     manager._base_config.trace_dir = server_env["home"] / "traces"
     manager._base_config.mcp.enabled = False
     manager._base_config.teams.enabled = False
+    manager._base_config.hooks.enabled = False
     bot_id = (await manager.create_bot(name="Trace resume"))["bot_id"]
     sessions = manager.sessions_for(bot_id)
     session_id = sessions.create()
+    sidecar_path = sessions.runtime_state_path(session_id)
+    assert sidecar_path is not None
+    read_text = Path.read_text
+
+    def read_runtime_state(path, *args, **kwargs):
+        if path == sidecar_path:
+            assert kwargs.get("encoding") == "utf-8"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_runtime_state)
     bot = await manager.get_bot(bot_id, session_id)
-    bot.agent.client = TurnClient([call("askuserquestion", json.dumps({"prompt": "Choose"}))])
+    bot.agent.client = TurnClient([call("askuserquestion", json.dumps({"prompt": "选哪个？"}))])
     async for _ in bot.stream("run", stop_on_ask_user_question=True):
         pass
+    pending = await manager.pending_question_snapshot(bot_id, session_id)
+    assert pending is not None and pending["prompt"] == "选哪个？"
     first, = records(manager._base_config.trace_dir)
     original_get = manager.get_bot
 
@@ -57,7 +70,7 @@ async def test_answer_stream_preserves_trace_parent_after_cache_restart(server_e
 
     monkeypatch.setattr(manager, "get_bot", get_bot)
     async for _ in manager.submit_user_answer_stream(bot_id, session_id, {
-        "question_id": "call-1", "answer_text": "Answer",
+        "question_id": "call-1", "answer_text": "这个",
     }):
         pass
     runs = records(manager._base_config.trace_dir)
@@ -66,7 +79,8 @@ async def test_answer_stream_preserves_trace_parent_after_cache_restart(server_e
     assert first[-1]["status"] == "waiting_for_user"
     assert resumed[-1]["status"] == "completed"
     messages = sessions.load(session_id)
-    assert any(message.get("answer_to_question_id") == "call-1" for message in messages)
+    answers = [message["content"] for message in messages if message.get("answer_to_question_id") == "call-1"]
+    assert answers == ["这个"]
     assert messages[-1]["content"] == "done"
 
 
