@@ -19,10 +19,11 @@ from .file_checkpoints import GitFileCheckpoints
 from .traces import RunTrace, RunStatus
 from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
-from .core.model_context import ContextWindowExceeded, prepare_model_request
+from .core.model_attempt import model_attempt
+from .core.model_context import ContextWindowExceeded
 from .core.run_store import DurableRunError, DurableRunPaused, RunJournal, RunStore, StepState
 from .core.workspace import WorkspaceIdentity
-from .core.runtime_budget import ModelAllowance, RuntimeBudget, RuntimeBudgetExceeded, current_budget
+from .core.runtime_budget import RuntimeBudget, RuntimeBudgetExceeded, current_budget
 from .core.tool_args import parse_tool_arguments
 from .tools.registry import ToolRegistry
 from .tools.result import ToolOutcome
@@ -1257,8 +1258,8 @@ You are now live. Await instructions and begin the loop.""",
         messages: list[dict],
         system: str,
         tools: list[dict] | None,
-        budget: RuntimeBudget,
-        allowance: ModelAllowance,
+        max_tokens: int,
+        settle_partial: Callable[[Any, tuple[str, str | None, list[Any]]], None],
         assistant_message_id: str,
         parent_user_message_id: str | None,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
@@ -1291,7 +1292,7 @@ You are now live. Await instructions and begin the loop.""",
                     messages=messages,
                     system=system,
                     tools=tools,
-                    max_tokens=allowance.max_tokens,
+                    max_tokens=max_tokens,
                     reasoning_effort=reasoning_effort,
                 ),
                 interrupt_queue,
@@ -1410,7 +1411,7 @@ You are now live. Await instructions and begin the loop.""",
         except UserInterruptedError:
             raise
         except Exception:
-            budget.finish_model(allowance, usage, (
+            settle_partial(usage, (
                 "".join(text_parts), "".join(reasoning_parts), list(tool_call_map.values()),
             ))
             raise
@@ -1505,27 +1506,18 @@ You are now live. Await instructions and begin the loop.""",
         max_tokens: int | None = None,
         trim_history: bool = True,
     ) -> Any:
-        llm = self.config.llm
-        await budget.wait_for_output()
-        request = prepare_model_request(
-            messages, system, tools, budget.output_headroom(max_tokens if max_tokens is not None else llm.max_tokens),
-            window_tokens=int(llm.max_context_tokens), tool_output_chars=llm.max_tool_output_chars,
-            trim_history=trim_history,
-        )
-        allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
-        with budget.reserve_output(allowance):
-            async with budget.time_limit():
-                response = await self._create_message_with_interrupt(
-                    messages=request.messages,
-                    system=system,
-                    tools=tools,
-                    max_tokens=allowance.max_tokens,
-                    interrupt_queue=interrupt_queue,
-                    reasoning_effort=reasoning_effort,
-                )
+        async with model_attempt(
+            budget, self.config.llm, messages, system, tools,
+            max_tokens=max_tokens, trim_history=trim_history, reserve_output=True,
+        ) as attempt:
+            response = await attempt.dispatch(
+                self._create_message_with_interrupt,
+                interrupt_queue=interrupt_queue,
+                reasoning_effort=reasoning_effort,
+            )
             choice = self._first_choice(response)
             payload = self._field(choice, "message") or response
-            budget.finish_model(allowance, self._field(response, "usage"), (
+            attempt.settle(self._field(response, "usage"), (
                 self._extract_stream_text(payload),
                 self._extract_reasoning_text(payload),
                 self._extract_tool_calls(payload),
@@ -1849,26 +1841,18 @@ You are now live. Await instructions and begin the loop.""",
 
             if self._streaming_active():
                 try:
-                    request = prepare_model_request(
-                        messages, system, tools, budget.output_headroom(self.config.llm.max_tokens),
-                        window_tokens=max_context_tokens, tool_output_chars=self.config.llm.max_tool_output_chars,
-                    )
-                    allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
-                    async with budget.time_limit():
-                        stream_result = await self._create_message_stream_with_interrupt(
-                            messages=request.messages,
-                            system=system,
-                            tools=tools,
-                            budget=budget,
-                            allowance=allowance,
+                    async with model_attempt(budget, self.config.llm, messages, system, tools) as attempt:
+                        stream_result = await attempt.dispatch(
+                            self._create_message_stream_with_interrupt,
+                            settle_partial=attempt.settle,
                             assistant_message_id=assistant_message_id,
                             parent_user_message_id=parent_user_message_id,
                             interrupt_queue=interrupt_queue,
                             reasoning_effort=reasoning_effort,
                         )
-                    budget.finish_model(allowance, stream_result["usage"], (
-                        stream_result["content"], stream_result["reasoning"], stream_result["tool_calls"],
-                    ))
+                        attempt.settle(stream_result["usage"], (
+                            stream_result["content"], stream_result["reasoning"], stream_result["tool_calls"],
+                        ))
                     content = stream_result["content"]
                     reasoning = stream_result.get("reasoning", "")
                     finish_reason = stream_result["finish_reason"]

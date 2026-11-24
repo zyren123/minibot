@@ -11,7 +11,7 @@ from uuid import uuid4
 from ..config.schema import LLMConfig, RuntimeBudgetConfig
 from ..core.artifacts import current_artifacts
 from ..core.client import LLMClient
-from ..core.model_context import prepare_model_request
+from ..core.model_attempt import model_attempt
 from ..core.runtime_budget import RuntimeBudget, current_budget
 from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
@@ -173,33 +173,21 @@ Complete the task and return a clear, concise summary."""
                     status.tool_count = tool_count
                     status.tick()
 
-                request = prepare_model_request(
-                    sub_messages, sub_system, sub_tools, budget.output_headroom(self.llm_config.max_tokens),
-                    window_tokens=int(self.llm_config.max_context_tokens),
-                    tool_output_chars=self.llm_config.max_tool_output_chars,
-                )
-                allowance = budget.start_model(input_estimate=request.input_estimate, max_tokens=request.max_tokens)
-                if child is not None:
-                    child.start_model()
-                async with budget.time_limit():
-                    response = await self.client.create_message_async(
-                        messages=request.messages,
-                        system=sub_system,
-                        tools=sub_tools,
-                        max_tokens=allowance.max_tokens,
-                    )
-
-                usage = getattr(response, "usage", None)
-                if child is not None:
-                    child.finish_model(usage)
-                choice = response.choices[0]
-                assistant_message = choice.message
-                finish_reason = choice.finish_reason
-                content = assistant_message.content or ""
-                tool_calls = assistant_message.tool_calls or []
-                budget.finish_model(allowance, usage, (
-                    str(content), str(getattr(assistant_message, "reasoning_content", None) or ""), tool_calls,
-                ))
+                async with model_attempt(budget, self.llm_config, sub_messages, sub_system, sub_tools) as attempt:
+                    if child is not None:
+                        child.start_model()
+                    response = await attempt.dispatch(self.client.create_message_async)
+                    usage = getattr(response, "usage", None)
+                    if child is not None:
+                        child.finish_model(usage)
+                    choice = response.choices[0]
+                    assistant_message = choice.message
+                    finish_reason = choice.finish_reason
+                    content = assistant_message.content or ""
+                    tool_calls = assistant_message.tool_calls or []
+                    attempt.settle(usage, (
+                        str(content), str(getattr(assistant_message, "reasoning_content", None) or ""), tool_calls,
+                    ))
 
                 if finish_reason != "tool_calls":
                     break
