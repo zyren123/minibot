@@ -201,6 +201,10 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict, repr=False)
 
 
+WorkspaceMemoryProvider = Literal["file", "novelmemo"]
+NovelMemoConnection = Literal["vault", "mcp"]
+
+
 @dataclass
 class MemoryConfig:
     """Memory system configuration."""
@@ -211,6 +215,16 @@ class MemoryConfig:
     active_namespace: str | None = None
     long_term_max_lines: int = 200
     daily_lookback_days: int = 1
+    provider: WorkspaceMemoryProvider | Literal["structured"] = "file"
+    novelmemo_vault: str | None = None
+    novelmemo_connection: NovelMemoConnection = "vault"
+    novelmemo_mcp_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider not in ("file", "novelmemo", "structured"):
+            raise ValueError("memory.provider must be file, novelmemo, or structured")
+        if self.novelmemo_connection not in ("vault", "mcp"):
+            raise ValueError("memory.novelmemo_connection must be vault or mcp")
 
 
 @dataclass

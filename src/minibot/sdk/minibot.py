@@ -329,10 +329,10 @@ class Minibot:
         event: StreamEvent,
         state: _StreamPersistenceState,
     ) -> None:
-        if self._session_manager is None:
+        event_type = event.get("type")
+        if self._session_manager is None or event_type in {"model_generation_start", "model_generation_end"}:
             return
 
-        event_type = event.get("type")
         if self.agent.run_store is not None:
             if event_type == "ask_user_question":
                 PendingQuestions(self._session_manager, state.session_id).save_durable(event)

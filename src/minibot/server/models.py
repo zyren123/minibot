@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from ..config.schema import NovelMemoConnection, WorkspaceMemoryProvider
+
 from ..tools.result import ToolStatus
 
 
@@ -191,6 +193,22 @@ class SkillInfo(BaseModel):
     override_count: int = 0
     overridden_by_source_type: str | None = None
     overridden_by_path: str | None = None
+
+
+class MemoryWorkspaceConfigUpdate(BaseModel):
+    provider: WorkspaceMemoryProvider
+    vault_path: str | None = None
+    connection: NovelMemoConnection | None = None
+    mcp_url: str | None = None
+
+
+class MemoryWorkspaceDocumentUpdate(BaseModel):
+    provider: WorkspaceMemoryProvider
+    path: str = Field(min_length=1)
+    content: str
+    revision: str = Field(min_length=1)
+    disclosure: str | None = None
+    triggers: list[str] | None = None
 
 
 class MemoryNamespaceCreateRequest(BaseModel):

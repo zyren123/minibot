@@ -341,6 +341,22 @@ servers:
       GITHUB_TOKEN: "your-token"
 ```
 
+### 记忆方式
+
+每个 Bot 使用一种记忆方式。可以在「配置 → Bots → 当前记忆」管理，也可以从「记忆」页右上角切换。文件记忆默认读取 `memory/LONG_TERM.md` 和 `memory/daily/YYYY-MM-DD.md`。
+
+Novel Memo 可以打开 MiniBot 服务器上的 Vault，也可以通过 MCP 连接另一个进程。Vault 根目录包含 `.memory/memory.yaml`。新建 Vault 可运行 `uvx --from 'novelmemo==0.2.1' --with 'mcp<2' novelmemo init /absolute/path/to/vault`。
+
+在存有 Vault 的机器上运行以下命令，即可提供 MiniBot 记忆页需要的目录、文档、搜索和图谱接口。
+
+```bash
+python -m minibot.memory.novelmemo_mcp --vault /absolute/path/to/vault --port 8767
+```
+
+同机连接时，在「MCP 地址」输入 `http://127.0.0.1:8767/mcp`。跨机器连接时，使用 MiniBot 服务器可达的 Streamable HTTP 地址，在部署侧控制访问。Agent 和记忆页通过同一个服务读写 Vault。
+
+CLI 和 SDK 可在 `memory` 段设置 `provider: novelmemo`。本地连接使用 `novelmemo_vault`。MCP 连接使用 `novelmemo_connection: mcp` 和 `novelmemo_mcp_url`。
+
 ---
 
 ## 👥 Agent Teams (MVP)

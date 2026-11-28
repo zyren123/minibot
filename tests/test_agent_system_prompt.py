@@ -36,6 +36,7 @@ def _make_agent(
     role: str = "solo",
     extra_system_prompt: str | None = None,
     memory_enabled: bool = False,
+    memory_provider: str = "file",
     mcp_enabled: bool = False,
 ) -> Agent:
     cfg = Config(
@@ -48,7 +49,7 @@ def _make_agent(
             model="test-model",
             stream_enabled=False,
         ),
-        memory=MemoryConfig(enabled=memory_enabled, memory_dir="memory"),
+        memory=MemoryConfig(enabled=memory_enabled, memory_dir="memory", provider=memory_provider),
         mcp=MCPConfig(
             enabled=mcp_enabled,
             servers=[MCPServerConfig(name="docs", transport="stdio", command="echo", enabled=True)],
@@ -114,6 +115,7 @@ def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(t
         tmp_path,
         extra_system_prompt=extra,
         memory_enabled=True,
+        memory_provider="structured",
         mcp_enabled=True,
     )
     agent.mcp_manager._clients["docs"] = SimpleNamespace(is_connected=True)
@@ -142,7 +144,7 @@ def test_system_prompt_includes_dynamic_sections_and_appends_extra_prompt_last(t
 
 
 def test_system_prompt_instructs_boot_search_not_auto_loaded_memory(tmp_path):
-    agent = _make_agent(tmp_path, memory_enabled=True)
+    agent = _make_agent(tmp_path, memory_enabled=True, memory_provider="structured")
 
     prompt = agent.system_prompt
 

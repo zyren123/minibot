@@ -10,15 +10,24 @@ from pathlib import Path
 import re
 import shutil
 from typing import Any, AsyncIterator, Iterator
+from weakref import WeakValueDictionary
 
 from openai import AsyncOpenAI
 
 from ..config import Config, load_config
+from ..config.schema import MemoryConfig, NovelMemoConnection, WorkspaceMemoryProvider
 from ..config.workspace import require_outside_workspace, validate_workspace_runtime
 from ..config.writer import update_default_config, update_mcp_server_config, upsert_env_value
 from ..core.run_store import DurableRunError, RunStore
 from ..core.workspace import configured_workspace_identity
 from ..memory.manager import MemoryManager
+from ..memory.remote_novelmemo import RemoteNovelMemoWorkspace
+from ..memory.workspace import (
+    FileMemoryWorkspace,
+    NovelMemoWorkspace,
+    call_memory_operation,
+    open_memory_workspace,
+)
 from ..mcp.manager import MCPManager
 from ..sdk import Minibot
 from ..sdk._pending_questions import PendingQuestions
@@ -39,6 +48,10 @@ from .plugins import load_tools_from_plugin
 
 
 _STATE_UNSET = object()
+
+
+class MemoryWorkspaceChanged(ValueError):
+    """The requested memory source conflicts with the current Bot activity or settings."""
 
 
 class AgentManager:
@@ -76,6 +89,7 @@ class AgentManager:
 
         self._bots: dict[tuple[str, str], Minibot] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._memory_write_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._mcp_connected: set[tuple[str, str]] = set()
         self._admin_mcp_manager: MCPManager | None = None
         self._sessions: dict[str, SessionManager] = {}
@@ -215,7 +229,7 @@ class AgentManager:
 
     async def delete_bot(self, bot_id: str) -> bool:
         rebound_platform_ids: list[str] = []
-        async with self._global_lock:
+        async with self._memory_write_lock(bot_id), self._global_lock:
             referencing = set(self._bots_referencing(bot_id))
             rebound_platform_ids = self._platform_store.rebind_bot(
                 source_bot_id=bot_id,
@@ -1033,6 +1047,13 @@ class AgentManager:
                 self._locks[key] = lock
             return lock
 
+    def _memory_write_lock(self, bot_id: str) -> asyncio.Lock:
+        lock = self._memory_write_locks.get(bot_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._memory_write_locks[bot_id] = lock
+        return lock
+
     def _build_bot_config(self, bot_id: str) -> tuple[Config, dict[str, Any]]:
         cfg = copy.deepcopy(self._base_config)
         data = self._bot_store.read_bot_json(bot_id)
@@ -1071,8 +1092,133 @@ class AgentManager:
 
         cfg.teams.enabled = bool(cfg.teams.enabled) and bool(data.get("teams_enabled", True))
         cfg.memory.active_namespace = self._optional_text(data.get("active_memory_namespace"))
+        provider = data.get("memory_provider", cfg.memory.provider)
+        cfg.memory.provider = "novelmemo" if provider == "novelmemo" else "file"
+        if "novelmemo_vault" in data:
+            cfg.memory.novelmemo_vault = self._optional_text(data["novelmemo_vault"])
+            cfg.memory.novelmemo_connection = "vault"
+        connection = data.get("novelmemo_connection")
+        if connection in ("vault", "mcp"):
+            cfg.memory.novelmemo_connection = connection
+        if "novelmemo_mcp_url" in data:
+            cfg.memory.novelmemo_mcp_url = self._optional_text(data["novelmemo_mcp_url"])
 
         return cfg, data
+
+    def _memory_workspace_config_for(self, bot_id: str) -> Config:
+        if not self.bot_exists(bot_id):
+            raise KeyError(bot_id)
+        cfg, _data = self._build_bot_config(bot_id)
+        if cfg.workspace.restricted:
+            raise ValueError("Host memory is unavailable in a restricted Docker workspace")
+        if not cfg.memory.enabled:
+            raise ValueError("Memory is disabled")
+        return cfg
+
+    def memory_workspace_config(self, bot_id: str) -> dict[str, str | None]:
+        return self._memory_workspace_snapshot(self._memory_workspace_config_for(bot_id).memory)
+
+    @staticmethod
+    def _memory_workspace_snapshot(memory: MemoryConfig) -> dict[str, str | None]:
+        mcp_url = memory.novelmemo_mcp_url
+        if mcp_url:
+            try:
+                mcp_url = RemoteNovelMemoWorkspace(mcp_url).url
+            except ValueError:
+                mcp_url = None
+        return {
+            "provider": memory.provider,
+            "vault_path": memory.novelmemo_vault,
+            "connection": memory.novelmemo_connection,
+            "mcp_url": mcp_url,
+        }
+
+    async def configure_memory_workspace(
+        self,
+        bot_id: str,
+        provider: WorkspaceMemoryProvider,
+        vault_path: str | None = None,
+        *,
+        connection: NovelMemoConnection | None = None,
+        mcp_url: str | None = None,
+    ) -> dict[str, str | None]:
+        async with self._memory_write_lock(bot_id):
+            config = self._memory_workspace_config_for(bot_id)
+            current = self._memory_workspace_snapshot(config.memory)
+            memory = config.memory
+            memory.provider = provider
+            if provider == "novelmemo":
+                if connection is None:
+                    if vault_path is not None:
+                        connection = "vault"
+                    elif mcp_url is not None:
+                        connection = "mcp"
+                    else:
+                        connection = memory.novelmemo_connection
+                memory.novelmemo_connection = connection
+                if connection == "mcp":
+                    if vault_path is not None:
+                        raise ValueError("Choose an MCP address or a Vault path")
+                    memory.novelmemo_mcp_url = self._optional_text(mcp_url) or memory.novelmemo_mcp_url
+                else:
+                    if mcp_url is not None:
+                        raise ValueError("Choose an MCP address or a Vault path")
+                    memory.novelmemo_vault = self._optional_text(vault_path) or memory.novelmemo_vault
+                workspace = await asyncio.to_thread(
+                    open_memory_workspace, memory, config.app_home, config.project_root,
+                )
+                if isinstance(workspace, RemoteNovelMemoWorkspace):
+                    await workspace.validate()
+                    memory.novelmemo_mcp_url = workspace.url
+                elif isinstance(workspace, NovelMemoWorkspace):
+                    memory.novelmemo_vault = str(workspace.root)
+
+            selected = self._memory_workspace_snapshot(memory)
+            if selected != current:
+                async with self._global_lock:
+                    if any(key[0] == bot_id and lock.locked() for key, lock in self._locks.items()):
+                        raise MemoryWorkspaceChanged("Wait for the current chat turn to finish, then switch memory")
+                    self._bot_store.patch_bot_json(bot_id, {
+                        "memory_provider": provider,
+                        "novelmemo_connection": memory.novelmemo_connection,
+                        "novelmemo_vault": memory.novelmemo_vault,
+                        "novelmemo_mcp_url": selected["mcp_url"],
+                    })
+                    self._clear_bot_cache(bot_id, preserve_locks=True)
+            return selected
+
+    def memory_workspace(
+        self, bot_id: str, provider: WorkspaceMemoryProvider,
+    ) -> FileMemoryWorkspace | NovelMemoWorkspace | RemoteNovelMemoWorkspace:
+        return self._memory_workspace_opener(bot_id, provider)()
+
+    async def open_active_memory_workspace(
+        self, bot_id: str, provider: WorkspaceMemoryProvider,
+    ) -> FileMemoryWorkspace | NovelMemoWorkspace | RemoteNovelMemoWorkspace:
+        return await asyncio.to_thread(self._memory_workspace_opener(bot_id, provider))
+
+    def _memory_workspace_opener(self, bot_id: str, provider: WorkspaceMemoryProvider):
+        cfg = self._memory_workspace_config_for(bot_id)
+        if cfg.memory.provider != provider:
+            raise MemoryWorkspaceChanged("The active memory source has changed. Reopen the document to continue.")
+        return partial(open_memory_workspace, cfg.memory, cfg.app_home, cfg.project_root)
+
+    async def save_memory_workspace_document(
+        self,
+        bot_id: str,
+        provider: WorkspaceMemoryProvider,
+        path: str,
+        content: str,
+        revision: str,
+        *,
+        triggers: list[str] | None = None,
+        disclosure: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._memory_write_lock(bot_id):
+            workspace = await self.open_active_memory_workspace(bot_id, provider)
+            return await call_memory_operation(
+                workspace.save_document, path, content, revision, triggers=triggers, disclosure=disclosure,
+            )
 
     def _memory_manager_for(self, bot_id: str) -> MemoryManager:
         if self._base_config.workspace.restricted:
@@ -1248,7 +1394,7 @@ class AgentManager:
         return tools
 
     async def get_bot(self, bot_id: str, session_id: str) -> Minibot:
-        self._assert_bot_chat_ready(bot_id)
+        self.assert_bot_chat_ready(bot_id)
         key = (bot_id, session_id)
         async with self._global_lock:
             existing = self._bots.get(key)
@@ -1382,7 +1528,7 @@ class AgentManager:
         finally:
             await worker.agent.end_session()
 
-    def _assert_bot_chat_ready(self, bot_id: str) -> None:
+    def assert_bot_chat_ready(self, bot_id: str) -> None:
         state = self._bot_chat_state(bot_id)
         if not state["ready"]:
             raise ValueError(str(state["reason"] or "Bot is not available for chat"))
@@ -1499,11 +1645,12 @@ class AgentManager:
             return summary[:117] + "..."
         return summary
 
-    def _clear_bot_cache(self, bot_id: str) -> None:
+    def _clear_bot_cache(self, bot_id: str, *, preserve_locks: bool = False) -> None:
         keys = [k for k in self._bots.keys() if k[0] == bot_id]
         for key in keys:
             self._bots.pop(key, None)
-            self._locks.pop(key, None)
+            if not preserve_locks:
+                self._locks.pop(key, None)
             self._mcp_connected.discard(key)
 
     def _clear_session_cache(self, bot_id: str, session_id: str, *, preserve_lock: bool = False) -> None:

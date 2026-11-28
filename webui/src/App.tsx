@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ChatView from "./views/ChatView";
+import { IconButtonProvider } from "./components/IconButton";
 import ConfigView from "./views/ConfigView";
-import MemoryView from "./views/MemoryView";
+import MemoryWorkspaceView from "./views/MemoryWorkspaceView";
 import type { BotMeta } from "./lib/types";
 import { createBot, deleteBot, listBots } from "./lib/api";
 import {
@@ -164,6 +165,7 @@ export default function App() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [botBusy, setBotBusy] = useState(false);
+  const [memorySourceSlot, setMemorySourceSlot] = useState<HTMLDivElement | null>(null);
 
   const languageMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -320,40 +322,71 @@ export default function App() {
 
   return (
     <I18nProvider value={i18nValue}>
-      <div className="app-shell flex h-full flex-col bg-zinc-950 text-zinc-100">
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="text-lg font-semibold tracking-tight">{t("app.brand")}</div>
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={botId}
-                onChange={(e) => setBotId(e.target.value)}
-                className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-              >
-                {bots.map((b) => (
-                  <option key={b.bot_id} value={b.bot_id}>
-                    {b.name}
-                  </option>
-                ))}
-              </select>
+      <div className="app-shell flex h-full flex-col">
+        <header className="workspace-header">
+          <div className="workspace-brand">
+            <span className="workspace-brand-mark" aria-hidden="true">
+              <span className="workspace-brand-monogram" />
+              <span className="workspace-brand-dot" />
+            </span>
+            <span className="workspace-brand-name">{t("app.brand")}</span>
+          </div>
+          <nav className="workspace-nav">
+            {tabs.map((item) => (
               <button
-                onClick={() => void onCreateBot()}
-                className="rounded-md bg-zinc-900 px-2 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800"
+                key={item.id}
+                type="button"
+                onClick={() => setTab(item.id)}
+                className="workspace-tab"
+                aria-current={tab === item.id ? "page" : undefined}
               >
-                {t("app.bot.new")}
+                {item.label}
+              </button>
+            ))}
+          </nav>
+          <div className="workspace-controls">
+            <div className="workspace-bots">
+              <div className="workspace-bot-picker">
+                <select
+                  value={botId}
+                  onChange={(e) => setBotId(e.target.value)}
+                  aria-label={t("app.bot.select")}
+                >
+                  {bots.map((b) => (
+                    <option key={b.bot_id} value={b.bot_id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path d="m4.5 6.5 3.5 3.5 3.5-3.5" />
+                </svg>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onCreateBot()}
+                className="control-icon-button workspace-bot-action"
+                aria-label={t("app.bot.new")}
+                title={t("app.bot.new")}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
               </button>
               {botId !== "default" ? (
                 <button
+                  type="button"
                   onClick={() => void onDeleteBot()}
-                  className="rounded-md bg-red-600 px-2 py-1.5 text-sm text-white hover:bg-red-500"
+                  className="control-icon-button workspace-bot-action workspace-action-danger"
+                  aria-label={t("app.bot.delete")}
+                  title={t("app.bot.delete")}
                 >
-                  {t("app.bot.delete")}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                    <path d="M4 7h16m-10 4v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+                  </svg>
                 </button>
               ) : null}
             </div>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {botStatus && <div className="text-xs text-zinc-400">{botStatus}</div>}
             <div ref={languageMenuRef} className="relative">
               <button
                 type="button"
@@ -413,39 +446,29 @@ export default function App() {
             >
               <ThemeModeGlyph mode={themeMode} />
             </button>
-            {tabs.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => setTab(item.id)}
-                className={classNames(
-                  "rounded-md px-3 py-1.5 text-sm font-medium",
-                  tab === item.id
-                    ? "bg-zinc-100 text-zinc-900"
-                    : "bg-zinc-900 text-zinc-200 hover:bg-zinc-800",
-                )}
-              >
-                {item.label}
-              </button>
-            ))}
           </div>
+          {tab === "memory" && <div className="memory-source-slot" ref={setMemorySourceSlot} />}
+          {botStatus && <p className="workspace-status" role="status">{botStatus}</p>}
         </header>
 
-        <main className="min-h-0 flex-1">
-          {/* Keep ChatView mounted so in-flight streaming state survives tab switches. */}
-          <div className="h-full" hidden={tab !== "chat"} aria-hidden={tab !== "chat"}>
-            <ChatView botId={botId} botName={currentBot?.name || botId} />
-          </div>
-          {tab === "memory" ? (
-            <div className="h-full">
-              <MemoryView botId={botId} />
+        <IconButtonProvider delayDuration={400}>
+          <main className="min-h-0 flex-1">
+            {/* Keep ChatView mounted so in-flight streaming state survives tab switches. */}
+            <div className="h-full" hidden={tab !== "chat"} aria-hidden={tab !== "chat"}>
+              <ChatView botId={botId} botName={currentBot?.name || botId} />
             </div>
-          ) : null}
-          {tab === "config" ? (
-            <div className="h-full">
-              <ConfigView botId={botId} onBotsChanged={refreshBots} onSelectBot={setBotId} />
-            </div>
-          ) : null}
-        </main>
+            {tab === "memory" ? (
+              <div className="h-full">
+                <MemoryWorkspaceView key={botId} botId={botId} sourceSlot={memorySourceSlot} />
+              </div>
+            ) : null}
+            {tab === "config" ? (
+              <div className="h-full">
+                <ConfigView botId={botId} onBotsChanged={refreshBots} onSelectBot={setBotId} />
+              </div>
+            ) : null}
+          </main>
+        </IconButtonProvider>
 
         {createOpen ? (
           <div
@@ -454,16 +477,17 @@ export default function App() {
               if (e.target === e.currentTarget) setCreateOpen(false);
             }}
           >
-            <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-4 shadow-xl">
-              <div className="text-lg font-semibold">{t("app.bot.create.title")}</div>
+            <div className="workspace-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-create-title">
+              <div id="workspace-create-title" className="workspace-dialog-title">{t("app.bot.create.title")}</div>
               <div className="mt-1 text-sm text-zinc-400">{t("app.bot.create.description")}</div>
               <div className="mt-4 grid gap-2">
-                <label className="text-sm font-semibold text-zinc-200">{t("app.bot.create.label")}</label>
+                <label htmlFor="workspace-new-bot-name" className="text-sm font-semibold text-zinc-200">{t("app.bot.create.label")}</label>
                 <input
+                  id="workspace-new-bot-name"
                   value={createName}
                   onChange={(e) => setCreateName(e.target.value)}
                   placeholder={t("app.bot.create.placeholder")}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                  className="workspace-dialog-input"
                   onKeyDown={(e) => {
                     if (e.key === "Enter") void confirmCreateBot();
                   }}
@@ -473,14 +497,14 @@ export default function App() {
               </div>
               <div className="mt-5 flex justify-end gap-2">
                 <button
-                  className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                  className="chat-button"
                   onClick={() => setCreateOpen(false)}
                   disabled={botBusy}
                 >
                   {t("common.cancel")}
                 </button>
                 <button
-                  className="rounded-xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                  className="chat-button chat-button-primary"
                   onClick={() => void confirmCreateBot()}
                   disabled={botBusy}
                 >
@@ -498,21 +522,21 @@ export default function App() {
               if (e.target === e.currentTarget) setDeleteOpen(false);
             }}
           >
-            <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-4 shadow-xl">
-              <div className="text-lg font-semibold">{t("app.bot.delete.title")}</div>
+            <div className="workspace-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-delete-title">
+              <div id="workspace-delete-title" className="workspace-dialog-title">{t("app.bot.delete.title")}</div>
               <div className="mt-1 text-sm text-zinc-400">
                 {t("app.bot.delete.description", { name: currentBot?.name || botId })}
               </div>
               <div className="mt-5 flex justify-end gap-2">
                 <button
-                  className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                  className="chat-button"
                   onClick={() => setDeleteOpen(false)}
                   disabled={botBusy}
                 >
                   {t("common.cancel")}
                 </button>
                 <button
-                  className="rounded-xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                  className="chat-button chat-button-stop"
                   onClick={() => void confirmDeleteBot()}
                   disabled={botBusy}
                 >

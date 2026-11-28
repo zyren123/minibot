@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Minus, Plus, Scan } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { IconButton } from "../components/IconButton";
 import {
   createMemoryNamespace,
   getBotConfig,
@@ -359,18 +361,24 @@ function GraphCanvas(props: {
           </div>
         </div>
         <div className="memory-graph-controls">
-          <button type="button" className="memory-control-button" onClick={() => setScale((value) => Math.max(0.55, value - 0.12))}>
-            {props.zoomOutLabel}
-          </button>
-          <button type="button" className="memory-control-button" onClick={() => setScale((value) => Math.min(1.9, value + 0.12))}>
-            {props.zoomInLabel}
-          </button>
-          <button type="button" className="memory-control-button" onClick={() => {
-            setScale(1);
-            setOffset({ x: 40, y: 36 });
-          }}>
-            {props.resetLabel}
-          </button>
+          <IconButton
+            icon={Minus}
+            label={props.zoomOutLabel}
+            onClick={() => setScale((value) => Math.max(0.55, value - 0.12))}
+          />
+          <IconButton
+            icon={Plus}
+            label={props.zoomInLabel}
+            onClick={() => setScale((value) => Math.min(1.9, value + 0.12))}
+          />
+          <IconButton
+            icon={Scan}
+            label={props.resetLabel}
+            onClick={() => {
+              setScale(1);
+              setOffset({ x: 40, y: 36 });
+            }}
+          />
         </div>
       </div>
       {layout.nodes.length === 0 ? (
@@ -689,7 +697,6 @@ export default function MemoryView({ botId }: Props) {
     <div className="memory-shell">
       <section className="memory-hero">
         <div>
-          <div className="memory-kicker">{activeNamespace ? `namespace://${activeNamespace}` : "memory://offline"}</div>
           <h1 className="memory-title">{t("memory.header.title")}</h1>
           <p className="memory-subtitle">{graphSubtitle}</p>
         </div>

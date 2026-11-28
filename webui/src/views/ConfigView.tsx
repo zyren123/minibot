@@ -7,13 +7,11 @@ import {
   deleteProviderModels,
   disconnectMcpServer,
   fetchProviderModels,
-  getConfig,
   getBotConfig,
   listDashboard,
   listMcpServers,
   listSkills,
   listSubagentCandidates,
-  updateConfig,
   updateBotConfig,
   updateMcpServer,
   updateModel,
@@ -30,14 +28,10 @@ import type {
   UpdateMCPServerRequest,
 } from "../lib/types";
 import { useI18n } from "../lib/i18n";
+import { SettingsSection, SettingsToggle } from "./SettingsSection";
+import { MemorySourceSettings } from "./MemorySourceSettings";
 import PlatformsView from "./PlatformsView";
 import SkillsView from "./SkillsView";
-import {
-  buildMemoryConfigUpdate,
-  memoryComparable,
-  memoryDraftFromConfig,
-  type MemoryConfigDraft,
-} from "./configMemory";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -84,40 +78,6 @@ type McpDraft = {
   connected: boolean;
 };
 
-function SectionCard(props: { title: string; subtitle?: string; children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-950/90 p-5 shadow-[0_20px_80px_rgba(0,0,0,0.18)]">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <div className="text-sm font-semibold text-zinc-100">{props.title}</div>
-          {props.subtitle ? <div className="mt-1 text-xs text-zinc-500">{props.subtitle}</div> : null}
-        </div>
-        {props.right}
-      </div>
-      {props.children}
-    </div>
-  );
-}
-
-function ToggleButton(props: { enabled: boolean; onClick: () => void; disabled?: boolean; labels?: [string, string] }) {
-  const { t } = useI18n();
-  const labels = props.labels ?? [t("common.off"), t("common.on")];
-  return (
-    <button
-      type="button"
-      className={classNames(
-        "rounded-full px-3 py-1 text-xs font-semibold transition",
-        props.enabled ? "bg-emerald-500/20 text-emerald-300" : "bg-zinc-800 text-zinc-300",
-        props.disabled && "opacity-50",
-      )}
-      onClick={props.onClick}
-      disabled={props.disabled}
-    >
-      {props.enabled ? labels[1] : labels[0]}
-    </button>
-  );
-}
-
 function ListEditor(props: {
   label: string;
   items: string[];
@@ -128,7 +88,7 @@ function ListEditor(props: {
   const { t } = useI18n();
 
   return (
-    <SectionCard title={props.label}>
+    <SettingsSection title={props.label}>
       <div className="flex gap-2">
         <input
           value={draft}
@@ -138,7 +98,7 @@ function ListEditor(props: {
         />
         <button
           type="button"
-          className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+          className="chat-button chat-button-primary"
           onClick={() => {
             const value = draft.trim();
             if (!value) return;
@@ -165,7 +125,7 @@ function ListEditor(props: {
         ))}
         {props.items.length === 0 ? <div className="text-xs text-zinc-500">{t("config.listEditor.empty")}</div> : null}
       </div>
-    </SectionCard>
+    </SettingsSection>
   );
 }
 
@@ -245,22 +205,6 @@ function providerDraftFromRecord(provider: ProviderRecord): ProviderDraft {
   };
 }
 
-function EyeIcon(props: { open: boolean }) {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-      <path
-        d="M2 10c1.9-3 4.7-4.5 8-4.5s6.1 1.5 8 4.5c-1.9 3-4.7 4.5-8 4.5S3.9 13 2 10Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="10" cy="10" r="2.5" stroke="currentColor" strokeWidth="1.5" />
-      {props.open ? null : <path d="M4 16 16 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />}
-    </svg>
-  );
-}
-
 export default function ConfigView(props: {
   botId: string;
   onBotsChanged?: () => void;
@@ -287,10 +231,6 @@ export default function ConfigView(props: {
   const [providerDraft, setProviderDraft] = useState<ProviderDraft | null>(null);
   const [providerBaseline, setProviderBaseline] = useState("");
   const [savingProvider, setSavingProvider] = useState(false);
-  const [memoryDraft, setMemoryDraft] = useState<MemoryConfigDraft | null>(null);
-  const [memoryBaseline, setMemoryBaseline] = useState("");
-  const [savingMemory, setSavingMemory] = useState(false);
-  const [showMemoryDatabaseUrl, setShowMemoryDatabaseUrl] = useState(false);
   const [selectedMcpServerName, setSelectedMcpServerName] = useState<string | null>(null);
   const [mcpDraft, setMcpDraft] = useState<McpDraft | null>(null);
   const [mcpBaseline, setMcpBaseline] = useState("");
@@ -377,7 +317,6 @@ export default function ConfigView(props: {
   const activeModels = dashboard?.available_models ?? [];
   const botDirty = draftComparable(botDraft) !== botBaseline;
   const providerDirty = providerComparable(providerDraft) !== providerBaseline;
-  const memoryDirty = memoryComparable(memoryDraft) !== memoryBaseline;
   const mcpDirty = mcpComparable(mcpDraft) !== mcpBaseline;
   const allVisibleFetchedSelected =
     selectableFilteredFetchedNames.length > 0 &&
@@ -408,14 +347,6 @@ export default function ConfigView(props: {
     setSkills(await listSkills());
   }
 
-  async function refreshGlobalConfig() {
-    const next = await getConfig();
-    const draft = memoryDraftFromConfig(next);
-    setMemoryDraft(draft);
-    setMemoryBaseline(memoryComparable(draft));
-    setShowMemoryDatabaseUrl(false);
-  }
-
   async function refreshMcpServers(preferredName?: string | null) {
     const next = await listMcpServers();
     setMcpServers(next);
@@ -439,7 +370,7 @@ export default function ConfigView(props: {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([refreshDashboard(null), refreshBot(botId), refreshGlobalConfig()])
+    Promise.all([refreshDashboard(null), refreshBot(botId)])
       .catch((err) => setStatus(String(err)))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -508,10 +439,6 @@ export default function ConfigView(props: {
 
   function setProviderField<K extends keyof ProviderDraft>(key: K, value: ProviderDraft[K]) {
     setProviderDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
-  }
-
-  function setMemoryField<K extends keyof MemoryConfigDraft>(key: K, value: MemoryConfigDraft[K]) {
-    setMemoryDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
   }
 
   function setMcpField<K extends keyof McpDraft>(key: K, value: McpDraft[K]) {
@@ -611,21 +538,6 @@ export default function ConfigView(props: {
       setStatus(String(err));
     } finally {
       setSavingProvider(false);
-    }
-  }
-
-  async function onSaveMemoryConfig() {
-    if (!memoryDraft) return;
-    setSavingMemory(true);
-    setStatus(null);
-    try {
-      await updateConfig(buildMemoryConfigUpdate(memoryDraft));
-      await refreshGlobalConfig();
-      setStatus(t("config.status.memorySaved"));
-    } catch (err) {
-      setStatus(String(err));
-    } finally {
-      setSavingMemory(false);
     }
   }
 
@@ -813,162 +725,52 @@ export default function ConfigView(props: {
     }
   }
 
-  const summaryCards = [
+  const summaryCounts = [
     {
       label: t("config.summary.providers"),
       value: dashboard?.providers.length ?? 0,
-      accent: "from-sky-500/25 to-sky-500/5",
     },
-    { label: t("config.summary.models"), value: dashboard?.models.length ?? 0, accent: "from-emerald-500/25 to-emerald-500/5" },
-    { label: t("config.summary.bots"), value: dashboard?.bots.length ?? 0, accent: "from-amber-500/25 to-amber-500/5" },
     {
       label: t("config.summary.platforms"),
       value: dashboard?.platforms.length ?? 0,
-      accent: "from-violet-500/25 to-violet-500/5",
     },
     {
       label: t("config.summary.skills"),
       value: skills.filter((item) => item.is_active).length,
-      accent: "from-rose-500/25 to-rose-500/5",
     },
     {
       label: t("config.summary.mcp"),
       value: mcpServers.filter((item) => item.enabled_default).length,
-      accent: "from-cyan-500/25 to-cyan-500/5",
     },
   ];
 
   return (
-    <div className="app-dashboard-shell h-full overflow-auto px-5 py-6">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <div className="grid gap-4 md:grid-cols-6">
-          {summaryCards.map((item) => (
-            <div
-              key={item.label}
-              className={classNames(
-                "rounded-3xl border border-zinc-800 bg-gradient-to-br p-4",
-                item.accent,
-              )}
-            >
-              <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{item.label}</div>
-              <div className="mt-3 text-3xl font-semibold text-zinc-100">{item.value}</div>
-            </div>
+    <div className="settings-workspace h-full overflow-auto">
+      <div className="mx-auto flex max-w-7xl flex-col">
+        <header className="settings-workspace-header">
+          <h1>{t("config.header.title")}</h1>
+          <p>{t("config.header.subtitle")}</p>
+          <dl className="settings-summary">
+            {summaryCounts.map((item) => (
+              <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>
+            ))}
+          </dl>
+        </header>
+        <nav className="settings-tabs" aria-label={t("config.header.title")}>
+          {(["bots", "providers", "platforms", "skills", "mcp"] as const).map((item) => (
+            <button key={item} type="button" aria-pressed={tab === item} onClick={() => setTab(item)}>
+              {t(`config.tab.${item}`)}
+            </button>
           ))}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-2xl font-semibold tracking-tight text-zinc-100">{t("config.header.title")}</div>
-            <div className="mt-1 text-sm text-zinc-400">{t("config.header.subtitle")}</div>
-          </div>
-          <div className="flex items-center gap-2">
-            {status ? <div className="text-xs text-zinc-400">{status}</div> : null}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/90 p-1">
-              {(["bots", "providers", "platforms", "skills", "mcp"] as DashboardTab[]).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => setTab(item)}
-                  className={classNames(
-                    "rounded-xl px-3 py-2 text-sm font-medium capitalize transition",
-                    tab === item ? "bg-zinc-100 text-zinc-900" : "text-zinc-300 hover:bg-zinc-900",
-                  )}
-                >
-                  {item === "bots"
-                    ? t("config.tab.bots")
-                    : item === "providers"
-                      ? t("config.tab.providers")
-                      : item === "platforms"
-                        ? t("config.tab.platforms")
-                      : item === "skills"
-                        ? t("config.tab.skills")
-                        : t("config.tab.mcp")}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+        </nav>
+        {status ? <p className="settings-status" role="status">{status}</p> : null}
 
         {loading ? <div className="text-sm text-zinc-500">{t("config.loading")}</div> : null}
 
         {tab === "bots" ? (
           <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
             <div className="flex flex-col gap-4">
-              <SectionCard
-                title={t("config.section.memory.title")}
-                subtitle={t("config.section.memory.subtitle")}
-                right={
-                  <button
-                    type="button"
-                    className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
-                    onClick={() => void onSaveMemoryConfig()}
-                    disabled={!memoryDraft || savingMemory || !memoryDirty}
-                  >
-                    {savingMemory ? t("config.memory.saving") : t("common.save")}
-                  </button>
-                }
-              >
-                {memoryDraft ? (
-                  <div className="grid gap-4">
-                    <div className="grid gap-2">
-                      <label className="text-sm font-semibold text-zinc-200">{t("config.memory.backend")}</label>
-                      <select
-                        value={memoryDraft.backend}
-                        onChange={(e) => setMemoryField("backend", e.target.value as MemoryConfigDraft["backend"])}
-                        className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                      >
-                        <option value="sqlite">{t("config.memory.backend.sqlite")}</option>
-                        <option value="postgres">{t("config.memory.backend.postgres")}</option>
-                      </select>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <label className="text-sm font-semibold text-zinc-200">{t("config.memory.databaseUrl")}</label>
-                      <div className="flex gap-2">
-                        <input
-                          value={showMemoryDatabaseUrl ? memoryDraft.databaseUrlValue : ""}
-                          onChange={(e) => {
-                            const value = e.target.value;
-                            setMemoryDraft((prev) =>
-                              prev
-                                ? {
-                                    ...prev,
-                                    databaseUrlValue: value,
-                                    databaseUrlConfigured: Boolean(value.trim()),
-                                  }
-                                : prev,
-                            );
-                          }}
-                          readOnly={!showMemoryDatabaseUrl}
-                          disabled={memoryDraft.backend !== "postgres"}
-                          placeholder={
-                            memoryDraft.databaseUrlConfigured
-                              ? t("config.memory.urlConfigured")
-                              : t("config.memory.urlNotConfigured")
-                          }
-                          className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-zinc-600"
-                        />
-                        <button
-                          type="button"
-                          className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-zinc-300 hover:bg-zinc-800"
-                          onClick={() => setShowMemoryDatabaseUrl((prev) => !prev)}
-                          title={showMemoryDatabaseUrl ? t("config.memory.hideUrl") : t("config.memory.showUrl")}
-                          aria-label={showMemoryDatabaseUrl ? t("config.memory.hideUrl") : t("config.memory.showUrl")}
-                        >
-                          <EyeIcon open={showMemoryDatabaseUrl} />
-                        </button>
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        {memoryDraft.backend === "postgres"
-                          ? t("config.memory.databaseUrl.helpPostgres")
-                          : t("config.memory.databaseUrl.helpSqlite")}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-              </SectionCard>
-
-              <SectionCard
+              <SettingsSection
                 title={t("config.section.allBots.title")}
                 subtitle={t("config.section.allBots.subtitle")}
               >
@@ -977,10 +779,10 @@ export default function ConfigView(props: {
                     <div
                       key={bot.bot_id}
                       className={classNames(
-                        "rounded-3xl border px-4 py-3 transition",
+                        "settings-list-row",
                         bot.bot_id === botId
-                          ? "border-zinc-600 bg-zinc-900"
-                          : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                          ? "settings-list-row-selected"
+                          : "settings-list-row-hoverable",
                       )}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -996,7 +798,7 @@ export default function ConfigView(props: {
                             {bot.subagent_exposable ? <span>{t("config.bot.tag.subagentReady")}</span> : null}
                           </div>
                         </button>
-                        <ToggleButton
+                        <SettingsToggle
                           enabled={bot.enabled}
                           onClick={() => void onToggleBotEnabled(bot.bot_id, !bot.enabled)}
                         />
@@ -1009,17 +811,17 @@ export default function ConfigView(props: {
                     </div>
                   ))}
                 </div>
-              </SectionCard>
+              </SettingsSection>
             </div>
 
             <div className="flex min-w-0 flex-col gap-4">
-              <SectionCard
+              <SettingsSection
                 title={t("config.section.botDetail.title", { name: currentBotMeta?.name ?? "" })}
                 subtitle={t("config.section.botDetail.subtitle")}
                 right={
                   <button
                     type="button"
-                    className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                    className="chat-button chat-button-primary"
                     onClick={() => void onSaveBot()}
                     disabled={!botDraft || savingBot || !botDirty}
                   >
@@ -1038,12 +840,12 @@ export default function ConfigView(props: {
                         className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
                       />
                     </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                    <div className="settings-control-row">
                       <div>
                         <div className="text-sm font-semibold text-zinc-200">{t("config.bot.enabled")}</div>
                         <div className="text-xs text-zinc-500">{t("config.bot.enabled.subtitle")}</div>
                       </div>
-                      <ToggleButton enabled={botDraft.enabled} onClick={() => setBotField("enabled", !botDraft.enabled)} />
+                      <SettingsToggle enabled={botDraft.enabled} onClick={() => setBotField("enabled", !botDraft.enabled)} />
                     </div>
                     <div className="grid gap-2">
                       <label className="text-sm font-semibold text-zinc-200">{t("config.bot.chatModel")}</label>
@@ -1063,43 +865,44 @@ export default function ConfigView(props: {
                         <div className="text-xs text-amber-300">{currentBotMeta?.chat_disabled_reason}</div>
                       ) : null}
                     </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                    <div className="settings-control-row">
                       <div>
                         <div className="text-sm font-semibold text-zinc-200">{t("config.bot.streaming")}</div>
                         <div className="text-xs text-zinc-500">{t("config.bot.streaming.subtitle")}</div>
                       </div>
-                      <ToggleButton
+                      <SettingsToggle
                         enabled={botDraft.streamEnabled}
                         onClick={() => setBotField("streamEnabled", !botDraft.streamEnabled)}
                       />
                     </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                    <div className="settings-control-row">
                       <div>
                         <div className="text-sm font-semibold text-zinc-200">{t("config.bot.teamTools")}</div>
                         <div className="text-xs text-zinc-500">{t("config.bot.teamTools.subtitle")}</div>
                       </div>
-                      <ToggleButton
+                      <SettingsToggle
                         enabled={botDraft.teamsEnabled}
                         onClick={() => setBotField("teamsEnabled", !botDraft.teamsEnabled)}
                       />
                     </div>
                   </div>
                 ) : null}
-              </SectionCard>
+                {botId && <MemorySourceSettings key={botId} botId={botId} />}
+              </SettingsSection>
 
               {botDraft ? (
                 <>
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.section.subagentIdentity.title")}
                     subtitle={t("config.section.subagentIdentity.subtitle")}
                   >
                     <div className="grid gap-4 md:grid-cols-2">
-                      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                      <div className="settings-control-row">
                         <div>
                           <div className="text-sm font-semibold text-zinc-200">{t("config.bot.allowSubagent")}</div>
                           <div className="text-xs text-zinc-500">{t("config.bot.allowSubagent.subtitle")}</div>
                         </div>
-                        <ToggleButton
+                        <SettingsToggle
                           enabled={botDraft.subagentExposable}
                           onClick={() => setBotField("subagentExposable", !botDraft.subagentExposable)}
                         />
@@ -1125,9 +928,9 @@ export default function ConfigView(props: {
                         className="min-h-[84px] rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
                       />
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
 
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.section.attachedSubagents.title")}
                     subtitle={t("config.section.attachedSubagents.subtitle")}
                   >
@@ -1208,19 +1011,19 @@ export default function ConfigView(props: {
                         </div>
                       </div>
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
 
-                  <SectionCard title={t("config.section.soul.title")} subtitle={t("config.section.soul.subtitle")}>
+                  <SettingsSection title={t("config.section.soul.title")} subtitle={t("config.section.soul.subtitle")}>
                     <textarea
                       value={botDraft.soul}
                       onChange={(e) => setBotField("soul", e.target.value)}
                       placeholder={t("config.section.soul.placeholder")}
                       className="min-h-[160px] w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
                     />
-                  </SectionCard>
+                  </SettingsSection>
 
                   <div className="grid gap-4 xl:grid-cols-2">
-                    <SectionCard
+                    <SettingsSection
                       title={t("config.section.skills.title")}
                       subtitle={t("config.section.skills.subtitle")}
                       right={
@@ -1253,15 +1056,15 @@ export default function ConfigView(props: {
                                 <div className="truncate font-mono text-xs text-zinc-200">{item.name}</div>
                                 <div className="mt-1 text-xs text-zinc-400">{item.description}</div>
                               </div>
-                              <ToggleButton enabled={enabled} onClick={() => toggleSkill(item.name)} />
+                              <SettingsToggle enabled={enabled} onClick={() => toggleSkill(item.name)} />
                             </div>
                           );
                         })}
                         {filteredSkills.length === 0 ? <div className="text-xs text-zinc-500">{t("config.skills.empty")}</div> : null}
                       </div>
-                    </SectionCard>
+                    </SettingsSection>
 
-                    <SectionCard
+                    <SettingsSection
                       title={t("config.section.botMcp.title")}
                       subtitle={t("config.section.botMcp.subtitle", {
                         count: Object.keys(botDraft.mcpOverrides).length,
@@ -1280,7 +1083,7 @@ export default function ConfigView(props: {
                         {mcpServers.map((server) => (
                           <div
                             key={server.name}
-                            className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2"
+                            className="settings-control-row"
                           >
                             <div className="min-w-0">
                               <div className="flex items-center gap-2">
@@ -1306,7 +1109,7 @@ export default function ConfigView(props: {
                           </div>
                         ))}
                       </div>
-                    </SectionCard>
+                    </SettingsSection>
                   </div>
 
                   <ListEditor
@@ -1316,7 +1119,7 @@ export default function ConfigView(props: {
                     placeholder="/path/to/tools.py"
                   />
 
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.section.advanced.title")}
                     subtitle={t("config.section.advanced.subtitle")}
                   >
@@ -1352,7 +1155,7 @@ export default function ConfigView(props: {
                         />
                       </div>
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
                 </>
               ) : null}
             </div>
@@ -1360,13 +1163,13 @@ export default function ConfigView(props: {
         ) : tab === "providers" ? (
           <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
             <div className="flex flex-col gap-4">
-              <SectionCard
+              <SettingsSection
                 title={t("config.section.providers.title")}
                 subtitle={t("config.section.providers.subtitle")}
                 right={
                   <button
                     type="button"
-                    className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white"
+                    className="chat-button chat-button-primary"
                     onClick={() => setProviderModalOpen(true)}
                   >
                     {t("config.provider.add")}
@@ -1381,8 +1184,8 @@ export default function ConfigView(props: {
                       className={classNames(
                         "w-full rounded-3xl border px-4 py-3 text-left transition",
                         provider.provider_id === selectedProviderId
-                          ? "border-zinc-600 bg-zinc-900"
-                          : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                          ? "settings-list-row-selected"
+                          : "settings-list-row-hoverable",
                       )}
                       onClick={() => setSelectedProviderId(provider.provider_id)}
                     >
@@ -1391,7 +1194,7 @@ export default function ConfigView(props: {
                           <div className="truncate text-sm font-semibold text-zinc-100">{provider.name}</div>
                           <div className="mt-1 truncate text-xs text-zinc-500">{provider.base_url}</div>
                         </div>
-                        <ToggleButton enabled={provider.enabled} onClick={() => void 0} disabled />
+                        <SettingsToggle enabled={provider.enabled} onClick={() => void 0} disabled />
                       </div>
                       <div className="mt-3 flex items-center gap-2 text-[11px] text-zinc-500">
                         <span>{provider.kind}</span>
@@ -1406,19 +1209,19 @@ export default function ConfigView(props: {
                     </div>
                   ) : null}
                 </div>
-              </SectionCard>
+              </SettingsSection>
             </div>
 
             <div className="flex min-w-0 flex-col gap-4">
               {selectedProvider && providerDraft ? (
                 <>
-                  <SectionCard
+                  <SettingsSection
                     title={selectedProvider.name}
                     subtitle={t("config.section.providerDetail.subtitle")}
                     right={
                       <button
                         type="button"
-                        className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                        className="chat-button chat-button-primary"
                         onClick={() => void onSaveProvider()}
                         disabled={!providerDirty || savingProvider}
                       >
@@ -1435,12 +1238,12 @@ export default function ConfigView(props: {
                           className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
                         />
                       </div>
-                      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                      <div className="settings-control-row">
                         <div>
                           <div className="text-sm font-semibold text-zinc-200">{t("config.provider.enabled")}</div>
                           <div className="text-xs text-zinc-500">{t("config.provider.enabled.subtitle")}</div>
                         </div>
-                        <ToggleButton
+                        <SettingsToggle
                           enabled={providerDraft.enabled}
                           onClick={() => setProviderField("enabled", !providerDraft.enabled)}
                         />
@@ -1467,9 +1270,9 @@ export default function ConfigView(props: {
                         />
                       </div>
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
 
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.section.models.title")}
                     subtitle={t("config.section.models.subtitle")}
                     right={
@@ -1482,7 +1285,7 @@ export default function ConfigView(props: {
                         />
                         <button
                           type="button"
-                          className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                          className="chat-button chat-button-primary"
                           onClick={() => void onImportModels([manualModelName.trim()], "manual")}
                           disabled={!manualModelName.trim()}
                         >
@@ -1501,7 +1304,7 @@ export default function ConfigView(props: {
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
-                          className="rounded-2xl bg-zinc-900 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                          className="chat-button"
                           onClick={toggleAllProviderModels}
                           disabled={providerModels.length === 0}
                         >
@@ -1521,7 +1324,7 @@ export default function ConfigView(props: {
                       {providerModels.map((item) => (
                         <div
                           key={item.model_id}
-                          className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2"
+                          className="settings-control-row"
                         >
                           <div className="flex min-w-0 items-center gap-3">
                             <input
@@ -1536,7 +1339,7 @@ export default function ConfigView(props: {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <ToggleButton
+                            <SettingsToggle
                               enabled={item.enabled}
                               onClick={() => void onToggleModel(item.model_id, !item.enabled)}
                             />
@@ -1552,15 +1355,15 @@ export default function ConfigView(props: {
                       ))}
                       {providerModels.length === 0 ? <div className="text-sm text-zinc-500">{t("config.models.empty")}</div> : null}
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
 
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.section.fetch.title")}
                     subtitle={t("config.section.fetch.subtitle")}
                     right={
                       <button
                         type="button"
-                        className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                        className="chat-button chat-button-primary"
                         onClick={() => void onFetchModels()}
                         disabled={fetchingModels}
                       >
@@ -1595,7 +1398,7 @@ export default function ConfigView(props: {
                           </button>
                           <button
                             type="button"
-                            className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                            className="chat-button chat-button-primary"
                             onClick={() => void onImportModels(selectedFetchedModels, "fetched")}
                             disabled={selectedFetchedModels.length === 0}
                           >
@@ -1649,15 +1452,15 @@ export default function ConfigView(props: {
                     ) : (
                       <div className="text-sm text-zinc-500">{t("config.fetch.empty")}</div>
                     )}
-                  </SectionCard>
+                  </SettingsSection>
                 </>
               ) : (
-                <SectionCard
+                <SettingsSection
                   title={t("config.providerDetail.title")}
                   subtitle={t("config.providerDetail.emptySubtitle")}
                 >
                   <div className="text-sm text-zinc-500">{t("config.providerDetail.empty")}</div>
-                </SectionCard>
+                </SettingsSection>
               )}
             </div>
           </div>
@@ -1677,7 +1480,7 @@ export default function ConfigView(props: {
         ) : (
           <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
             <div className="flex flex-col gap-4">
-              <SectionCard
+              <SettingsSection
                 title={t("config.section.mcpRegistry.title")}
                 subtitle={t("config.section.mcpRegistry.subtitle")}
               >
@@ -1689,8 +1492,8 @@ export default function ConfigView(props: {
                       className={classNames(
                         "w-full rounded-3xl border px-4 py-3 text-left transition",
                         server.name === selectedMcpServerName
-                          ? "border-zinc-600 bg-zinc-900"
-                          : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                          ? "settings-list-row-selected"
+                          : "settings-list-row-hoverable",
                       )}
                       onClick={() => setSelectedMcpServerName(server.name)}
                     >
@@ -1731,13 +1534,13 @@ export default function ConfigView(props: {
                     </div>
                   ) : null}
                 </div>
-              </SectionCard>
+              </SettingsSection>
             </div>
 
             <div className="flex min-w-0 flex-col gap-4">
               {selectedMcpServer && mcpDraft ? (
                 <>
-                  <SectionCard
+                  <SettingsSection
                     title={selectedMcpServer.name}
                     subtitle={t("config.section.mcpDetail.subtitle")}
                     right={
@@ -1761,7 +1564,7 @@ export default function ConfigView(props: {
                         </button>
                         <button
                           type="button"
-                          className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                          className="chat-button chat-button-primary"
                           onClick={() => void onSaveMcpServer()}
                           disabled={!mcpDirty || savingMcp}
                         >
@@ -1777,12 +1580,12 @@ export default function ConfigView(props: {
                           {mcpDraft.connected ? t("config.mcp.connected") : t("config.mcp.disconnected")}
                         </div>
                       </div>
-                      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                      <div className="settings-control-row">
                         <div>
                           <div className="text-sm font-semibold text-zinc-200">{t("config.mcp.defaultEnabled")}</div>
                           <div className="text-xs text-zinc-500">{t("config.mcp.defaultEnabled.subtitle")}</div>
                         </div>
-                        <ToggleButton
+                        <SettingsToggle
                           enabled={mcpDraft.enabled_default}
                           onClick={() => setMcpField("enabled_default", !mcpDraft.enabled_default)}
                         />
@@ -1820,9 +1623,9 @@ export default function ConfigView(props: {
                         </div>
                       )}
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
 
-                  <SectionCard
+                  <SettingsSection
                     title={t("config.mcp.envKeys")}
                     subtitle={t("config.mcp.envKeys.subtitle")}
                   >
@@ -1840,15 +1643,15 @@ export default function ConfigView(props: {
                     ) : (
                       <div className="text-sm text-zinc-500">{t("config.mcp.envKeys.empty")}</div>
                     )}
-                  </SectionCard>
+                  </SettingsSection>
                 </>
               ) : (
-                <SectionCard
+                <SettingsSection
                   title={t("config.section.mcpDetail.title")}
                   subtitle={t("config.section.mcpDetail.emptySubtitle")}
                 >
                   <div className="text-sm text-zinc-500">{t("config.section.mcpDetail.empty")}</div>
-                </SectionCard>
+                </SettingsSection>
               )}
             </div>
           </div>
@@ -1973,7 +1776,7 @@ export default function ConfigView(props: {
               </button>
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                className="chat-button chat-button-primary"
                 onClick={() => void onCreateProvider()}
                 disabled={creatingProvider || !providerNameDraft.trim() || !providerBaseUrlDraft.trim()}
               >

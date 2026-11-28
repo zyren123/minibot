@@ -7,6 +7,8 @@ export type ToolStatus =
   | "invalid_arguments";
 
 export type StreamEventType =
+  | "model_generation_start"
+  | "model_generation_end"
   | "assistant_start"
   | "assistant_reasoning_delta"
   | "assistant_delta"
@@ -255,6 +257,52 @@ export type SkillDeleteResult = {
   scope: string;
   folder_name: string;
 };
+
+export type MemoryWorkspaceProvider = "file" | "novelmemo";
+export type MemoryWorkspaceConnection = "vault" | "mcp";
+
+export type MemoryWorkspaceConfig = {
+  provider: MemoryWorkspaceProvider;
+  vault_path: string | null;
+  connection?: MemoryWorkspaceConnection;
+  mcp_url?: string | null;
+};
+
+export type UpdateMemoryWorkspaceConfig = Pick<MemoryWorkspaceConfig, "provider">
+  & Partial<Pick<MemoryWorkspaceConfig, "connection" | "vault_path" | "mcp_url">>;
+
+export type MemoryWorkspaceCrumb = {
+  id: string;
+  title: string;
+};
+
+export type MemoryWorkspaceEntry = MemoryWorkspaceCrumb & {
+  kind: "folder" | "document";
+  parent_id: string;
+  document_id: string | null;
+};
+
+export type MemoryWorkspaceDirectory = {
+  breadcrumbs: MemoryWorkspaceCrumb[];
+  entries: MemoryWorkspaceEntry[];
+};
+
+export type MemoryWorkspaceDocument = {
+  id: string;
+  title: string;
+  filename: string;
+  content: string;
+  revision: string;
+  triggers: string[];
+  disclosure: string | null;
+};
+
+export type UpdateMemoryWorkspaceDocument = {
+  provider: MemoryWorkspaceProvider;
+  path: string;
+} & Pick<MemoryWorkspaceDocument, "content" | "revision">
+  & Partial<Pick<MemoryWorkspaceDocument, "triggers">>
+  & { disclosure?: string };
 
 export type MemoryNamespace = {
   id: string;

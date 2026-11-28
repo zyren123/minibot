@@ -13,6 +13,8 @@ from .tools.result import ToolStatus
 
 
 EventType = Literal[
+    "model_generation_start",
+    "model_generation_end",
     "assistant_start",
     "assistant_reasoning_delta",
     "assistant_delta",

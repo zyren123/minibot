@@ -1,0 +1,41 @@
+.icon-button {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 0.375rem;
+  color: var(--text-muted);
+}
+
+.icon-button:hover:not(:disabled),
+.icon-button:focus-visible,
+.icon-button[aria-expanded="true"] {
+  background: var(--workspace-hover);
+  color: var(--text-strong);
+}
+
+.icon-button:focus-visible {
+  outline: 2px solid var(--markdown-link);
+  outline-offset: 2px;
+}
+
+.icon-button:active:not(:disabled) { background: var(--workspace-pressed); }
+.icon-button:disabled { opacity: 0.48; cursor: default; }
+.icon-button-danger:is(:hover, :focus-visible):not(:disabled) { color: var(--danger-text); }
+
+.icon-button-tooltip {
+  z-index: 70;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--workspace-chrome);
+  color: var(--text-strong);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+@media (pointer: coarse) {
+  .icon-button { width: 2.75rem; height: 2.75rem; }
+}

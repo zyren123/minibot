@@ -303,7 +303,7 @@ async def repl(agent: Agent) -> None:
                     continue
                 if cmd == "/memory":
                     cmd_args = user_input.strip()[len("/memory"):].strip()
-                    await handle_memory_cmd(cmd_args, agent.memory_manager)
+                    await handle_memory_cmd(cmd_args, agent.memory_workspace or agent.memory_manager)
                     continue
                 if cmd == "/skills":
                     if agent.restricted_workspace:

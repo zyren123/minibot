@@ -3,6 +3,7 @@
 import json
 import re
 from datetime import datetime, timedelta
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,13 @@ class MemoryManager:
         self.long_term_file = self.memory_dir / "LONG_TERM.md"
         self.daily_dir = self.memory_dir / "daily"
         self.state_dir = self.app_home / "state"
-        self.repository = MemoryRepository.from_config(config, app_home=self.app_home)
         self._migration_notice: str | None = None
         self._ensure_dirs()
         self._migrate_legacy_project_memory_once()
+
+    @cached_property
+    def repository(self) -> MemoryRepository:
+        return MemoryRepository.from_config(self.config, app_home=self.app_home)
 
     def _resolve_memory_dir(self, configured_path: str) -> Path:
         path = Path(configured_path).expanduser()

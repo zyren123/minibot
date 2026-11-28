@@ -5,6 +5,7 @@ import pytest
 
 from src.minibot.agent import Agent, UserInterruptedError
 from src.minibot.config.schema import Config, LLMConfig, TeamsConfig
+from src.minibot.events import AsyncQueueEventSink
 
 
 def _make_agent(tmp_path):
@@ -41,6 +42,8 @@ async def test_run_loop_interrupts_on_esc(tmp_path):
     agent = _make_agent(tmp_path)
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    events = asyncio.Queue()
+    agent.event_sink = AsyncQueueEventSink(events)
 
     class BlockingClient:
         model = "test-model"
@@ -59,12 +62,17 @@ async def test_run_loop_interrupts_on_esc(tmp_path):
 
     loop_task = asyncio.create_task(agent.run_loop(history, interrupt_queue=interrupt_queue))
     await started.wait()
+    generation_start = events.get_nowait()
+    assert generation_start["type"] == "model_generation_start"
+    assert events.empty()
     interrupt_queue.put_nowait(None)
 
     with pytest.raises(UserInterruptedError):
         await loop_task
 
     assert cancelled.is_set()
+    assert events.get_nowait() == {**generation_start, "type": "model_generation_end"}
+    assert events.empty()
 
 
 @pytest.mark.asyncio

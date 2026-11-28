@@ -1,26 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { createSkill, deleteSkill, getConfig } from "../lib/api";
 import type { Config, SkillInfo } from "../lib/types";
 import { useI18n } from "../lib/i18n";
+import { SettingsSection } from "./SettingsSection";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
-}
-
-function SectionCard(props: { title: string; subtitle?: string; children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-950/90 p-5 shadow-[0_20px_80px_rgba(0,0,0,0.18)]">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <div className="text-sm font-semibold text-zinc-100">{props.title}</div>
-          {props.subtitle ? <div className="mt-1 text-xs text-zinc-500">{props.subtitle}</div> : null}
-        </div>
-        {props.right}
-      </div>
-      {props.children}
-    </div>
-  );
 }
 
 type SkillFilter = "all" | "active" | "overridden";
@@ -150,13 +136,13 @@ export default function SkillsView(props: {
     <>
       <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-4">
-          <SectionCard
+          <SettingsSection
             title={t("config.section.skillsManager.title")}
             subtitle={t("config.section.skillsManager.subtitle")}
             right={
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white"
+                className="chat-button chat-button-primary"
                 onClick={() => setCreateOpen(true)}
               >
                 {t("config.skills.create.button")}
@@ -176,10 +162,8 @@ export default function SkillsView(props: {
                     key={item}
                     type="button"
                     onClick={() => setFilter(item)}
-                    className={classNames(
-                      "rounded-full px-3 py-1.5 text-xs font-semibold transition",
-                      filter === item ? "bg-zinc-100 text-zinc-900" : "bg-zinc-900 text-zinc-300 hover:bg-zinc-800",
-                    )}
+                    aria-pressed={filter === item}
+                    className="chat-button chat-button-quiet skills-filter"
                   >
                     {t(`config.skills.filter.${item}`)}
                   </button>
@@ -194,10 +178,10 @@ export default function SkillsView(props: {
                   type="button"
                   onClick={() => setSelectedPath(item.resolved_path)}
                   className={classNames(
-                    "w-full rounded-3xl border px-4 py-3 text-left transition",
+                    "w-full settings-list-row text-left",
                     selectedSkill?.resolved_path === item.resolved_path
-                      ? "border-zinc-600 bg-zinc-900"
-                      : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                      ? "settings-list-row-selected"
+                      : "settings-list-row-hoverable",
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -227,30 +211,27 @@ export default function SkillsView(props: {
                 </button>
               ))}
               {filteredSkills.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">
+                <div className="text-sm text-zinc-500 py-2">
                   {t("config.skills.manager.empty")}
                 </div>
               ) : null}
             </div>
-          </SectionCard>
+          </SettingsSection>
         </div>
 
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="grid gap-4 md:grid-cols-4">
+          <dl className="settings-summary">
             {[
-              { label: t("config.summary.skills"), value: summary.total, tone: "from-slate-500/20 to-slate-500/5" },
-              { label: t("config.skills.filter.active"), value: summary.active, tone: "from-emerald-500/20 to-emerald-500/5" },
-              { label: t("config.skills.filter.overridden"), value: summary.overridden, tone: "from-amber-500/20 to-amber-500/5" },
-              { label: t("config.skills.scope.user"), value: summary.user, tone: "from-sky-500/20 to-sky-500/5" },
+              { label: t("config.summary.skills"), value: summary.total },
+              { label: t("config.skills.filter.active"), value: summary.active },
+              { label: t("config.skills.filter.overridden"), value: summary.overridden },
+              { label: t("config.skills.scope.user"), value: summary.user },
             ].map((item) => (
-              <div key={item.label} className={classNames("rounded-3xl border border-zinc-800 bg-gradient-to-br p-4", item.tone)}>
-                <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{item.label}</div>
-                <div className="mt-3 text-3xl font-semibold text-zinc-100">{item.value}</div>
-              </div>
+              <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>
             ))}
-          </div>
+          </dl>
 
-          <SectionCard
+          <SettingsSection
             title={selectedSkill?.name ?? t("config.skills.detail.emptyTitle")}
             subtitle={
               selectedSkill
@@ -292,7 +273,7 @@ export default function SkillsView(props: {
             {selectedSkill ? (
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
                 <div className="grid gap-4">
-                  <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-4">
+                  <div className="settings-section">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={classNames("rounded-full border px-2.5 py-1 text-xs font-semibold", scopeTone(selectedSkill.source_type))}>
                         {t(`config.skills.scope.${selectedSkill.source_type}`)}
@@ -327,7 +308,7 @@ export default function SkillsView(props: {
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-4">
+                  <div className="settings-section">
                     <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">
                       {t("config.skills.delete.policyTitle")}
                     </div>
@@ -346,7 +327,7 @@ export default function SkillsView(props: {
                 </div>
 
                 <div className="grid gap-4">
-                  <SectionCard title={t("config.skills.destinations.title")} subtitle={t("config.skills.destinations.subtitle")}>
+                  <SettingsSection title={t("config.skills.destinations.title")} subtitle={t("config.skills.destinations.subtitle")}>
                     <div className="space-y-3 text-sm text-zinc-400">
                       <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-3">
                         <div className="text-xs uppercase tracking-[0.22em] text-zinc-500">{t("config.skills.scope.user")}</div>
@@ -362,7 +343,7 @@ export default function SkillsView(props: {
                         })}
                       </div>
                     </div>
-                  </SectionCard>
+                  </SettingsSection>
                 </div>
               </div>
             ) : (
@@ -370,7 +351,7 @@ export default function SkillsView(props: {
                 {t("config.skills.detail.empty")}
               </div>
             )}
-          </SectionCard>
+          </SettingsSection>
         </div>
       </div>
 
@@ -420,7 +401,7 @@ export default function SkillsView(props: {
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                className="chat-button"
                 onClick={() => setCreateOpen(false)}
                 disabled={creatingSkill}
               >
@@ -428,7 +409,7 @@ export default function SkillsView(props: {
               </button>
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                className="chat-button chat-button-primary"
                 onClick={() => void handleCreateSkill()}
                 disabled={creatingSkill || !createName.trim()}
               >
@@ -461,7 +442,7 @@ export default function SkillsView(props: {
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                className="chat-button"
                 onClick={() => setDeleteOpen(false)}
                 disabled={deletingSkill}
               >

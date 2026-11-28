@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
-from contextlib import nullcontext
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager, nullcontext
 from contextlib import suppress
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ from .traces import RunTrace, RunStatus
 from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
 from .core.model_attempt import model_attempt
-from .core.model_context import ContextWindowExceeded
+from .core.model_context import ContextWindowExceeded, estimate_payload_tokens, estimate_text_tokens
 from .core.run_store import DurableRunError, DurableRunPaused, RunJournal, RunStore, StepState
 from .core.workspace import WorkspaceIdentity
 from .core.runtime_budget import RuntimeBudget, RuntimeBudgetExceeded, current_budget
@@ -54,6 +55,9 @@ from .tools.builtin import (
     UpdateMemoryTool,
 )
 from .memory.manager import MemoryManager
+from .memory.remote_novelmemo import RemoteNovelMemoWorkspace
+from .memory.workspace import FileMemoryWorkspace, NovelMemoWorkspace, open_memory_workspace
+from .tools.builtin.workspace_memory import file_memory_tools, novelmemo_tools
 from .tools.meta import (
     TaskTool,
     SkillTool,
@@ -218,18 +222,24 @@ class Agent:
 
         hooks = HooksConfig(enabled=False) if self.restricted_workspace else self.config.hooks
         mcp = MCPConfig(enabled=False) if self.restricted_workspace else self.config.mcp
+        memory_config = self.config.memory
+        memory_enabled = memory_config.enabled and not self.restricted_workspace
+        if memory_enabled and memory_config.provider in ("file", "novelmemo"):
+            mcp = replace(mcp, servers=[server for server in mcp.servers if server.name != "novelmemo"])
         self.hook_manager = HookManager(hooks, self.workdir)
         self.mcp_manager = MCPManager(mcp, self.workdir)
 
-        self.memory_manager = (
-            MemoryManager(
-                self.config.memory,
-                self.config.app_home,
-                self.config.project_root,
-            )
-            if self.config.memory.enabled and not self.restricted_workspace
-            else None
-        )
+        self.memory_manager: MemoryManager | None = None
+        self.memory_workspace: FileMemoryWorkspace | NovelMemoWorkspace | RemoteNovelMemoWorkspace | None = None
+        if memory_enabled:
+            if memory_config.provider == "structured":
+                self.memory_manager = MemoryManager(memory_config, self.config.app_home, self.config.project_root)
+            else:
+                self.memory_workspace = open_memory_workspace(
+                    memory_config, self.config.app_home, self.config.project_root,
+                )
+                if isinstance(self.memory_workspace, FileMemoryWorkspace):
+                    self.memory_manager = self.memory_workspace.manager
         if self.memory_manager is not None:
             notice = self.memory_manager.migration_notice()
             if notice:
@@ -287,6 +297,28 @@ class Agent:
         except Exception:
             # Event emission must not break the agent runtime.
             return
+
+    @asynccontextmanager
+    async def _model_generation(
+        self, assistant_message_id: str | None, parent_user_message_id: str | None,
+    ) -> AsyncIterator[None]:
+        if assistant_message_id is None or self.event_sink is None:
+            yield
+            return
+
+        try:
+            await self._emit({
+                "type": "model_generation_start",
+                "message_id": assistant_message_id,
+                "parent_user_message_id": parent_user_message_id,
+            }, record_trace=False)
+            yield
+        finally:
+            await self._emit({
+                "type": "model_generation_end",
+                "message_id": assistant_message_id,
+                "parent_user_message_id": parent_user_message_id,
+            }, record_trace=False)
 
     async def _emit_todo_snapshot(self) -> None:
         """Publish the current TodoWrite state for structured UI consumers."""
@@ -410,7 +442,13 @@ class Agent:
                 self.tool_registry.register(TaskBatchTool(self.agent_registry))
                 self.tool_registry.register(ReadChildArtifactTool(self.config.llm.max_tool_output_chars))
 
-        if self.memory_manager is not None:
+        if isinstance(self.memory_workspace, FileMemoryWorkspace):
+            for tool in file_memory_tools(self.memory_workspace):
+                self.tool_registry.register(tool)
+        elif isinstance(self.memory_workspace, (NovelMemoWorkspace, RemoteNovelMemoWorkspace)):
+            for tool in novelmemo_tools(self.memory_workspace):
+                self.tool_registry.register(tool)
+        elif self.memory_manager is not None:
             self.tool_registry.register(CreateMemoryTool(self.memory_manager))
             self.tool_registry.register(ReadMemoryTool(self.memory_manager))
             self.tool_registry.register(UpdateMemoryTool(self.memory_manager))
@@ -514,6 +552,20 @@ Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when exter
 
     def _build_memory_prompt_section(self) -> str:
         """Describe memory tool usage for the prompt."""
+        if isinstance(self.memory_workspace, FileMemoryWorkspace):
+            return """## Memory Operating Protocol
+- Use the long-term note for durable user preferences, project knowledge, and decisions.
+- Use today's daily note for progress, handoffs, and current work.
+- Use `memory_read` to recall relevant details. Use `memory_list_daily` to find earlier notes.
+- Use `memory_write` to record important changes. Prefer append or replace for targeted updates.
+- Treat memory notes as context for prior work."""
+        if isinstance(self.memory_workspace, (NovelMemoWorkspace, RemoteNovelMemoWorkspace)):
+            return """## Memory Operating Protocol
+- Start a new memory-aware session by reading `system://boot` through `read_memory`.
+- Use `search_memory` to recall relevant notes. Browse `system://index/<domain>` for one domain or
+  `system://glossary` for trigger terms.
+- Read a note before updating or deleting it. Use `create_memory` to record important facts or decisions.
+- Give new notes a disclosure that describes when to read them. Use `manage_triggers` to help recall."""
         if self.memory_manager is None:
             return ""
         return """## Memory Operating Protocol
@@ -1505,16 +1557,19 @@ You are now live. Await instructions and begin the loop.""",
         reasoning_effort: str | None = None,
         max_tokens: int | None = None,
         trim_history: bool = True,
+        assistant_message_id: str | None = None,
+        parent_user_message_id: str | None = None,
     ) -> Any:
         async with model_attempt(
             budget, self.config.llm, messages, system, tools,
             max_tokens=max_tokens, trim_history=trim_history, reserve_output=True,
         ) as attempt:
-            response = await attempt.dispatch(
-                self._create_message_with_interrupt,
-                interrupt_queue=interrupt_queue,
-                reasoning_effort=reasoning_effort,
-            )
+            async with self._model_generation(assistant_message_id, parent_user_message_id):
+                response = await attempt.dispatch(
+                    self._create_message_with_interrupt,
+                    interrupt_queue=interrupt_queue,
+                    reasoning_effort=reasoning_effort,
+                )
             choice = self._first_choice(response)
             payload = self._field(choice, "message") or response
             attempt.settle(self._field(response, "usage"), (
@@ -1820,11 +1875,24 @@ You are now live. Await instructions and begin the loop.""",
                 journal.save_messages(messages)
 
         artifact_run = current_artifacts.get()
+        memory_notes = ""
+        if isinstance(self.memory_workspace, FileMemoryWorkspace):
+            with suppress(OSError, ValueError):
+                async with budget.time_limit():
+                    notes = await asyncio.to_thread(self.memory_workspace.get_context_for_prompt)
+                if notes:
+                    memory_notes = f"\n\n## File Memory Notes\n{notes}"
+        memory_note_tokens = estimate_text_tokens(memory_notes)
         while True:
             if journal is not None:
                 journal.check_pause()
             tools = self.tool_registry.get_definitions()
             system = self.system_prompt + (artifact_run.context() if artifact_run is not None else "")
+            if memory_note_tokens:
+                estimated_input = estimate_payload_tokens((system, messages, tools))
+                available_tokens = self.config.llm.max_context_tokens - self.config.llm.max_tokens - estimated_input
+                if memory_note_tokens <= available_tokens:
+                    system += memory_notes
             content = ""
             reasoning = ""
             finish_reason = "stop"
@@ -1842,14 +1910,15 @@ You are now live. Await instructions and begin the loop.""",
             if self._streaming_active():
                 try:
                     async with model_attempt(budget, self.config.llm, messages, system, tools) as attempt:
-                        stream_result = await attempt.dispatch(
-                            self._create_message_stream_with_interrupt,
-                            settle_partial=attempt.settle,
-                            assistant_message_id=assistant_message_id,
-                            parent_user_message_id=parent_user_message_id,
-                            interrupt_queue=interrupt_queue,
-                            reasoning_effort=reasoning_effort,
-                        )
+                        async with self._model_generation(assistant_message_id, parent_user_message_id):
+                            stream_result = await attempt.dispatch(
+                                self._create_message_stream_with_interrupt,
+                                settle_partial=attempt.settle,
+                                assistant_message_id=assistant_message_id,
+                                parent_user_message_id=parent_user_message_id,
+                                interrupt_queue=interrupt_queue,
+                                reasoning_effort=reasoning_effort,
+                            )
                         attempt.settle(stream_result["usage"], (
                             stream_result["content"], stream_result["reasoning"], stream_result["tool_calls"],
                         ))
@@ -1885,6 +1954,8 @@ You are now live. Await instructions and begin the loop.""",
                         budget, messages, system, tools,
                         interrupt_queue=interrupt_queue,
                         reasoning_effort=reasoning_effort,
+                        assistant_message_id=assistant_message_id,
+                        parent_user_message_id=parent_user_message_id,
                     )
 
                 choice = self._first_choice(response)

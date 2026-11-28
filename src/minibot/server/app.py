@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .manager import AgentManager
+from ..config.schema import WorkspaceMemoryProvider
+from ..memory.remote_novelmemo import RemoteNovelMemoUnavailable
+from ..memory.workspace import MemoryRevisionConflict, call_memory_operation
+from .manager import AgentManager, MemoryWorkspaceChanged
 from .models import (
     AvailableModelResponse,
     BotConfigResponse,
@@ -23,6 +26,8 @@ from .models import (
     MemoryNodeCreateRequest,
     MemoryNodeDeleteRequest,
     MemoryNodeUpdateRequest,
+    MemoryWorkspaceConfigUpdate,
+    MemoryWorkspaceDocumentUpdate,
     BotMetaResponse,
     ChatRequest,
     ConfigResponse,
@@ -54,6 +59,22 @@ from .models import (
     SubmitToolApprovalRequest,
     SubagentCandidateResponse,
 )
+
+
+@contextmanager
+def _memory_workspace_http_errors() -> Iterator[None]:
+    try:
+        yield
+    except (MemoryWorkspaceChanged, MemoryRevisionConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (FileNotFoundError, KeyError) as exc:
+        raise HTTPException(status_code=404, detail="Memory workspace or document not found") from exc
+    except RemoteNovelMemoUnavailable as exc:
+        raise HTTPException(status_code=502, detail="Novel Memo MCP service is unavailable") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Permission denied while accessing memory") from exc
 
 
 def _resolve_static_dir(server_dir: Path) -> Path | None:
@@ -158,6 +179,50 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "ok"}
+
+    @app.get("/api/bots/{bot_id}/memory/workspace/config")
+    async def get_memory_workspace_config(bot_id: str) -> dict[str, str | None]:
+        with _memory_workspace_http_errors():
+            return manager.memory_workspace_config(bot_id)
+
+    @app.put("/api/bots/{bot_id}/memory/workspace/config")
+    async def put_memory_workspace_config(bot_id: str, update: MemoryWorkspaceConfigUpdate) -> dict[str, str | None]:
+        with _memory_workspace_http_errors():
+            return await manager.configure_memory_workspace(
+                bot_id, update.provider, update.vault_path, connection=update.connection, mcp_url=update.mcp_url,
+            )
+
+    @app.get("/api/bots/{bot_id}/memory/workspace")
+    async def get_memory_workspace(bot_id: str, provider: WorkspaceMemoryProvider, path: str = "") -> dict[str, Any]:
+        with _memory_workspace_http_errors():
+            workspace = await manager.open_active_memory_workspace(bot_id, provider)
+            return await call_memory_operation(workspace.directory, path)
+
+    @app.get("/api/bots/{bot_id}/memory/workspace/document")
+    async def get_memory_workspace_document(bot_id: str, provider: WorkspaceMemoryProvider, path: str) -> dict[str, Any]:
+        with _memory_workspace_http_errors():
+            workspace = await manager.open_active_memory_workspace(bot_id, provider)
+            return await call_memory_operation(workspace.document, path)
+
+    @app.put("/api/bots/{bot_id}/memory/workspace/document")
+    async def put_memory_workspace_document(bot_id: str, update: MemoryWorkspaceDocumentUpdate) -> dict[str, Any]:
+        with _memory_workspace_http_errors():
+            return await manager.save_memory_workspace_document(
+                bot_id, update.provider, update.path, update.content, update.revision,
+                triggers=update.triggers, disclosure=update.disclosure,
+            )
+
+    @app.get("/api/bots/{bot_id}/memory/workspace/search")
+    async def search_memory_workspace(bot_id: str, provider: WorkspaceMemoryProvider, query: str) -> list[dict[str, Any]]:
+        with _memory_workspace_http_errors():
+            workspace = await manager.open_active_memory_workspace(bot_id, provider)
+            return await call_memory_operation(workspace.search, query)
+
+    @app.get("/api/bots/{bot_id}/memory/workspace/graph")
+    async def get_memory_workspace_graph(bot_id: str, provider: WorkspaceMemoryProvider) -> list[dict[str, Any]]:
+        with _memory_workspace_http_errors():
+            workspace = await manager.open_active_memory_workspace(bot_id, provider)
+            return await call_memory_operation(workspace.graph)
 
     @app.get("/api/bots/{bot_id}/memory/namespaces")
     async def list_memory_namespaces(bot_id: str) -> Any:
@@ -586,12 +651,12 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> Any:
         session_id = req.session_id or manager.sessions_for("default").create()
-        try:
-            bot = await manager.get_bot("default", session_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock("default", session_id)
         async with lock:
+            try:
+                bot = await manager.get_bot("default", session_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             try:
                 result = await bot.chat(
                     req.prompt,
@@ -610,12 +675,12 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.post("/api/bots/{bot_id}/chat")
     async def bot_chat(bot_id: str, req: ChatRequest) -> Any:
         session_id = req.session_id or manager.sessions_for(bot_id).create()
-        try:
-            bot = await manager.get_bot(bot_id, session_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock(bot_id, session_id)
         async with lock:
+            try:
+                bot = await manager.get_bot(bot_id, session_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             try:
                 result = await bot.chat(
                     req.prompt,
@@ -635,7 +700,7 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     async def stream(req: ChatRequest, request: Request) -> StreamingResponse:
         session_id = req.session_id or manager.sessions_for("default").create()
         try:
-            bot = await manager.get_bot("default", session_id)
+            manager.assert_bot_chat_ready("default")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock("default", session_id)
@@ -653,7 +718,9 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                             ensure_ascii=False,
                         ),
                     )
+                bot = None
                 try:
+                    bot = await manager.get_bot("default", session_id)
                     async for event in bot.stream(
                         req.prompt,
                         session_id=session_id,
@@ -666,7 +733,8 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         payload = json.dumps(event, ensure_ascii=False)
                         yield _frame(event=event.get("type", "message"), data=payload)
                 except asyncio.CancelledError:
-                    bot.cancel()
+                    if bot is not None:
+                        bot.cancel()
                     raise
                 except Exception as exc:
                     yield _frame(
@@ -687,7 +755,7 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     async def bot_stream(bot_id: str, req: ChatRequest, request: Request) -> StreamingResponse:
         session_id = req.session_id or manager.sessions_for(bot_id).create()
         try:
-            bot = await manager.get_bot(bot_id, session_id)
+            manager.assert_bot_chat_ready(bot_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock(bot_id, session_id)
@@ -705,7 +773,9 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                             ensure_ascii=False,
                         ),
                     )
+                bot = None
                 try:
+                    bot = await manager.get_bot(bot_id, session_id)
                     async for event in bot.stream(
                         req.prompt,
                         session_id=session_id,
@@ -718,7 +788,8 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
                         payload = json.dumps(event, ensure_ascii=False)
                         yield _frame(event=event.get("type", "message"), data=payload)
                 except asyncio.CancelledError:
-                    bot.cancel()
+                    if bot is not None:
+                        bot.cancel()
                     raise
                 except Exception as exc:
                     yield _frame(

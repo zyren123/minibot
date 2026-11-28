@@ -323,6 +323,8 @@ async def test_stream_thinking_status_starts_before_stream_is_ready(tmp_path, mo
 @pytest.mark.asyncio
 async def test_run_loop_stream_failure_falls_back_and_marks_degraded(tmp_path):
     agent = _make_agent(tmp_path)
+    events = asyncio.Queue()
+    agent.event_sink = AsyncQueueEventSink(events)
 
     class FallbackClient:
         model = "test-model"
@@ -350,10 +352,20 @@ async def test_run_loop_stream_failure_falls_back_and_marks_degraded(tmp_path):
     _assert_assistant_message(result[-1], "fallback")
     assert agent.get_stream_state()["degraded"] is True
 
+    emitted = [events.get_nowait() for _ in range(events.qsize())]
+    lifecycle = [event for event in emitted if event["type"].startswith("model_generation_")]
+    assert [event["type"] for event in lifecycle] == [
+        "model_generation_start", "model_generation_end",
+        "model_generation_start", "model_generation_end",
+    ]
+    assert {event["message_id"] for event in lifecycle} == {result[-1]["message_id"]}
+
 
 @pytest.mark.asyncio
 async def test_stream_tool_call_arguments_are_merged(tmp_path):
     agent = _make_agent(tmp_path)
+    events = asyncio.Queue()
+    agent.event_sink = AsyncQueueEventSink(events)
     executed: list[tuple[str, dict[str, str]]] = []
 
     async def fake_execute(name: str, args: dict[str, str]) -> ToolOutcome:
@@ -406,13 +418,27 @@ async def test_stream_tool_call_arguments_are_merged(tmp_path):
 
     client = ToolCallClient()
     agent.client = client
-    history = [{"role": "user", "content": "run tool"}]
+    history = [{"role": "user", "content": "run tool", "message_id": "user-1"}]
 
     result = await agent.run_loop(history)
 
     assert executed == [("echo", {"text": "hello"})]
     assert any(item.get("role") == "tool" and item.get("tool_call_id") == "call-1" for item in result)
     _assert_assistant_message(result[-1], "done")
+
+    expected = [
+        "model_generation_start", "assistant_start", "assistant_delta",
+        "model_generation_end", "assistant_end", "tool_call", "tool_result",
+        "model_generation_start", "assistant_start", "assistant_delta",
+        "model_generation_end", "assistant_end",
+    ]
+    emitted = [events.get_nowait() for _ in range(events.qsize())]
+    turn_events = [event for event in emitted if event["type"] in expected]
+    assert [event["type"] for event in turn_events] == expected
+    for events_for_model in (turn_events[:5], turn_events[7:]):
+        assert {event["message_id"] for event in events_for_model} == {events_for_model[0]["message_id"]}
+        assert {event["parent_user_message_id"] for event in events_for_model} == {"user-1"}
+    assert turn_events[0]["message_id"] != turn_events[7]["message_id"]
 
 
 @pytest.mark.asyncio

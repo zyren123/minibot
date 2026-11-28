@@ -69,10 +69,13 @@ async def test_answer_stream_preserves_trace_parent_after_cache_restart(server_e
         return resumed
 
     monkeypatch.setattr(manager, "get_bot", get_bot)
-    async for _ in manager.submit_user_answer_stream(bot_id, session_id, {
+    events = [event async for event in manager.submit_user_answer_stream(bot_id, session_id, {
         "question_id": "call-1", "answer_text": "这个",
-    }):
-        pass
+    })]
+    generation_pair = ["model_generation_start", "model_generation_end"]
+    generation_events = [event["type"] for event in events if event["type"] in generation_pair]
+    assert generation_events[:2] == generation_pair
+    assert generation_events == generation_pair * (len(generation_events) // 2)
     runs = records(manager._base_config.trace_dir)
     resumed, = [run for run in runs if run[0]["parent_run_id"]]
     assert resumed[0]["parent_run_id"] == first[0]["run_id"]
@@ -1466,6 +1469,14 @@ async def test_pending_question_query_preserves_active_stream(
                     "session_id": session_id, "prompt": "Say something",
                 })
                 assert response.status_code == 200, response.text
+                sse_events = [
+                    line.removeprefix("event: ")
+                    for line in response.text.splitlines()
+                    if line.startswith("event: ")
+                ]
+                assert sse_events.index("model_generation_start") < sse_events.index("assistant_delta")
+                assert sse_events.index("assistant_delta") < sse_events.index("model_generation_end")
+                assert sse_events.index("model_generation_end") < sse_events.index("assistant_end")
 
         if resume:
             sessions.append_message(session_id, {"role": "user", "content": "Continue"})
@@ -1650,6 +1661,13 @@ async def test_detached_stream_pauses_at_question_and_allows_answer_resume(
             bot_id, session_id, {"question_id": "ask-detached", "answer_text": "Shipping"},
         )]
         assert any(event.get("content") == "Resumed" for event in events)
+        expected = [
+            "model_generation_start", "assistant_start", "assistant_delta",
+            "model_generation_end", "assistant_end",
+        ]
+        resumed_turn = [event for event in events if event["type"] in expected]
+        assert [event["type"] for event in resumed_turn] == expected
+        assert {event["message_id"] for event in resumed_turn} == {resumed_turn[-1]["message_id"]}
         assert sessions.load_runtime_state(session_id) is None
         assert client.calls == 2
     finally:

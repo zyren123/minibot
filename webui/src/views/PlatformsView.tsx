@@ -1,44 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { createPlatform, deletePlatform, updatePlatform } from "../lib/api";
 import { useI18n } from "../lib/i18n";
+import { SettingsSection, SettingsToggle } from "./SettingsSection";
 import type { BotMeta, PlatformConnection } from "../lib/types";
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
-}
-
-function SectionCard(props: { title: string; subtitle?: string; children: ReactNode; right?: ReactNode }) {
-  return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-950/90 p-5 shadow-[0_20px_80px_rgba(0,0,0,0.18)]">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <div className="text-sm font-semibold text-zinc-100">{props.title}</div>
-          {props.subtitle ? <div className="mt-1 text-xs text-zinc-500">{props.subtitle}</div> : null}
-        </div>
-        {props.right}
-      </div>
-      {props.children}
-    </div>
-  );
-}
-
-function ToggleButton(props: { enabled: boolean; onClick: () => void; disabled?: boolean }) {
-  const { t } = useI18n();
-  return (
-    <button
-      type="button"
-      className={classNames(
-        "rounded-full px-3 py-1 text-xs font-semibold transition",
-        props.enabled ? "bg-emerald-500/20 text-emerald-300" : "bg-zinc-800 text-zinc-300",
-        props.disabled && "opacity-50",
-      )}
-      onClick={props.onClick}
-      disabled={props.disabled}
-    >
-      {props.enabled ? t("common.on") : t("common.off")}
-    </button>
-  );
 }
 
 type PlatformDraft = {
@@ -211,13 +179,13 @@ export default function PlatformsView(props: {
   return (
     <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
       <div className="flex flex-col gap-4">
-        <SectionCard
+        <SettingsSection
           title={t("config.section.platforms.title")}
           subtitle={t("config.section.platforms.subtitle")}
           right={
             <button
               type="button"
-              className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white"
+              className="chat-button chat-button-primary"
               onClick={() => setModalOpen(true)}
             >
               {t("config.platform.add")}
@@ -230,10 +198,10 @@ export default function PlatformsView(props: {
                 key={platform.platform_id}
                 type="button"
                 className={classNames(
-                  "w-full rounded-3xl border px-4 py-3 text-left transition",
+                  "w-full settings-list-row text-left",
                   platform.platform_id === selectedPlatformId
-                    ? "border-zinc-600 bg-zinc-900"
-                    : "border-zinc-800 bg-zinc-950 hover:border-zinc-700 hover:bg-zinc-900/60",
+                    ? "settings-list-row-selected"
+                    : "settings-list-row-hoverable",
                 )}
                 onClick={() => setSelectedPlatformId(platform.platform_id)}
               >
@@ -248,23 +216,23 @@ export default function PlatformsView(props: {
                       {platform.connected ? t("config.platform.connected") : t("config.platform.disconnected")}
                     </div>
                   </div>
-                  <ToggleButton enabled={platform.enabled} onClick={() => void 0} disabled />
+                  <span className="settings-meta">{t(platform.enabled ? "common.on" : "common.off")}</span>
                 </div>
               </button>
             ))}
             {platforms.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-zinc-800 px-4 py-6 text-sm text-zinc-500">
+              <div className="text-sm text-zinc-500 py-2">
                 {t("config.platforms.empty")}
               </div>
             ) : null}
           </div>
-        </SectionCard>
+        </SettingsSection>
       </div>
 
       <div className="flex min-w-0 flex-col gap-4">
         {selectedPlatform && draft ? (
           <>
-            <SectionCard
+            <SettingsSection
               title={selectedPlatform.name}
               subtitle={t("config.section.platformDetail.subtitle")}
               right={
@@ -279,7 +247,7 @@ export default function PlatformsView(props: {
                   </button>
                   <button
                     type="button"
-                    className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                    className="chat-button chat-button-primary"
                     onClick={() => void handleSave()}
                     disabled={!dirty || saving}
                   >
@@ -297,12 +265,12 @@ export default function PlatformsView(props: {
                     className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-600"
                   />
                 </div>
-                <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                <div className="settings-control-row">
                   <div>
                     <div className="text-sm font-semibold text-zinc-200">{t("config.platform.enabled")}</div>
                     <div className="text-xs text-zinc-500">{t("config.platform.enabled.subtitle")}</div>
                   </div>
-                  <ToggleButton enabled={draft.enabled} onClick={() => setDraftField("enabled", !draft.enabled)} />
+                  <SettingsToggle enabled={draft.enabled} onClick={() => setDraftField("enabled", !draft.enabled)} />
                 </div>
                 <div className="grid gap-2">
                   <label className="text-sm font-semibold text-zinc-200">{t("config.platform.boundBot")}</label>
@@ -361,38 +329,38 @@ export default function PlatformsView(props: {
                   </div>
                 ) : null}
               </div>
-            </SectionCard>
+            </SettingsSection>
 
-            <SectionCard title={t("config.platform.status")}>
+            <SettingsSection title={t("config.platform.status")}>
               <div className="grid gap-4 md:grid-cols-3">
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                <div className="settings-control-row">
                   <div className="text-xs text-zinc-500">{t("config.platform.connectedLabel")}</div>
                   <div className="mt-2 text-sm font-semibold text-zinc-100">
                     {selectedPlatform.connected ? t("config.platform.connected") : t("config.platform.disconnected")}
                   </div>
                 </div>
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                <div className="settings-control-row">
                   <div className="text-xs text-zinc-500">{t("config.platform.lastEvent")}</div>
                   <div className="mt-2 break-all text-sm text-zinc-100">
                     {selectedPlatform.last_event_at || t("common.notSet")}
                   </div>
                 </div>
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3">
+                <div className="settings-control-row">
                   <div className="text-xs text-zinc-500">{t("config.platform.lastError")}</div>
                   <div className="mt-2 break-all text-sm text-zinc-100">
                     {selectedPlatform.last_error || t("common.notSet")}
                   </div>
                 </div>
               </div>
-            </SectionCard>
+            </SettingsSection>
           </>
         ) : (
-          <SectionCard
+          <SettingsSection
             title={t("config.platformDetail.title")}
             subtitle={t("config.platformDetail.emptySubtitle")}
           >
             <div className="text-sm text-zinc-500">{t("config.platformDetail.empty")}</div>
-          </SectionCard>
+          </SettingsSection>
         )}
       </div>
 
@@ -484,7 +452,7 @@ export default function PlatformsView(props: {
             <div className="mt-6 flex justify-end gap-2">
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                className="chat-button"
                 onClick={() => setModalOpen(false)}
                 disabled={creating}
               >
@@ -492,7 +460,7 @@ export default function PlatformsView(props: {
               </button>
               <button
                 type="button"
-                className="rounded-2xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white disabled:opacity-50"
+                className="chat-button chat-button-primary"
                 onClick={() => void handleCreate()}
                 disabled={
                   creating ||

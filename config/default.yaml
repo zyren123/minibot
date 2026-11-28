@@ -54,6 +54,15 @@ tools:
     cpus: 1.0
     pids_limit: 128
 
+# Memory configuration
+memory:
+  enabled: true
+  provider: file
+  memory_dir: memory
+  # novelmemo_vault: /absolute/path/to/vault
+  # novelmemo_connection: mcp
+  # novelmemo_mcp_url: http://127.0.0.1:8767/mcp
+
 # Agent teams configuration
 teams:
   enabled: true

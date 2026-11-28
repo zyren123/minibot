@@ -29,6 +29,8 @@ dependencies = [
     "openai>=2.16.0,<3",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    "novelmemo==0.2.1",
+    "mcp>=1.12,<2",
     "httpx>=0.25.0",
     "psycopg[binary]>=3.2.9",
     "sqlmodel>=0.0.22",

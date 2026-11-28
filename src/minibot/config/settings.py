@@ -88,7 +88,11 @@ tools:
 
 memory:
   enabled: true
+  provider: file
   memory_dir: memory
+  novelmemo_vault:
+  novelmemo_connection: vault
+  novelmemo_mcp_url:
   backend: sqlite
   database_url: ${MEMORY_DATABASE_URL}
   active_namespace:
@@ -331,6 +335,13 @@ def _parse_memory_config(data: dict | None, app_home: Path) -> MemoryConfig:
         value=raw_memory_dir,
         base_dir=app_home,
     )
+    vault = data.get("novelmemo_vault")
+    resolved_vault = _resolve_config_path(
+        key="memory.novelmemo_vault", value=vault, base_dir=app_home,
+    ) if vault else None
+    mcp_url = data.get("novelmemo_mcp_url")
+    if mcp_url is not None and not isinstance(mcp_url, str):
+        raise ValueError("memory.novelmemo_mcp_url must be a string")
     return MemoryConfig(
         enabled=data.get("enabled", True),
         memory_dir=str(resolved_memory_dir),
@@ -339,6 +350,10 @@ def _parse_memory_config(data: dict | None, app_home: Path) -> MemoryConfig:
         active_namespace=data.get("active_namespace"),
         long_term_max_lines=data.get("long_term_max_lines", 200),
         daily_lookback_days=data.get("daily_lookback_days", 1),
+        provider=data.get("provider", "file"),
+        novelmemo_vault=str(resolved_vault) if resolved_vault else None,
+        novelmemo_connection=data.get("novelmemo_connection", "vault"),
+        novelmemo_mcp_url=(mcp_url.strip() or None) if mcp_url else None,
     )
 
 

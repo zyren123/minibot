@@ -13,6 +13,12 @@ import type {
   MemorySystemView,
   MemorySystemViewName,
   MemoryTreeResponse,
+  MemoryWorkspaceConfig,
+  MemoryWorkspaceDirectory,
+  MemoryWorkspaceDocument,
+  MemoryWorkspaceEntry,
+  MemoryWorkspaceProvider,
+  UpdateMemoryWorkspaceConfig,
   SkillDeleteResult,
   DashboardData,
   FetchedModel,
@@ -30,6 +36,7 @@ import type {
   SubagentCandidate,
   StreamEvent,
   UpdateMCPServerRequest,
+  UpdateMemoryWorkspaceDocument,
 } from "./types";
 import { parseToolApprovalEvent } from "./toolApprovals";
 
@@ -82,6 +89,73 @@ export async function updateBotConfig(
   body: Partial<BotConfig> & { api_key?: string | null },
 ): Promise<{ status: string }> {
   return apiPut<{ status: string }>(`/api/bots/${encodeURIComponent(botId)}/config`, body);
+}
+
+export class MemoryWorkspaceRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+async function requestMemoryWorkspace<T>(botId: string, route: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/memory/workspace${route}`, init);
+  if (!response.ok) {
+    const error: unknown = await response.json().catch(() => null);
+    const message = error && typeof error === "object" && "detail" in error && typeof error.detail === "string"
+      ? error.detail
+      : response.statusText;
+    throw new MemoryWorkspaceRequestError(response.status, message);
+  }
+  return response.json();
+}
+
+function workspacePut(body: object): RequestInit {
+  return { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+}
+
+export function getMemoryWorkspaceConfig(botId: string, signal?: AbortSignal) {
+  return requestMemoryWorkspace<MemoryWorkspaceConfig>(botId, "/config", { signal });
+}
+
+export function updateMemoryWorkspaceConfig(
+  botId: string,
+  config: UpdateMemoryWorkspaceConfig,
+) {
+  return requestMemoryWorkspace<MemoryWorkspaceConfig>(botId, "/config", workspacePut(config));
+}
+
+export function getMemoryWorkspaceDirectory(
+  botId: string, provider: MemoryWorkspaceProvider, path: string, signal?: AbortSignal,
+) {
+  return requestMemoryWorkspace<MemoryWorkspaceDirectory>(
+    botId, `?${new URLSearchParams({ provider, path })}`, { signal },
+  );
+}
+
+export function getMemoryWorkspaceDocument(
+  botId: string, provider: MemoryWorkspaceProvider, path: string, signal?: AbortSignal,
+) {
+  return requestMemoryWorkspace<MemoryWorkspaceDocument>(
+    botId, `/document?${new URLSearchParams({ provider, path })}`, { signal },
+  );
+}
+
+export function updateMemoryWorkspaceDocument(botId: string, update: UpdateMemoryWorkspaceDocument) {
+  return requestMemoryWorkspace<MemoryWorkspaceDocument>(botId, "/document", workspacePut(update));
+}
+
+export function searchMemoryWorkspace(
+  botId: string, provider: MemoryWorkspaceProvider, query: string, signal?: AbortSignal,
+) {
+  return requestMemoryWorkspace<MemoryWorkspaceEntry[]>(
+    botId, `/search?${new URLSearchParams({ provider, query })}`, { signal },
+  );
+}
+
+export function getMemoryWorkspaceGraph(botId: string, provider: MemoryWorkspaceProvider, signal?: AbortSignal) {
+  return requestMemoryWorkspace<MemoryWorkspaceEntry[]>(
+    botId, `/graph?${new URLSearchParams({ provider })}`, { signal },
+  );
 }
 
 export async function listMemoryNamespaces(botId: string): Promise<MemoryNamespace[]> {

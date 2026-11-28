@@ -1,0 +1,91 @@
+.memory-source-settings {
+  --memory-source-label-width: 8rem;
+  margin-top: 0.875rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.memory-source-settings-row {
+  display: grid;
+  grid-template-columns: var(--memory-source-label-width) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.5rem;
+  padding: 0.4375rem 0;
+  font-size: 0.875rem;
+}
+
+.memory-source-settings-title { color: var(--text-strong); font-weight: 600; }
+.memory-source-settings-value { display: grid; gap: 0.125rem; min-width: 0; }
+.memory-source-settings-detail {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.memory-source-manage { gap: 0.375rem; }
+.memory-source-manage svg { color: var(--text-muted); }
+.memory-source-manage[aria-expanded="true"] svg { rotate: 90deg; }
+.memory-source-manage[aria-disabled="true"] { opacity: 0.65; }
+.memory-source-settings-editor {
+  padding-inline-start: calc(var(--memory-source-label-width) + 0.75rem);
+  padding-top: 0.3125rem;
+}
+
+.memory-source-form {
+  display: grid;
+  gap: 0.625rem;
+  width: min(100%, 23rem);
+}
+
+.memory-source-form fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.memory-source-form legend, .memory-source-field {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.memory-source-choices { display: flex; flex-wrap: wrap; gap: 0 1.125rem; }
+.memory-source-choices label {
+  display: flex;
+  min-height: 2.25rem;
+  align-items: center;
+  gap: 0.4375rem;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.memory-source-choices input[type="radio"] {
+  width: 0.875rem;
+  height: 0.875rem;
+  min-height: 0;
+  accent-color: var(--markdown-link);
+}
+
+.memory-source-field { display: grid; gap: 0.3125rem; min-width: 0; }
+.memory-source-form label.memory-source-field :is(input, select) {
+  width: 100%;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.4375rem;
+  color: var(--text-primary);
+  background: var(--workspace-paper);
+  font-size: 0.875rem;
+}
+.memory-source-field input::placeholder { color: var(--text-muted); }
+.memory-source-form :is(button, input, select):focus-visible {
+  outline: 2px solid var(--markdown-link);
+  outline-offset: 2px;
+}
+
+.memory-source-error { color: var(--danger-text); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.memory-source-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.memory-vault-dialog .memory-source-form { width: 100%; margin-top: 0.875rem; }
+.memory-vault-dialog .memory-source-actions { justify-content: flex-end; }
+
+@media (max-width: 560px) {
+  .memory-source-settings { --memory-source-label-width: max-content; }
+  .memory-source-settings-row { gap: 0.5rem; }
+  .memory-source-settings-editor { padding-inline-start: 0; }
+  .memory-source-settings .memory-source-manage, .memory-source-choices label, .memory-source-actions button,
+  .memory-source-form label.memory-source-field :is(input, select) { min-height: 2.75rem; }
+}

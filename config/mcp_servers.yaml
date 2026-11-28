@@ -20,6 +20,15 @@ servers:
       - duckduckgo-mcp-server
     enabled: true
 
+  # Example: Novel Memo Agent tools backed by an existing Markdown vault.
+  # Use this standalone server when MiniBot's built-in memory is disabled.
+  # Novel Memo 0.2.1 uses the MCP Python SDK 1.x FastMCP API.
+  # - name: novelmemo
+  #   transport: stdio
+  #   command: uvx
+  #   args: ["--from", "novelmemo==0.2.1", "--with", "mcp<2", "novelmemo", "mcp", "--vault", "/absolute/path/to/vault"]
+  #   enabled: true
+
   # Example: Local file server
   # - name: filesystem
   #   transport: stdio

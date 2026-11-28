@@ -117,6 +117,9 @@ async def test_agent_run_loop_triggers_compaction(mock_agent):
     )
     assert compaction_event["data"]["context_usage"]["total_tokens"] > 0
     assert compaction_event["data"]["auto_compact_threshold_tokens"] == 16000
+    assert [event["type"] for event in emitted if event["type"].startswith("model_generation_")] == [
+        "model_generation_start", "model_generation_end",
+    ]
 
 
 @pytest.mark.asyncio
