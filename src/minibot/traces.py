@@ -135,7 +135,8 @@ class RunTrace:
 
     def __init__(
         self, directory: Path, session_id: str, *, run_id: str | None = None,
-        parent_run_id: str | None = None,
+        parent_run_id: str | None = None, user_message_id: str | None = None,
+        bot_id: str | None = None,
     ) -> None:
         self.run_id = uuid.UUID(run_id).hex if run_id else uuid.uuid4().hex
         self.session_id = session_id
@@ -153,6 +154,22 @@ class RunTrace:
         self._write(
             "run_start", scope="agent_tools", parent_run_id=parent_run_id,
             started_at=datetime.now(timezone.utc).isoformat(),
+            **({"user_message_id": user_message_id} if user_message_id else {}),
+            **({"bot_id": bot_id} if bot_id else {}),
+        )
+
+    def start_model(self, message_id: str, parent_user_message_id: str | None) -> _ModelAttempt:
+        attempt = _ModelAttempt(uuid.uuid4().hex, time.monotonic())
+        self._write(
+            "model_start", invocation_id=attempt.id, message_id=message_id,
+            **({"parent_user_message_id": parent_user_message_id} if parent_user_message_id else {}),
+        )
+        return attempt
+
+    def finish_model(self, attempt: _ModelAttempt, status: RunStatus) -> None:
+        self._write(
+            "model_end", invocation_id=attempt.id, status=status,
+            duration_ms=(time.monotonic() - attempt.started) * 1000,
         )
 
     def _disable(self) -> None:
@@ -243,8 +260,10 @@ class RunTrace:
             **({"workspace_id": metadata.workspace_id} if metadata.workspace_id is not None else {}),
         )
 
-    def observe(self, event: StreamEvent) -> None:
+    def observe(self, event: StreamEvent, *, message_id: str | None = None) -> None:
         kind = event.get("type")
+        message_id = message_id or event.get("message_id")
+        message = {"message_id": message_id} if isinstance(message_id, str) and message_id else {}
         if kind == "tool_call":
             invocation = Invocation(
                 uuid.uuid4().hex, event.get("tool_call_id", ""),
@@ -253,10 +272,10 @@ class RunTrace:
             self.pending = invocation
             self._write(
                 "tool_start", invocation_id=invocation.id,
-                tool_call_id=invocation.call_id, tool_name=invocation.name,
+                tool_call_id=invocation.call_id, tool_name=invocation.name, **message,
             )
         elif kind == "tool_result":
-            fields: dict[str, Any] = {}
+            fields: dict[str, Any] = dict(message)
             if "tool_exit_code" in event:
                 fields["exit_code"] = event["tool_exit_code"]
             if "tool_hook_phase" in event:
@@ -265,6 +284,8 @@ class RunTrace:
                 status=event.get("tool_status", "error"),
                 is_error=event.get("is_error", True), **fields,
             )
+        elif kind == "assistant_end" and message and event.get("finish_reason") != "tool_calls":
+            self._write("assistant_message", **message)
         elif kind == "tool_approval_resolved":
             self._write(
                 "tool_approval", approval_id=event["approval_id"], tool_name=event["tool_name"],
@@ -273,10 +294,10 @@ class RunTrace:
         elif kind == "ask_user_question":
             self.finish_tool(status="success", is_error=False)
             self.waiting = True
-            self._write("run_waiting")
+            self._write("run_waiting", **message)
         elif kind == "ask_user_answer_received":
             self.waiting = False
-            self._write("run_resumed")
+            self._write("run_resumed", **message)
 
     def close(self, status: RunStatus, *, budget_limit: str | None = None) -> None:
         self.finish_tool(status="interrupted" if status == "interrupted" else "error", is_error=True)

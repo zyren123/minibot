@@ -9,7 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
@@ -18,6 +18,7 @@ from ..config.schema import WorkspaceMemoryProvider
 from ..memory.remote_novelmemo import RemoteNovelMemoUnavailable
 from ..memory.source import MemoryWorkspaceChanged
 from ..memory.workspace import MemoryRevisionConflict
+from ..trace_view import TraceSession
 from ._streamed_turn import StreamedTurn, TurnSource
 from .manager import AgentManager
 from .models import (
@@ -497,6 +498,14 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         if not manager.sessions_for(bot_id).exists(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
         return {"session_id": session_id, "messages": manager.session_messages(bot_id, session_id)}
+
+    @app.get("/api/bots/{bot_id}/sessions/{session_id}/trace", response_model=TraceSession)
+    def get_bot_session_trace(bot_id: str, session_id: str, response: Response) -> TraceSession:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return manager.session_trace(bot_id, session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
 
     @app.post("/api/bots/{bot_id}/sessions/{session_id}/tool-approvals/{approval_id}")
     async def submit_tool_approval(

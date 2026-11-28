@@ -286,6 +286,7 @@ class Config:
     subagents: SubagentsConfig = field(default_factory=SubagentsConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     trace_dir: str | Path | None = None
+    trace_bot_id: str | None = None  # Assigned by the WebUI server.
     runtime_budget: RuntimeBudgetConfig = field(default_factory=RuntimeBudgetConfig)
     tool_permissions: ToolPermissionsConfig = field(default_factory=ToolPermissionsConfig)
     file_checkpoints: bool = False

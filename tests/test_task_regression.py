@@ -182,7 +182,9 @@ async def test_user_cancellation(tmp_path):
             assert len(paths) == 1, f"Unusable trace during cleanup: found {len(paths)} segments"
             path, = paths
             events = [json.loads(line)["event"] for line in path.read_text(encoding="utf-8").splitlines()]
-            assert events == ["run_start", "tool_start"], "Trace closed before the tool finalized"
+            assert events == ["run_start", "model_start", "model_end", "tool_start"], (
+                "Trace closed before the tool finalized"
+            )
             assert not running.done(), "SDK call finished during tool cleanup"
         finally:
             finish_cleanup.set()
@@ -325,18 +327,21 @@ async def test_evaluation_fails_for_unusable_trace(tmp_path, captured_file_task,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("row_index", "fields", "diagnostic"), [
+@pytest.mark.parametrize(("row_selector", "fields", "diagnostic"), [
     pytest.param(0, {"version": 2}, "Unusable trace: .*unsupported version 2", id="unsupported-version"),
     pytest.param(0, {"parent_run_id": "unrelated"}, "Unusable trace: .*missing root segment", id="orphan-segment"),
     pytest.param(1, {"session_id": "another-session"}, "Unusable trace: .*identity mismatch", id="wrong-session"),
-    pytest.param(2, {"invocation_id": uuid4().hex}, "Unusable trace: .*does not match", id="unpaired-invocation"),
-    pytest.param(2, {"status": "refused", "is_error": True}, r"steps: .*got write_note\(refused", id="wrong-tool-status"),
+    pytest.param("tool_end", {"invocation_id": uuid4().hex}, "Unusable trace: .*does not match", id="unpaired-invocation"),
+    pytest.param("tool_end", {"status": "refused", "is_error": True}, r"steps: .*got write_note\(refused", id="wrong-tool-status"),
     pytest.param(-1, {"status": "failed"}, "terminal status: expected completed, got failed", id="wrong-run-status"),
 ])
-async def test_evaluation_fails_for_wrong_trace_record(tmp_path, captured_file_task, row_index, fields, diagnostic):
+async def test_evaluation_fails_for_wrong_trace_record(tmp_path, captured_file_task, row_selector, fields, diagnostic):
     session_id, path = captured_file_task
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    rows[row_index].update(fields)
+    row = rows[row_selector] if isinstance(row_selector, int) else next(
+        entry for entry in rows if entry["event"] == row_selector
+    )
+    row.update(fields)
     write_trace_rows(path, rows)
     with pytest.raises(pytest.fail.Exception, match=diagnostic):
         assert_task(tmp_path, session_id, FILE_TASK)
@@ -345,14 +350,14 @@ async def test_evaluation_fails_for_wrong_trace_record(tmp_path, captured_file_t
 @pytest.mark.asyncio
 async def test_evaluation_fails_for_wrong_tool_order(tmp_path, captured_file_task):
     session_id, path = captured_file_task
-    start, write_start, write_end, append_start, append_end, end = [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
-    ]
-    original_times = [row["elapsed_ms"] for row in (write_start, write_end, append_start, append_end)]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    indices = [index for index, row in enumerate(rows) if row["event"] in ("tool_start", "tool_end")]
+    write_start, write_end, append_start, append_end = [rows[index] for index in indices]
+    original_times = [rows[index]["elapsed_ms"] for index in indices]
     reordered = (append_start, append_end, write_start, write_end)
-    for row, elapsed in zip(reordered, original_times, strict=True):
-        row["elapsed_ms"] = elapsed
-    write_trace_rows(path, [start, *reordered, end])
+    for index, row, elapsed in zip(indices, reordered, original_times, strict=True):
+        rows[index] = dict(row, elapsed_ms=elapsed)
+    write_trace_rows(path, rows)
     with pytest.raises(pytest.fail.Exception, match=r"steps: .*got append_note\("):
         assert_task(tmp_path, session_id, FILE_TASK)
 
@@ -362,7 +367,10 @@ async def test_evaluation_fails_for_extra_invocation(tmp_path, captured_file_tas
     session_id, path = captured_file_task
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     invocation_id = uuid4().hex
-    extra = [dict(row, invocation_id=invocation_id, elapsed_ms=rows[-2]["elapsed_ms"]) for row in rows[1:3]]
+    extra = [
+        dict(row, invocation_id=invocation_id, elapsed_ms=rows[-2]["elapsed_ms"])
+        for row in rows if row["event"] in ("tool_start", "tool_end") and row["tool_name"] == "write_note"
+    ]
     write_trace_rows(path, [*rows[:-1], *extra, rows[-1]])
     with pytest.raises(pytest.fail.Exception, match=r"steps: .*got write_note\(.*append_note\(.*write_note\("):
         assert_task(tmp_path, session_id, FILE_TASK)

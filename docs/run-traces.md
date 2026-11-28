@@ -23,6 +23,29 @@ result = await bot.chat("Describe this project")
 
 Set `trace_dir: null` to disable recording. There is no automatic retention or rotation.
 
+## View a session trace
+
+Open a conversation in MiniBot and select **Trace** in the chat inspector.
+Open a user message to see its execution. Use **Tree waterfall** to see the parent
+and child steps in order. Use **Agent lanes** to compare agents on the same time axis.
+The details icon opens the available payload and its source.
+
+The inspector reads the trace metadata and links it to messages already stored
+for the selected Bot and session. It does not persist additional message text,
+tool arguments or output, or model reasoning. A child tool can therefore have
+timing and a failure status even when its arguments and output are unavailable.
+The inspector labels reasoning from the session as session data. Enable recording
+before running a message to capture its timing.
+
+The inspector consumes a versioned trace document through
+`GET /api/bots/{bot_id}/sessions/{session_id}/trace`. A `TraceAdapter` maps its own
+records to the document's source, session, runs, and events. A source carries a
+kind and an instance ID so identical session IDs from different sources stay
+separate. The adapter owns identifier matching, provenance, and time conversion.
+Use a null offset or duration when the source has no timing for that event.
+The inspector uses event types and parent links without interpreting the original
+log format. The MiniBot adapter is installed with the server.
+
 ## Records
 
 Each execution segment owns an exclusively created `<run_id>.jsonl` file. Different sessions and processes use separate UUIDs and files. Every line is flushed before execution proceeds. There is no background buffer or shared append file.
@@ -31,9 +54,12 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 
 | Event | Additional fields |
 | --- | --- |
-| `run_start` | `scope`, `parent_run_id`, `started_at` |
-| `tool_start` | `invocation_id`, `tool_call_id`, `tool_name` |
-| `tool_end` | Same invocation fields, `status`, `is_error`, `duration_ms`, optional `exit_code` and `hook_phase` |
+| `run_start` | `scope`, `parent_run_id`, `started_at`, optional `bot_id` and `user_message_id` |
+| `model_start` | `invocation_id`, `message_id`, optional `parent_user_message_id` |
+| `model_end` | `invocation_id`, `message_id`, `status`, `duration_ms` |
+| `assistant_message` | `message_id` |
+| `tool_start` | `invocation_id`, `tool_call_id`, `tool_name`, optional assistant `message_id` |
+| `tool_end` | Same invocation fields, `status`, `is_error`, `duration_ms`, optional `exit_code`, `hook_phase` and tool result `message_id` |
 | `subagent_start` | `child_run_id`, `parent_invocation_id`, `agent_type` |
 | `subagent_model_start` | Child and parent IDs, `invocation_id` |
 | `subagent_model_end` | Same model invocation fields, `status`, `duration_ms`, optional `usage` |
@@ -42,8 +68,8 @@ All records contain `version`, `event`, `run_id`, `session_id`, `sequence`, and 
 | `subagent_end` | Child and parent IDs, `status`, `duration_ms`, optional `budget_limit` |
 | `artifact_created`, `artifact_search`, `artifact_read` | Invocation ID, artifact ID, source run ID and tool name, size in bytes, content type, and optional child and parent IDs |
 | `tool_approval` | `approval_id`, `tool_name`, `approved`, `source` |
-| `run_waiting` | None |
-| `run_resumed` | None |
+| `run_waiting` | Optional question `message_id` |
+| `run_resumed` | Optional answer `message_id` |
 | `run_end` | `status`, `duration_ms`, optional `budget_limit` |
 
 An internal invocation UUID pairs each tool start with its end, even when provider call IDs repeat. Tool statuses preserve `ToolOutcome` values. Cancellation produces an `interrupted` tool status and continues to raise the original interruption. A post-hook failure can retain tool status `success` while setting `is_error` and `hook_phase` to `post`.

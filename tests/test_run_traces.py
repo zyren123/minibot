@@ -43,11 +43,14 @@ def records(directory):
         artifact = child | {"invocation_id", "artifact_id", "artifact_run_id", "artifact_tool_name", "size_bytes", "content_type"}
         allowed = {
             "artifact_created": artifact, "artifact_read": artifact, "artifact_search": artifact,
-            "run_start": {"scope", "parent_run_id", "started_at"},
+            "run_start": {"scope", "parent_run_id", "started_at", "bot_id", "user_message_id"},
             "run_end": {"status", "duration_ms", "budget_limit"},
-            "run_waiting": set(), "run_resumed": set(),
-            "tool_start": {"invocation_id", "tool_call_id", "tool_name"},
-            "tool_end": {"invocation_id", "tool_call_id", "tool_name", "status", "is_error",
+            "run_waiting": {"message_id"}, "run_resumed": {"message_id"},
+            "model_start": {"invocation_id", "message_id", "parent_user_message_id"},
+            "model_end": {"invocation_id", "status", "duration_ms"},
+            "assistant_message": {"message_id"},
+            "tool_start": {"invocation_id", "tool_call_id", "tool_name", "message_id"},
+            "tool_end": {"invocation_id", "tool_call_id", "tool_name", "message_id", "status", "is_error",
                          "duration_ms", "exit_code", "hook_phase"},
             "tool_approval": {"approval_id", "tool_name", "approved", "source"},
             "subagent_start": child | {"agent_type"},
@@ -66,6 +69,10 @@ def records(directory):
         assert [row["invocation_id"] for row in starts] == [row["invocation_id"] for row in ends]
         assert len({row["invocation_id"] for row in starts}) == len(starts)
         assert all(row["duration_ms"] >= 0 for row in ends)
+        model_starts = [row["invocation_id"] for row in run if row["event"] == "model_start"]
+        model_ends = [row["invocation_id"] for row in run if row["event"] == "model_end"]
+        assert model_starts == model_ends
+        assert len(model_starts) == len(set(model_starts))
         runs.append(run)
     return runs
 
@@ -189,7 +196,7 @@ async def test_duration_includes_hook_and_cancellation_waits_for_finalizer(tmp_p
     await asyncio.wait_for(entered.wait(), 3)
     path, = agent.config.trace_dir.glob("*.jsonl")
     before = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert [row["event"] for row in before] == ["run_start", "tool_start"]
+    assert [row["event"] for row in before] == ["run_start", "model_start", "model_end", "tool_start"]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -261,7 +268,9 @@ async def test_live_question_wait_and_answer_share_run(tmp_path):
             await bot.submit_user_answer(question_id="call-1", answer_text=SECRET)
     run, = records(cfg.trace_dir)
     assert [row["event"] for row in run] == [
-        "run_start", "tool_start", "tool_end", "run_waiting", "run_resumed", "run_end",
+        "run_start", "model_start", "model_end", "model_start", "model_end",
+        "tool_start", "tool_end", "run_waiting", "run_resumed",
+        "model_start", "model_end", "assistant_message", "run_end",
     ]
     assert run[-1]["status"] == "completed"
 
@@ -509,7 +518,10 @@ async def test_traced_task_does_not_open_a_scope_for_custom_handlers(tmp_path):
     result = await agent.run_loop([{"role": "user", "content": "run"}])
     assert [row["content"] for row in result if row["role"] == "tool"] == [SECRET]
     run, = records(agent.config.trace_dir)
-    assert [row["event"] for row in run] == ["run_start", "tool_start", "tool_end", "run_end"]
+    assert [row["event"] for row in run] == [
+        "run_start", "model_start", "model_end", "tool_start", "tool_end",
+        "model_start", "model_end", "assistant_message", "run_end",
+    ]
 
 
 @pytest.mark.asyncio
@@ -550,8 +562,8 @@ async def test_sink_backpressure_and_hook_time_are_inside_duration(tmp_path, mon
     release.set()
     await task
     run, = records(agent.config.trace_dir)
-    assert run[-2]["event"] == "tool_end"
-    assert run[-2]["duration_ms"] == 10000
+    tool_end, = [row for row in run if row["event"] == "tool_end"]
+    assert tool_end["duration_ms"] == 10000
 
 
 @pytest.mark.asyncio

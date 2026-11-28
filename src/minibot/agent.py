@@ -268,11 +268,13 @@ class Agent:
     def memory_workspace(self) -> MemoryWorkspace | None:
         return self._memory.workspace
 
-    async def _emit(self, event: StreamEvent, *, record_trace: bool = True) -> None:
+    async def _emit(
+        self, event: StreamEvent, *, record_trace: bool = True, trace_message_id: str | None = None,
+    ) -> None:
         """Emit one structured event if an event sink is configured."""
         trace = self._trace_context.get()
         if record_trace and trace is not None:
-            trace.observe(event)
+            trace.observe(event, message_id=trace_message_id)
         if self.event_sink is None:
             return
         try:
@@ -287,10 +289,13 @@ class Agent:
     async def _model_generation(
         self, assistant_message_id: str | None, parent_user_message_id: str | None,
     ) -> AsyncIterator[None]:
-        if assistant_message_id is None or self.event_sink is None:
+        if assistant_message_id is None:
             yield
             return
 
+        trace = self._trace_context.get()
+        attempt = trace.start_model(assistant_message_id, parent_user_message_id) if trace is not None else None
+        status: RunStatus = "completed"
         try:
             await self._emit({
                 "type": "model_generation_start",
@@ -298,7 +303,21 @@ class Agent:
                 "parent_user_message_id": parent_user_message_id,
             }, record_trace=False)
             yield
+        except (UserInterruptedError, asyncio.CancelledError, KeyboardInterrupt):
+            status = "interrupted"
+            raise
+        except RuntimeBudgetExceeded:
+            status = "budget_exceeded"
+            raise
+        except ContextWindowExceeded:
+            status = "context_window_exceeded"
+            raise
+        except BaseException:
+            status = "failed"
+            raise
         finally:
+            if trace is not None and attempt is not None:
+                trace.finish_model(attempt, status)
             await self._emit({
                 "type": "model_generation_end",
                 "message_id": assistant_message_id,
@@ -1284,8 +1303,11 @@ You are now live. Await instructions and begin the loop.""",
     ) -> list[dict]:
         """Run one execution segment, recording only allowlisted metadata when enabled."""
         trace = (
-            RunTrace(Path(self.config.trace_dir), self.session_id,
-                     run_id=run_id, parent_run_id=parent_run_id)
+            RunTrace(
+                Path(self.config.trace_dir), self.session_id, run_id=run_id,
+                parent_run_id=parent_run_id, user_message_id=self._latest_user_message_id(messages),
+                bot_id=self.config.trace_bot_id,
+            )
             if self.config.trace_dir is not None else None
         )
         token = self._trace_context.set(trace)
@@ -1741,7 +1763,7 @@ You are now live. Await instructions and begin the loop.""",
                     "type": "tool_call", "tool_call_id": tc_id, "tool_name": tc_name, "tool_args": tc_input,
                     "note": parse_note or ("invalid_args" if invalid else ""),
                     **({"is_error": True} if invalid else {}),
-                })
+                }, trace_message_id=assistant_message_id)
                 if self._ui_enabled():
                     print()
                     if invalid:
@@ -1838,7 +1860,7 @@ You are now live. Await instructions and begin the loop.""",
                     "question_id": question["question_id"],
                     "answer_text": answer["answer_text"],
                     "selected_option_value": answer["selected_option_value"],
-                })
+                }, trace_message_id=answer_message["message_id"])
                 continue
 
             output = outcome.text
@@ -1851,7 +1873,7 @@ You are now live. Await instructions and begin the loop.""",
             await self._emit({
                 "type": "tool_result", "tool_call_id": tc_id, "tool_name": tc_name, "tool_args": tc_input,
                 "tool_output": output, **outcome.metadata(), **({"note": parse_note or ""} if not invalid else {}),
-            })
+            }, trace_message_id=result["message_id"])
             if tc_name == "TodoWrite" and outcome.status == "success":
                 await self._emit_todo_snapshot()
             if self._ui_enabled():

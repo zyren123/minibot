@@ -89,6 +89,7 @@ def _read_segment(path: Path, session_id: str) -> tuple[str | None, Segment]:
     steps: list[TraceStep] = []
     seen_invocations = set()
     active = None
+    active_model = None
     waiting = False
     for sequence, row in enumerate(rows[1:-1], 2):
         location = f"{path.name}:{sequence}"
@@ -111,6 +112,24 @@ def _read_segment(path: Path, session_id: str) -> tuple[str | None, Segment]:
                          location, "invalid tool status, error flag or duration")
                 steps.append(ToolStep(name, status, is_error))
                 active = None
+        elif event == "model_start":
+            invocation, message = row.get("invocation_id"), row.get("message_id")
+            _require(active is None and active_model is None and not waiting,
+                     location, "model_start while another step is in progress")
+            _require(isinstance(invocation, str) and bool(invocation)
+                     and isinstance(message, str) and bool(message) and invocation not in seen_invocations,
+                     location, "invalid model invocation identity")
+            seen_invocations.add(invocation)
+            active_model = invocation
+        elif event == "model_end":
+            _require(active_model is not None and row.get("invocation_id") == active_model,
+                     location, "model_end does not match its model_start")
+            _require(row.get("status") in get_args(RunStatus) and _duration(row.get("duration_ms")),
+                     location, "invalid model status or duration")
+            active_model = None
+        elif event == "assistant_message":
+            _require(isinstance(row.get("message_id"), str) and bool(row["message_id"]),
+                     location, "assistant message has no identity")
         elif event in ("run_waiting", "run_resumed"):
             _require(active is None and waiting == (event == "run_resumed"),
                      location, f"unexpected {event} in the current segment state")
@@ -136,6 +155,7 @@ def _read_segment(path: Path, session_id: str) -> tuple[str | None, Segment]:
             raise _UnusableTrace(f"{location}: unexpected event {event!r}")
 
     _require(active is None, path.name, "missing tool_end before run_end")
+    _require(active_model is None, path.name, "missing model_end before run_end")
     _require(end["status"] != "waiting_for_user" or waiting, path.name, "missing run_waiting before pause")
     _require(end["status"] != "completed" or not waiting, path.name, "run completed while waiting for an answer")
     return parent, Segment(tuple(steps), end["status"])

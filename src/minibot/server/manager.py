@@ -30,6 +30,7 @@ from ..skills.loader import SkillLoader
 from ..subagents.registry import AgentType
 
 from ._streamed_turn import TurnSource
+from ..trace_view import MiniBotTraceAdapter, TraceAdapter, TraceSession
 from .bots import BotStore, DEFAULT_BOT_ID
 from .dashboard_store import DashboardStore
 from .platform_runtime import FeishuPlatformRuntime
@@ -581,6 +582,24 @@ class AgentManager:
             raise ValueError("Session not found")
         return self._serialize_messages(session_mgr.load(session_id))
 
+    def session_trace(self, bot_id: str, session_id: str) -> TraceSession:
+        if not session_id or any(character in session_id for character in "/\\*?[]\0"):
+            raise KeyError(session_id)
+        if not self.bot_exists(bot_id):
+            raise KeyError(bot_id)
+        sessions = self.sessions_for(bot_id)
+        if not sessions.exists(session_id):
+            raise KeyError(session_id)
+        directory = self._base_config.trace_dir
+        allow_unowned = directory is not None and not any(
+            other_id != bot_id and self.sessions_for(other_id).exists(session_id)
+            for other_id in self._bot_store.all_bot_ids()
+        )
+        adapter: TraceAdapter = MiniBotTraceAdapter(
+            Path(directory) if directory is not None else None, bot_id, sessions, allow_unowned=allow_unowned,
+        )
+        return adapter.read_session(session_id)
+
     def submit_tool_approval(self, bot_id: str, session_id: str, approval_id: str, approved: bool) -> None:
         """Resolve a live invocation without locking its waiting chat stream."""
         bot = self._bots.get((bot_id, session_id))
@@ -1067,6 +1086,7 @@ class AgentManager:
 
         home = self._bot_store.bot_home(bot_id)
         cfg.app_home = home
+        cfg.trace_bot_id = bot_id
         cfg.session.sessions_dir = str((home / "sessions").resolve())
 
         llm = data.get("llm")

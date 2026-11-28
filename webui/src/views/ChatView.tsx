@@ -34,6 +34,7 @@ import {
 } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { IconButton } from "../components/IconButton";
+import ChatTraceView from "./ChatTraceView";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { ToolApprovalCard } from "./ToolApprovalCard";
 import { countHiddenTurnsBeforeIndex } from "./chatHistoryWindow";
@@ -54,7 +55,7 @@ const STARTER_PROMPTS = [
   { key: "plan", icon: ListChecks },
 ] as const;
 
-type InspectorPane = "activity" | "context" | "plan";
+type InspectorPane = "activity" | "context" | "plan" | "trace";
 type DeletionTarget =
   | { kind: "session"; sessionId: string }
   | { kind: "turn"; sessionId: string; messageId: string };
@@ -950,7 +951,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     );
   }
 
-  const inspectorItems: InspectorPane[] = todoVisible ? ["activity", "context", "plan"] : ["activity", "context"];
+  const inspectorItems: InspectorPane[] = todoVisible ? ["activity", "context", "plan", "trace"] : ["activity", "context", "trace"];
   const inspectorContent = (
     <>
       <nav className="chat-inspector-tabs" aria-label={t("chat.inspector.label")}>
@@ -977,7 +978,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           />
         ) : null}
       </nav>
-      <div className="chat-inspector-body">
+      <div className={classNames("chat-inspector-body", activeInspectorPane === "trace" && "chat-inspector-body-trace")}>
         {activeInspectorPane === "activity" ? (
           <>
             <div className="chat-inspector-tools">
@@ -1030,6 +1031,17 @@ export default function ChatView(props: { botId: string; botName?: string }) {
               </div>
             </div>
           </div>
+        ) : activeInspectorPane === "trace" ? (
+          sessionId ? (
+            <ChatTraceView
+              key={JSON.stringify([selection.bot.id, sessionId])}
+              botId={selection.bot.id}
+              sessionId={sessionId}
+              sessionTitle={sessionTitle}
+              streaming={streaming}
+              tooltipContainer={mobileInspectorDialog.current}
+            />
+          ) : <p className="chat-inspector-empty">{t("chat.trace.noSession")}</p>
         ) : todoDockContent}
       </div>
     </>
@@ -1416,7 +1428,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
       </section>
 
       {desktop && desktopInspectorOpen ? (
-        <aside className="chat-inspector" aria-label={t("chat.inspector.label")}>
+        <aside className={classNames("chat-inspector", activeInspectorPane === "trace" && "chat-inspector-trace")} aria-label={t("chat.inspector.label")}>
           {inspectorContent}
         </aside>
       ) : null}
