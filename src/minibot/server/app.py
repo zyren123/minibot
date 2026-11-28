@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncGenerator
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager, contextmanager
+from functools import partial
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
 
 from ..config.schema import WorkspaceMemoryProvider
 from ..memory.remote_novelmemo import RemoteNovelMemoUnavailable
-from ..memory.workspace import MemoryRevisionConflict, call_memory_operation
-from .manager import AgentManager, MemoryWorkspaceChanged
+from ..memory.source import MemoryWorkspaceChanged
+from ..memory.workspace import MemoryRevisionConflict
+from ._streamed_turn import StreamedTurn, TurnSource
+from .manager import AgentManager
 from .models import (
     AvailableModelResponse,
     BotConfigResponse,
@@ -75,6 +79,60 @@ def _memory_workspace_http_errors() -> Iterator[None]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="Permission denied while accessing memory") from exc
+
+
+def _frame_stream_event(event: dict[str, Any]) -> str:
+    payload = json.dumps(event, ensure_ascii=False)
+    return f"event: {event.get('type', 'message')}\ndata: {payload}\n\n"
+
+
+class _TurnStreamingResponse(StreamingResponse):
+    def __init__(
+        self, request: Request, session_id: str, turn: StreamedTurn, *,
+        start: Literal["after_headers", "lock_before_headers", "prepare_before_headers"] = "after_headers",
+        new_session: bool = False,
+    ) -> None:
+        self._request = request
+        self._session_id = session_id
+        self._turn = turn
+        self._start = start
+        self._new_session = new_session
+        self._chunks = self._stream_chunks()
+        super().__init__(
+            self._chunks,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async with AsyncExitStack() as stack:
+            if self._start != "after_headers":
+                await stack.enter_async_context(self._turn.hold())
+            if self._start == "prepare_before_headers":
+                await self._turn.prepare()
+            await super().__call__(scope, receive, send)
+
+    async def stream_response(self, send: Send) -> None:
+        async with aclosing(self._chunks):
+            await super().stream_response(send)
+
+    async def _stream_chunks(self) -> AsyncGenerator[str, None]:
+        async with AsyncExitStack() as stack:
+            if self._start == "after_headers":
+                await stack.enter_async_context(self._turn.hold())
+            if self._new_session:
+                yield _frame_stream_event({
+                    "type": "system", "session_id": self._session_id, "message": "session_created",
+                })
+            try:
+                async for event in self._turn:
+                    if await self._request.is_disconnected():
+                        return
+                    yield _frame_stream_event(event)
+            except Exception as exc:
+                yield _frame_stream_event({
+                    "type": "system", "session_id": self._session_id, "message": str(exc),
+                })
 
 
 def _resolve_static_dir(server_dir: Path) -> Path | None:
@@ -195,14 +253,12 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/bots/{bot_id}/memory/workspace")
     async def get_memory_workspace(bot_id: str, provider: WorkspaceMemoryProvider, path: str = "") -> dict[str, Any]:
         with _memory_workspace_http_errors():
-            workspace = await manager.open_active_memory_workspace(bot_id, provider)
-            return await call_memory_operation(workspace.directory, path)
+            return await manager.active_memory_source(bot_id, provider).directory(path)
 
     @app.get("/api/bots/{bot_id}/memory/workspace/document")
     async def get_memory_workspace_document(bot_id: str, provider: WorkspaceMemoryProvider, path: str) -> dict[str, Any]:
         with _memory_workspace_http_errors():
-            workspace = await manager.open_active_memory_workspace(bot_id, provider)
-            return await call_memory_operation(workspace.document, path)
+            return await manager.active_memory_source(bot_id, provider).document(path)
 
     @app.put("/api/bots/{bot_id}/memory/workspace/document")
     async def put_memory_workspace_document(bot_id: str, update: MemoryWorkspaceDocumentUpdate) -> dict[str, Any]:
@@ -215,14 +271,12 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
     @app.get("/api/bots/{bot_id}/memory/workspace/search")
     async def search_memory_workspace(bot_id: str, provider: WorkspaceMemoryProvider, query: str) -> list[dict[str, Any]]:
         with _memory_workspace_http_errors():
-            workspace = await manager.open_active_memory_workspace(bot_id, provider)
-            return await call_memory_operation(workspace.search, query)
+            return await manager.active_memory_source(bot_id, provider).search(query)
 
     @app.get("/api/bots/{bot_id}/memory/workspace/graph")
     async def get_memory_workspace_graph(bot_id: str, provider: WorkspaceMemoryProvider) -> list[dict[str, Any]]:
         with _memory_workspace_http_errors():
-            workspace = await manager.open_active_memory_workspace(bot_id, provider)
-            return await call_memory_operation(workspace.graph)
+            return await manager.active_memory_source(bot_id, provider).graph()
 
     @app.get("/api/bots/{bot_id}/memory/namespaces")
     async def list_memory_namespaces(bot_id: str) -> Any:
@@ -481,50 +535,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         request: Request,
     ) -> StreamingResponse:
         lock = await manager.session_lock(bot_id, session_id)
-        await lock.acquire()
-
-        def _frame(*, event: str, data: str) -> str:
-            return f"event: {event}\ndata: {data}\n\n"
-
-        async def _cancel_active_bot() -> None:
-            try:
-                bot = await manager.get_bot(bot_id, session_id)
-            except Exception:
-                return
-            bot.cancel()
-
-        async def _gen() -> AsyncIterator[str]:
-            try:
-                async for event in manager.submit_user_answer_stream(
-                    bot_id,
-                    session_id,
-                    req.model_dump(exclude_unset=True),
-                ):
-                    if await request.is_disconnected():
-                        await _cancel_active_bot()
-                        break
-                    payload = json.dumps(event, ensure_ascii=False)
-                    yield _frame(event=event.get("type", "message"), data=payload)
-            except asyncio.CancelledError:
-                await _cancel_active_bot()
-                raise
-            except Exception as exc:
-                yield _frame(
-                    event="system",
-                    data=json.dumps(
-                        {"type": "system", "session_id": session_id, "message": str(exc)},
-                        ensure_ascii=False,
-                    ),
-                )
-            finally:
-                if lock.locked():
-                    lock.release()
-
-        return StreamingResponse(
-            _gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+        turn = StreamedTurn(lock, partial(
+            manager.prepare_user_answer_stream, bot_id, session_id, req.model_dump(exclude_unset=True),
+        ))
+        return _TurnStreamingResponse(request, session_id, turn, start="lock_before_headers")
 
     @app.delete("/api/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, Any]:
@@ -576,59 +590,19 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         req: MessageRegenerateRequest,
         request: Request,
     ) -> StreamingResponse:
-        lock = await manager.session_lock(bot_id, session_id)
-        await lock.acquire()
-        try:
-            prompt = manager.prepare_regenerate_message_turn(bot_id, session_id, message_id)
-            bot = await manager.get_bot(bot_id, session_id)
-        except ValueError as exc:
-            if lock.locked():
-                lock.release()
-            detail = str(exc)
-            if detail == "Session not found":
-                raise HTTPException(status_code=404, detail=detail) from exc
-            raise HTTPException(status_code=400, detail=detail) from exc
-        except Exception:
-            if lock.locked():
-                lock.release()
-            raise
-
-        def _frame(*, event: str, data: str) -> str:
-            return f"event: {event}\ndata: {data}\n\n"
-
-        async def _gen() -> AsyncIterator[str]:
+        async def prepare() -> TurnSource:
             try:
-                async for event in bot.stream(
-                    prompt,
-                    session_id=session_id,
-                    reasoning_effort=req.reasoning_effort,
-                    stop_on_ask_user_question=True,
-                ):
-                    if await request.is_disconnected():
-                        bot.cancel()
-                        break
-                    payload = json.dumps(event, ensure_ascii=False)
-                    yield _frame(event=event.get("type", "message"), data=payload)
-            except asyncio.CancelledError:
-                bot.cancel()
-                raise
-            except Exception as exc:
-                yield _frame(
-                    event="system",
-                    data=json.dumps(
-                        {"type": "system", "session_id": session_id, "message": str(exc)},
-                        ensure_ascii=False,
-                    ),
-                )
-            finally:
-                if lock.locked():
-                    lock.release()
+                prompt = manager.prepare_regenerate_message_turn(bot_id, session_id, message_id)
+                return await _prepare_chat_source(bot_id, session_id, prompt, req.reasoning_effort)
+            except ValueError as exc:
+                detail = str(exc)
+                if detail == "Session not found":
+                    raise HTTPException(status_code=404, detail=detail) from exc
+                raise HTTPException(status_code=400, detail=detail) from exc
 
-        return StreamingResponse(
-            _gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+        lock = await manager.session_lock(bot_id, session_id)
+        turn = StreamedTurn(lock, prepare)
+        return _TurnStreamingResponse(request, session_id, turn, start="prepare_before_headers")
 
     @app.post("/api/sessions/{session_id}/cancel")
     async def cancel_session(session_id: str) -> dict[str, str]:
@@ -696,60 +670,17 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
             "usage": result.usage,
         }
 
+    async def _prepare_chat_source(
+        bot_id: str, session_id: str, prompt: str, reasoning_effort: str | None,
+    ) -> TurnSource:
+        bot = await manager.get_bot(bot_id, session_id)
+        return TurnSource(bot, bot.stream(
+            prompt, session_id=session_id, reasoning_effort=reasoning_effort, stop_on_ask_user_question=True,
+        ))
+
     @app.post("/api/stream")
     async def stream(req: ChatRequest, request: Request) -> StreamingResponse:
-        session_id = req.session_id or manager.sessions_for("default").create()
-        try:
-            manager.assert_bot_chat_ready("default")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        lock = await manager.session_lock("default", session_id)
-
-        def _frame(*, event: str, data: str) -> str:
-            return f"event: {event}\ndata: {data}\n\n"
-
-        async def _gen() -> AsyncIterator[str]:
-            async with lock:
-                if req.session_id is None:
-                    yield _frame(
-                        event="system",
-                        data=json.dumps(
-                            {"type": "system", "session_id": session_id, "message": "session_created"},
-                            ensure_ascii=False,
-                        ),
-                    )
-                bot = None
-                try:
-                    bot = await manager.get_bot("default", session_id)
-                    async for event in bot.stream(
-                        req.prompt,
-                        session_id=session_id,
-                        reasoning_effort=req.reasoning_effort,
-                        stop_on_ask_user_question=True,
-                    ):
-                        if await request.is_disconnected():
-                            bot.cancel()
-                            break
-                        payload = json.dumps(event, ensure_ascii=False)
-                        yield _frame(event=event.get("type", "message"), data=payload)
-                except asyncio.CancelledError:
-                    if bot is not None:
-                        bot.cancel()
-                    raise
-                except Exception as exc:
-                    yield _frame(
-                        event="system",
-                        data=json.dumps(
-                            {"type": "system", "session_id": session_id, "message": str(exc)},
-                            ensure_ascii=False,
-                        ),
-                    )
-
-        return StreamingResponse(
-            _gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+        return await bot_stream("default", req, request)
 
     @app.post("/api/bots/{bot_id}/stream")
     async def bot_stream(bot_id: str, req: ChatRequest, request: Request) -> StreamingResponse:
@@ -759,52 +690,10 @@ def create_app(*, workdir: str | Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         lock = await manager.session_lock(bot_id, session_id)
-
-        def _frame(*, event: str, data: str) -> str:
-            return f"event: {event}\ndata: {data}\n\n"
-
-        async def _gen() -> AsyncIterator[str]:
-            async with lock:
-                if req.session_id is None:
-                    yield _frame(
-                        event="system",
-                        data=json.dumps(
-                            {"type": "system", "session_id": session_id, "message": "session_created"},
-                            ensure_ascii=False,
-                        ),
-                    )
-                bot = None
-                try:
-                    bot = await manager.get_bot(bot_id, session_id)
-                    async for event in bot.stream(
-                        req.prompt,
-                        session_id=session_id,
-                        reasoning_effort=req.reasoning_effort,
-                        stop_on_ask_user_question=True,
-                    ):
-                        if await request.is_disconnected():
-                            bot.cancel()
-                            break
-                        payload = json.dumps(event, ensure_ascii=False)
-                        yield _frame(event=event.get("type", "message"), data=payload)
-                except asyncio.CancelledError:
-                    if bot is not None:
-                        bot.cancel()
-                    raise
-                except Exception as exc:
-                    yield _frame(
-                        event="system",
-                        data=json.dumps(
-                            {"type": "system", "session_id": session_id, "message": str(exc)},
-                            ensure_ascii=False,
-                        ),
-                    )
-
-        return StreamingResponse(
-            _gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
+        turn = StreamedTurn(lock, partial(
+            _prepare_chat_source, bot_id, session_id, req.prompt, req.reasoning_effort,
+        ))
+        return _TurnStreamingResponse(request, session_id, turn, new_session=req.session_id is None)
 
     static_dir = _resolve_static_dir(Path(__file__).resolve().parent)
     if static_dir is not None:

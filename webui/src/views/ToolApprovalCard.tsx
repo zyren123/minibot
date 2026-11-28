@@ -1,10 +1,5 @@
 import { useI18n } from "../lib/i18n";
-import type { ToolApprovalRequestEvent } from "../lib/types";
-
-export type PendingToolApproval = ToolApprovalRequestEvent & {
-  botId: string;
-  state: "pending" | "submitting" | "error";
-};
+import type { PendingToolApproval } from "./chatSessionState";
 
 export function ToolApprovalCard({ approval, onDecision }: {
   approval: PendingToolApproval;

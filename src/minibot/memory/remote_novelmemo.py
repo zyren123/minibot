@@ -38,7 +38,7 @@ class RemoteNovelMemoIncompatible(ValueError):
     """The service does not expose the expected Novel Memo tools."""
 
 
-def _normalized_url(value: str) -> str:
+def normalize_novelmemo_url(value: str) -> str:
     try:
         url = httpx.URL(value.strip())
         if (
@@ -118,7 +118,7 @@ class RemoteNovelMemoWorkspace:
     """A stateless client for the Agent and WebUI operations on one remote Vault."""
 
     def __init__(self, url: str):
-        self.url = _normalized_url(url)
+        self.url = normalize_novelmemo_url(url)
         endpoint_id = hashlib.sha256(self.url.encode("utf-8")).hexdigest()
         self._revision_prefix = f"mcp-v1:{endpoint_id}:"
 

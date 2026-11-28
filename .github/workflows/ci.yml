@@ -24,6 +24,7 @@ jobs:
         working-directory: webui
         run: |
           npm install --no-fund --no-audit
+          node --test tests/*.test.mjs
           npm run build
 
       - name: Sync WebUI dist into Python package

@@ -140,16 +140,17 @@ class ReviewClient(ScriptedProvider):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_decision", "human_approves", "written", "source"),
+    ("model_reply", "human_approves", "written", "source"),
     [
-        ('{"decision":"approve"}', False, True, "auto_review"),
-        ('{"decision":"deny"}', True, False, "auto_review"),
-        ('{"decision":"approve","decision":"approve"}', True, True, "human"),
-        ("approve", False, False, "human"),
+        (_response(content='{"decision":"approve"}'), False, True, "auto_review"),
+        (_response(content='{"decision":"deny"}'), True, False, "auto_review"),
+        (_response(content='{"decision":"approve","decision":"approve"}'), True, True, "human"),
+        (_response(content="approve"), False, False, "human"),
+        ({"output_text": '{"decision":"approve"}'}, False, False, "human"),
     ],
 )
 async def test_auto_review_uses_isolated_prompt_and_strict_decision(
-    tmp_path, model_decision, human_approves, written, source,
+    tmp_path, model_reply, human_approves, written, source,
 ):
     cfg = make_config(tmp_path, mode="auto_review", auto_review_paths=["notes/**"])
     requests = []
@@ -160,7 +161,7 @@ async def test_auto_review_uses_isolated_prompt_and_strict_decision(
 
     bot = Minibot(config=cfg, tool_approval_handler=human)
     bot.agent.client = ReviewClient(
-        write("notes/report.txt"), _response(content=model_decision), _response(content="Finished."),
+        write("notes/report.txt"), model_reply, _response(content="Finished."),
     )
     events = [event async for event in bot.stream("Write approved payload to notes/report.txt.")]
     assert (tmp_path / "notes" / "report.txt").exists() == written

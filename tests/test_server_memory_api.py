@@ -200,7 +200,22 @@ def test_file_memory_workspace_edits_markdown_and_rejects_stale_revision(client,
     assert (server_env["home"] / "memory" / today).read_text(encoding="utf-8") == "每日记录\n"
 
 
-def test_memory_workspace_switch_validates_vault_and_persists_per_bot(client, server_env):
+def test_memory_workspace_switch_validates_vault_and_persists_per_bot(client, server_env, monkeypatch):
+    bot_config = server_env["home"] / "bot.json"
+    read_text, write_text = Path.read_text, Path.write_text
+
+    def read_config(path, *args, **kwargs):
+        if path == bot_config:
+            assert kwargs.get("encoding") == "utf-8"
+        return read_text(path, *args, **kwargs)
+
+    def write_config(path, content, *args, **kwargs):
+        if path == bot_config:
+            assert kwargs.get("encoding") == "utf-8"
+        return write_text(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_config)
+    monkeypatch.setattr(Path, "write_text", write_config)
     config_url = f"{WORKSPACE}/config"
     invalid = client.put(config_url, json={"provider": "novelmemo", "vault_path": str(server_env["workdir"])})
     assert invalid.status_code == 400

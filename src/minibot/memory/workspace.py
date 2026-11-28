@@ -22,7 +22,6 @@ from ..config.schema import MemoryConfig
 from .manager import MemoryManager
 
 if TYPE_CHECKING:
-    from .remote_novelmemo import RemoteNovelMemoWorkspace
     from novelmemo.config import Config as NovelMemoConfig
     from novelmemo.storage.markdown.store import MarkdownVaultStore
     from novelmemo.storage.markdown.vault_layout import VaultLayout
@@ -626,22 +625,6 @@ def open_novelmemo_workspace(path: str | Path) -> NovelMemoWorkspace:
             return workspace
     except (OSError, RuntimeError, ImportError, yaml.YAMLError) as exc:
         raise ValueError("Novel Memo Vault could not be opened") from exc
-
-
-def open_memory_workspace(
-    config: MemoryConfig, app_home: Path, project_root: Path,
-) -> FileMemoryWorkspace | NovelMemoWorkspace | RemoteNovelMemoWorkspace:
-    if config.provider == "novelmemo":
-        if config.novelmemo_connection == "mcp":
-            from .remote_novelmemo import RemoteNovelMemoWorkspace
-
-            if not config.novelmemo_mcp_url:
-                raise ValueError("Enter a Novel Memo MCP server address first")
-            return RemoteNovelMemoWorkspace(config.novelmemo_mcp_url)
-        if not config.novelmemo_vault:
-            raise ValueError("Select a Novel Memo Vault to activate it")
-        return open_novelmemo_workspace(config.novelmemo_vault)
-    return FileMemoryWorkspace(config, app_home, project_root)
 
 
 async def call_memory_operation[**P, T](

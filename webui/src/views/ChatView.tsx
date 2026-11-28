@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import {
   Activity, ArrowDownLeft, ArrowUp, ChevronDown, ChevronRight, Copy, FileText, FlaskConical,
   FolderSearch, ListChecks, PanelLeft, PanelLeftClose, PanelLeftOpen, PanelRight, RefreshCw,
@@ -10,13 +10,10 @@ import remarkGfm from "remark-gfm";
 import type {
   AvailableModel,
   BotConfig,
-  ChatStreamEvent,
   Message,
   PendingQuestion,
   ReasoningEffort,
-  SessionMeta,
   StreamEvent,
-  TodoSnapshot,
   Usage,
 } from "../lib/types";
 import {
@@ -38,20 +35,18 @@ import {
 import { useI18n } from "../lib/i18n";
 import { IconButton } from "../components/IconButton";
 import { GenerationIndicator } from "./GenerationIndicator";
-import { ToolApprovalCard, type PendingToolApproval } from "./ToolApprovalCard";
+import { ToolApprovalCard } from "./ToolApprovalCard";
+import { countHiddenTurnsBeforeIndex } from "./chatHistoryWindow";
 import {
-  countHiddenTurnsBeforeIndex,
-  expandHistoryWindowStart,
-  findHistoryWindowStart,
-} from "./chatHistoryWindow";
-import {
-  buildToolRenderState,
-  normalizeStreamToolCalls,
-  type ToolInvocationView,
-} from "./chatToolState";
+  ChatSessionState,
+  contextSnapshotFromMessages,
+  type ChatBot,
+  type ChatRun,
+  type ChatSelection,
+  type PendingToolApproval,
+} from "./chatSessionState";
+import { buildToolRenderState, type ToolInvocationView } from "./chatToolState";
 
-const INITIAL_VISIBLE_HISTORY_TURNS = 24;
-const HISTORY_TURN_BATCH = 24;
 const DESKTOP_CHAT = "(min-width: 1024px)";
 const STARTER_PROMPTS = [
   { key: "explore", icon: FolderSearch },
@@ -60,19 +55,12 @@ const STARTER_PROMPTS = [
 ] as const;
 
 type InspectorPane = "activity" | "context" | "plan";
-type ChatRun = { botId: string; kind: "send" | "answer" | "regenerate" };
 type DeletionTarget =
   | { kind: "session"; sessionId: string }
   | { kind: "turn"; sessionId: string; messageId: string };
 type DeletionRequest =
   | { target: DeletionTarget; state: "confirm" | "submitting" }
   | { target: DeletionTarget; state: "error"; message: string };
-
-type ToolApprovalNotice = {
-  botId: string;
-  sessionId: string;
-  text: string;
-};
 
 function classNames(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -87,197 +75,12 @@ function hasVisibleAssistantContent(message: Message) {
   return Boolean(message.content?.trim() || message.reasoning?.trim());
 }
 
-function updateAssistantMessage(
-  messages: Message[],
-  messageId: string | undefined,
-  updater: (current: Message) => Message,
-  fallback?: () => Message,
-) {
-  if (messageId) {
-    const index = messages.findIndex((item) => item.message_id === messageId);
-    if (index >= 0) {
-      const next = [...messages];
-      next[index] = updater(next[index]);
-      return next;
-    }
-  }
-
-  const last = messages[messages.length - 1];
-  if (last && last.role === "assistant") {
-    const next = [...messages];
-    next[next.length - 1] = updater(last);
-    return next;
-  }
-
-  if (!fallback) return messages;
-  return [...messages, fallback()];
-}
-
-function findAssistantTurnBounds(messages: Message[], messageId: string) {
-  const assistantIndex = messages.findIndex((item) => item.message_id === messageId);
-  if (assistantIndex < 0) return null;
-
-  const assistantMessage = messages[assistantIndex];
-  if (assistantMessage.role !== "assistant") return null;
-
-  let userIndex = -1;
-  const parentUserMessageId = assistantMessage.parent_user_message_id?.trim();
-  if (parentUserMessageId) {
-    for (let index = assistantIndex; index >= 0; index -= 1) {
-      const candidate = messages[index];
-      if (candidate.role !== "user") continue;
-      if (candidate.message_id === parentUserMessageId) {
-        userIndex = index;
-        break;
-      }
-    }
-  }
-
-  if (userIndex < 0) {
-    for (let index = assistantIndex; index >= 0; index -= 1) {
-      if (messages[index].role === "user") {
-        userIndex = index;
-        break;
-      }
-    }
-  }
-
-  if (userIndex < 0) return null;
-
-  let turnEnd = messages.length;
-  for (let index = userIndex + 1; index < messages.length; index += 1) {
-    if (messages[index].role === "user") {
-      turnEnd = index;
-      break;
-    }
-  }
-
-  if (assistantIndex >= turnEnd) return null;
-  return { userIndex, turnEnd };
-}
-
-function removeAssistantTurn(messages: Message[], messageId: string, preserveUserMessage: boolean) {
-  const bounds = findAssistantTurnBounds(messages, messageId);
-  if (!bounds) return messages;
-  const turnStart = preserveUserMessage ? bounds.userIndex + 1 : bounds.userIndex;
-  return [...messages.slice(0, turnStart), ...messages.slice(bounds.turnEnd)];
-}
-
-function cleanPendingChoiceLabel(value: string) {
-  return value.replace(/\s+/g, " ").trim().replace(/[，,；;]+$/, "");
-}
-
-function derivePendingQuestionFromPrompt(question: PendingQuestion | null) {
-  if (!question) return null;
-  if (question.options.length > 0) return question;
-
-  const text = question.prompt.trim();
-  if (!text) return question;
-
-  const matches = Array.from(text.matchAll(/(^|[\s\n])(\d+)[.)、．]\s*/g));
-  if (matches.length < 2) return question;
-
-  const points = matches.map((match) => {
-    const start = match.index ?? 0;
-    const marker = match[0] ?? "";
-    return { start, contentStart: start + marker.length };
-  });
-  const intro = text.slice(0, points[0].start).trimEnd();
-  if (!intro || !(intro.endsWith(":") || intro.endsWith("：") || intro.includes("\n"))) {
-    return question;
-  }
-
-  const options = points
-    .map((point, index) => {
-      const end = index + 1 < points.length ? points[index + 1].start : text.length;
-      const label = cleanPendingChoiceLabel(text.slice(point.contentStart, end));
-      return label ? { label, value: label } : null;
-    })
-    .filter((option): option is { label: string; value: string } => Boolean(option && option.label.length <= 180));
-
-  if (options.length < 2) return question;
-
-  return {
-    ...question,
-    prompt: intro.endsWith(":") || intro.endsWith("：") ? intro.slice(0, -1).trimEnd() : intro,
-    options,
-  };
-}
-
 function usageParts(usage: Usage | null | undefined) {
   const total = usage?.total_tokens ?? null;
   const prompt = usage?.prompt_tokens ?? null;
   const completion = usage?.completion_tokens ?? null;
   if (total == null && prompt == null && completion == null) return null;
   return { total, prompt, completion };
-}
-
-function normalizeUsage(raw: unknown): Usage | null {
-  if (!raw || typeof raw !== "object") return null;
-  const usage = raw as Record<string, unknown>;
-  const normalized: Usage = {};
-  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
-    const value = usage[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      normalized[key] = value;
-    }
-  }
-  return Object.keys(normalized).length > 0 ? normalized : null;
-}
-
-type ContextSnapshot = {
-  totalTokens: number;
-  compacted: boolean;
-};
-
-function normalizeTodoSnapshot(raw: ChatStreamEvent["todo"] | undefined): TodoSnapshot | null {
-  if (!raw || typeof raw !== "object" || !Array.isArray(raw.items)) return null;
-  const items: TodoSnapshot["items"] = [];
-  raw.items.forEach((item, index) => {
-    if (!item || typeof item !== "object") return;
-    const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : `todo-${index + 1}`;
-    const label = typeof item.label === "string" ? item.label.trim() : "";
-    const status = item.status;
-    if (!label || (status !== "pending" && status !== "active" && status !== "done")) return;
-    const detail = typeof item.detail === "string" && item.detail.trim() ? item.detail.trim() : undefined;
-    items.push(detail ? { id, label, status, detail } : { id, label, status });
-  });
-  const completed =
-    typeof raw.completed === "number" && Number.isFinite(raw.completed)
-      ? raw.completed
-      : items.filter((item) => item.status === "done").length;
-  const total = typeof raw.total === "number" && Number.isFinite(raw.total) ? raw.total : items.length;
-  const title = typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "Current plan";
-  const completedAt = typeof raw.completed_at === "string" && raw.completed_at.trim() ? raw.completed_at : null;
-  return {
-    title,
-    items,
-    completed,
-    total,
-    visible: Boolean(raw.visible),
-    completed_at: completedAt,
-  };
-}
-
-function contextSnapshotFromMessages(messages: Message[]): ContextSnapshot | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    const contextUsage = usageParts(message.context_usage);
-    if (contextUsage?.total != null) {
-      return {
-        totalTokens: contextUsage.total,
-        compacted: true,
-      };
-    }
-    const usage = usageParts(message.usage);
-    if (usage?.total != null) {
-      return {
-        totalTokens: usage.total,
-        compacted: false,
-      };
-    }
-  }
-  return null;
 }
 
 async function copyText(text: string) {
@@ -383,21 +186,20 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const { botId, botName } = props;
   const { language, t } = useI18n();
 
-  const [sessions, setSessions] = useState<SessionMeta[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [visibleHistoryStartIndex, setVisibleHistoryStartIndex] = useState(0);
-  const [contextBySession, setContextBySession] = useState<Record<string, ContextSnapshot>>({});
+  const [chat] = useState(() => new ChatSessionState(botId));
+  const {
+    selection, sessions, messages, visibleHistoryStartIndex, contextBySession, activeRun, status,
+    pendingQuestion, todoSnapshot, toolApprovals: visibleToolApprovals, toolApprovalNotice,
+  } = useSyncExternalStore(chat.subscribe, chat.getSnapshot);
+  const { sessionId } = selection;
+  const messageActionId = activeRun?.token.kind === "regenerate" ? activeRun.token.messageId : null;
+
   const [prompt, setPrompt] = useState("");
-  const [chatRun, setChatRun] = useState<ChatRun | null>(null);
-  const [generatingRun, setGeneratingRun] = useState<ChatRun | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
   const [botConfig, setBotConfig] = useState<BotConfig | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | "">("");
   const [modelSaving, setModelSaving] = useState(false);
   const [deletionRequest, setDeletionRequest] = useState<DeletionRequest | null>(null);
-  const [messageActionId, setMessageActionId] = useState<string | null>(null);
   const [reasoningOpenById, setReasoningOpenById] = useState<Record<string, boolean>>({});
   const [toolOpenById, setToolOpenById] = useState<Record<string, boolean>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -409,12 +211,8 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const [activityMessageIndex, setActivityMessageIndex] = useState<number | null>(null);
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearch, setSessionSearch] = useState("");
-  const [todoSnapshot, setTodoSnapshot] = useState<TodoSnapshot | null>(null);
-  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [pendingAnswerDraft, setPendingAnswerDraft] = useState("");
   const [pendingCustomOpen, setPendingCustomOpen] = useState(false);
-  const [toolApprovals, setToolApprovals] = useState<PendingToolApproval[]>([]);
-  const [toolApprovalNotice, setToolApprovalNotice] = useState<ToolApprovalNotice | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -424,10 +222,6 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   const deleteDialog = useRef<HTMLDialogElement | null>(null);
   const deleteDialogId = useId();
   const sessionSearchRef = useRef<HTMLInputElement | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
-  const botIdRef = useRef(botId);
-  const chatRunRef = useRef<ChatRun | null>(null);
-  const sessionStateVersionRef = useRef(0);
 
   const sortedSessions = useMemo(
     () => [...sessions].sort((a, b) => b.modified_at.localeCompare(a.modified_at)),
@@ -527,11 +321,8 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     [messages, visibleHistoryStartIndex],
   );
 
-  const visibleToolApprovals = toolApprovals.filter((approval) => (
-    approval.botId === botId && approval.session_id === sessionId
-  ));
-  const streaming = chatRun?.botId === botId;
-  const submittingAnswer = streaming && chatRun.kind === "answer";
+  const streaming = Boolean(activeRun);
+  const submittingAnswer = activeRun?.token.kind === "answer";
   const chatBusy = streaming;
   const deletionDialogOpen = deletionRequest !== null;
   const deleting = deletionRequest?.state === "submitting";
@@ -540,153 +331,105 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     botConfig?.chat_disabled_reason ?? (botConfig?.enabled === false ? t("chat.fallbackDisabledReason") : null);
   const awaitingUserAnswer = Boolean(pendingQuestion);
   const isGenerating = streaming && !awaitingUserAnswer && visibleToolApprovals.length === 0
-    && generatingRun === chatRun;
+    && Boolean(activeRun?.generating);
   const approvalsInInspector = inspectorOpen && activeInspectorPane === "activity";
   const pendingQuestionMessageId = pendingQuestion?.message_id ?? null;
   const showPendingQuestionFallback = Boolean(
     pendingQuestion && (!pendingQuestionMessageId || !messages.some((item) => item.role === "assistant" && item.message_id === pendingQuestionMessageId)),
   );
 
-  function clearTodoState() {
-    setTodoSnapshot(null);
-  }
+  const resetMessagePresentation = useCallback(() => {
+    setReasoningOpenById({});
+    setToolOpenById({});
+    setActivityMessageIndex(null);
+  }, []);
 
-  function markSessionStateDirty() {
-    sessionStateVersionRef.current += 1;
-  }
+  const refreshSessions = useCallback(async (bot: ChatBot) => {
+    const ticket = chat.beginSessionListLoad(bot);
+    if (!ticket) return;
+    try {
+      chat.acceptSessionList(ticket, await listSessions(bot.id));
+    } catch (err) {
+      if (chat.ownsSessionListLoad(ticket)) throw err;
+    }
+  }, [chat]);
 
-  function syncContextSnapshot(targetSessionId: string, nextMessages: Message[]) {
-    setContextBySession((prev) => {
-      const next = { ...prev };
-      const snapshot = contextSnapshotFromMessages(nextMessages);
-      if (snapshot) {
-        next[targetSessionId] = snapshot;
-      } else {
-        delete next[targetSessionId];
-      }
-      return next;
-    });
-  }
-
-  async function refreshSessions(nextBotId: string = botId) {
-    const list = await listSessions(nextBotId);
-    if (botIdRef.current !== nextBotId) return;
-    setSessions(list);
-    setSessionId((prev) => {
-      if (prev && list.some((item) => item.session_id === prev)) return prev;
-      return list.length > 0 ? list[0].session_id : null;
-    });
-  }
-
-  async function refreshBotState(nextBotId: string = botId) {
-    const [cfg, models] = await Promise.all([getBotConfig(nextBotId), listAvailableModels()]);
-    if (botIdRef.current !== nextBotId) return;
+  const refreshBotState = useCallback(async (bot: ChatBot) => {
+    const [cfg, models] = await Promise.all([getBotConfig(bot.id), listAvailableModels()]);
+    if (!chat.ownsBot(bot)) return;
     setBotConfig(cfg);
     setAvailableModels(models);
-  }
+  }, [chat]);
 
-  async function ensureSession(run: ChatRun) {
-    if (sessionId) return sessionId;
-    const created = await createSession(run.botId);
-    if (!ownsChatRun(run)) return null;
-    setReasoningOpenById({});
-    setToolOpenById({});
-    clearTodoState();
-    sessionIdRef.current = created.session_id;
-    setSessionId(created.session_id);
-    await refreshSessions(botId);
-    return created.session_id;
-  }
-
-  async function selectSession(id: string, options?: { force?: boolean; run?: ChatRun }) {
-    const expectedVersion = sessionStateVersionRef.current;
-    const [sess, question] = await Promise.all([loadSession(botId, id), getPendingQuestion(botId, id)]);
-    if (botIdRef.current !== botId || sessionIdRef.current !== id) return;
-    if (options?.run && !ownsChatRun(options.run)) return;
-    if (!options?.force && sessionStateVersionRef.current !== expectedVersion) return;
-    setReasoningOpenById({});
-    setToolOpenById({});
-    setActivityMessageIndex(null);
-    clearTodoState();
-    setMessages(sess.messages);
-    setVisibleHistoryStartIndex(findHistoryWindowStart(sess.messages, INITIAL_VISIBLE_HISTORY_TURNS));
-    syncContextSnapshot(id, sess.messages);
-    setPendingQuestion(derivePendingQuestionFromPrompt(question));
-    if (!question) {
-      setPendingAnswerDraft("");
-      setPendingCustomOpen(false);
+  const loadSaved = useCallback(async (target: ChatSelection, run?: ChatRun) => {
+    if (!target.sessionId) return;
+    const ticket = chat.beginLoad(target, run);
+    if (!ticket) return;
+    const id = target.sessionId;
+    try {
+      const [saved, question] = await Promise.all([
+        loadSession(target.bot.id, id),
+        getPendingQuestion(target.bot.id, id),
+      ]);
+      if (chat.acceptSaved(ticket, saved.messages, question)) resetMessagePresentation();
+    } catch (err) {
+      if (chat.ownsLoad(ticket)) throw err;
     }
-  }
+  }, [chat, resetMessagePresentation]);
 
   async function startNewSession() {
+    const bot = selection.bot;
+    const creation = chat.beginSessionCreation(bot);
+    if (!creation) return;
+    chat.reportStatus(null);
+    let created: Awaited<ReturnType<typeof createSession>>;
     try {
-      setStatus(null);
-      const result = await createSession(botId);
-      if (botIdRef.current !== botId) return;
-      markSessionStateDirty();
-      setReasoningOpenById({});
-      setToolOpenById({});
-      clearTodoState();
-      setPendingQuestion(null);
-      setPendingAnswerDraft("");
-      setPendingCustomOpen(false);
-      setMessages([]);
-      setVisibleHistoryStartIndex(0);
-      setActivityMessageIndex(null);
-      setSessionId(result.session_id);
-      setMobileSessionsOpen(false);
-      await refreshSessions(botId);
+      created = await createSession(bot.id);
     } catch (err) {
-      setMobileSessionsOpen(false);
-      setStatus(errorMessage(err));
+      if (chat.finishSessionCreation(creation)) {
+        setMobileSessionsOpen(false);
+        chat.reportStatus(errorMessage(err));
+      }
+      return;
     }
+    if (!chat.ownsBot(bot)) return;
+    if (chat.activateCreatedSession(creation, created.session_id)) {
+      resetMessagePresentation();
+      setMobileSessionsOpen(false);
+    }
+    await refreshSessions(bot).catch((err) => {
+      if (chat.ownsBot(bot)) chat.reportStatus(errorMessage(err));
+    });
   }
 
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-    botIdRef.current = botId;
-    setToolApprovals((current) => current.filter((approval) => (
-      approval.botId === botId && approval.session_id === sessionId
-    )));
-    setToolApprovalNotice((current) => (
-      current?.botId === botId && current.sessionId === sessionId ? current : null
-    ));
-  }, [botId, sessionId]);
-
-  useEffect(() => {
-    markSessionStateDirty();
-    setSessionId(null);
-    setMessages([]);
-    setVisibleHistoryStartIndex(0);
-    setContextBySession({});
-    chatRunRef.current = null;
-    setChatRun(null);
-    setGeneratingRun(null);
-    setActivityMessageIndex(null);
+  useLayoutEffect(() => {
+    const bot = chat.selectBot(botId);
+    resetMessagePresentation();
     setMobileInspectorOpen(false);
     setInspectorPane("activity");
     setSessionSearch("");
     setSessionSearchOpen(false);
     setDeletionRequest(null);
-    setStatus(null);
     setReasoningEffort("");
-    setMessageActionId(null);
-    setReasoningOpenById({});
-    setToolOpenById({});
-    clearTodoState();
-    setPendingQuestion(null);
-    setPendingAnswerDraft("");
-    setPendingCustomOpen(false);
+    setModelSaving(false);
+    setBotConfig(null);
     setMobileSessionsOpen(false);
-    Promise.all([refreshSessions(botId), refreshBotState(botId)]).catch((err) => setStatus(errorMessage(err)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId]);
+    Promise.all([refreshSessions(bot), refreshBotState(bot)]).catch((err) => {
+      if (chat.ownsBot(bot)) chat.reportStatus(errorMessage(err));
+    });
+  }, [botId, chat, refreshBotState, refreshSessions, resetMessagePresentation]);
 
   useEffect(() => {
-    if (!sessionId) return;
-    selectSession(sessionId).catch((err) => setStatus(errorMessage(err)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+    loadSaved(selection).catch((err) => {
+      if (chat.ownsSelection(selection)) chat.reportStatus(errorMessage(err));
+    });
+  }, [chat, loadSaved, selection]);
+
+  const pendingQuestionId = pendingQuestion?.question_id;
+  useEffect(() => {
+    setPendingAnswerDraft("");
+    setPendingCustomOpen(false);
+  }, [selection, pendingQuestionId]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -745,365 +488,43 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     else setMobileInspectorOpen(true);
   }
 
-  function removeToolApproval(bot: string, session: string, approvalId: string) {
-    setToolApprovals((current) => current.filter((approval) => (
-      approval.botId !== bot || approval.session_id !== session || approval.approval_id !== approvalId
-    )));
-  }
-
-  function clearToolApprovals(bot: string, session: string) {
-    setToolApprovals((current) => current.filter((approval) => (
-      approval.botId !== bot || approval.session_id !== session
-    )));
-  }
-
-  function applyStreamEvent(ev: StreamEvent, streamSessionId: string, run: ChatRun) {
-    if (ev.type === "model_generation_start") {
-      setGeneratingRun(run);
-      return;
-    }
-    if (ev.type === "model_generation_end") {
-      setGeneratingRun(null);
-      return;
-    }
-    if (ev.type === "tool_approval_request" || ev.type === "tool_approval_resolved") {
-      if (
-        ev.session_id !== streamSessionId ||
-        botIdRef.current !== botId || sessionIdRef.current !== streamSessionId
-      ) return;
-
-      if (ev.type === "tool_approval_request") {
-        if (desktop) openInspector("activity");
-        setToolApprovals((current) => current.some((approval) => approval.approval_id === ev.approval_id)
-          ? current
-          : [...current, { ...ev, botId, state: "pending" }]);
-      } else {
-        removeToolApproval(botId, streamSessionId, ev.approval_id);
-        if (ev.approval_source === "auto_review" && ev.tool_name) {
-          setToolApprovalNotice({
-            botId,
-            sessionId: streamSessionId,
-            text: t(ev.approved ? "chat.approval.autoApproved" : "chat.approval.autoDenied", { tool: ev.tool_name }),
-          });
-        }
-      }
-      return;
-    }
-
-    if (ev.type === "todo_snapshot") {
-      setTodoSnapshot(normalizeTodoSnapshot(ev.todo));
-      return;
-    }
-
-    if (ev.type === "assistant_start") {
-      markSessionStateDirty();
-      setMessages((prev) =>
-        updateAssistantMessage(
-          prev,
-          ev.message_id,
-          (current) => ({
-            ...current,
-            message_id: ev.message_id ?? current.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
-            completion_state: current.completion_state ?? "complete",
-          }),
-          () => ({
-            role: "assistant",
-            content: "",
-            message_id: ev.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? null,
-            completion_state: "complete",
-            reasoning: "",
-          }),
-        ),
-      );
-      return;
-    }
-
-    if (ev.type === "assistant_reasoning_delta") {
-      markSessionStateDirty();
-      setMessages((prev) =>
-        updateAssistantMessage(
-          prev,
-          ev.message_id,
-          (current) => ({
-            ...current,
-            message_id: ev.message_id ?? current.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
-            completion_state: current.completion_state ?? "complete",
-            reasoning: `${current.reasoning ?? ""}${ev.reasoning_text ?? ""}`,
-          }),
-          () => ({
-            role: "assistant",
-            content: "",
-            message_id: ev.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? null,
-            completion_state: "complete",
-            reasoning: ev.reasoning_text ?? "",
-          }),
-        ),
-      );
-      return;
-    }
-
-    if (ev.type === "assistant_delta") {
-      markSessionStateDirty();
-      setMessages((prev) =>
-        updateAssistantMessage(
-          prev,
-          ev.message_id,
-          (current) => ({
-            ...current,
-            message_id: ev.message_id ?? current.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
-            completion_state: current.completion_state ?? "complete",
-            content: `${current.content ?? ""}${ev.delta_text ?? ""}`,
-          }),
-          () => ({
-            role: "assistant",
-            content: ev.delta_text ?? "",
-            message_id: ev.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? null,
-            completion_state: "complete",
-            reasoning: "",
-          }),
-        ),
-      );
-      return;
-    }
-
-    if (ev.type === "assistant_end") {
-      markSessionStateDirty();
-      setMessages((prev) =>
-        updateAssistantMessage(
-          prev,
-          ev.message_id,
-          (current) => ({
-            ...current,
-            message_id: ev.message_id ?? current.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
-            completion_state: "complete",
-            content: typeof ev.content === "string" ? ev.content : current.content,
-            reasoning: typeof ev.reasoning === "string" ? ev.reasoning : current.reasoning,
-            usage: ev.usage ?? current.usage ?? null,
-            tool_calls: ev.tool_calls ? normalizeStreamToolCalls(ev.tool_calls) : current.tool_calls ?? [],
-          }),
-          () => ({
-            role: "assistant",
-            content: ev.content ?? "",
-            message_id: ev.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? null,
-            completion_state: "complete",
-            reasoning: ev.reasoning ?? "",
-            usage: ev.usage ?? null,
-            tool_calls: normalizeStreamToolCalls(ev.tool_calls),
-          }),
-        ),
-      );
-      return;
-    }
-
-    if (ev.type === "ask_user_question") {
-      const usage = normalizeUsage(ev.usage);
-      const contextUsage = normalizeUsage(ev.context_usage);
-      const contextTokens = contextUsage?.total_tokens;
-      const usageTokens = usage?.total_tokens;
-      const targetSessionId = ev.session_id ?? sessionId;
-      const nextQuestion = derivePendingQuestionFromPrompt({
-        question_id: ev.question_id ?? "",
-        message_id: ev.message_id ?? null,
-        prompt: ev.prompt ?? "",
-        options: ev.options ?? [],
-        allow_free_text: Boolean(ev.allow_free_text),
-        required: Boolean(ev.required),
-      });
-      markSessionStateDirty();
-      setPendingQuestion(nextQuestion);
-      setPendingAnswerDraft("");
-      setPendingCustomOpen(false);
-      setMessages((prev) =>
-        updateAssistantMessage(
-          prev,
-          ev.message_id,
-          (current) => ({
-            ...current,
-            message_id: ev.message_id ?? current.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? current.parent_user_message_id ?? null,
-            content: current.content?.trim() ? current.content : nextQuestion?.prompt ?? ev.prompt ?? current.content,
-            usage: usage ?? current.usage ?? null,
-            context_usage: contextUsage ?? current.context_usage ?? null,
-          }),
-          () => ({
-            role: "assistant",
-            content: nextQuestion?.prompt ?? ev.prompt ?? "",
-            message_id: ev.message_id ?? null,
-            parent_user_message_id: ev.parent_user_message_id ?? null,
-            reasoning: "",
-            usage,
-            context_usage: contextUsage,
-          }),
-        ),
-      );
-      if (targetSessionId && contextTokens != null) {
-        setContextBySession((prev) => ({
-          ...prev,
-          [targetSessionId]: {
-            totalTokens: contextTokens,
-            compacted: Boolean(ev.context_compacted),
-          },
-        }));
-      } else if (targetSessionId && usageTokens != null) {
-        setContextBySession((prev) => ({
-          ...prev,
-          [targetSessionId]: {
-            totalTokens: usageTokens,
-            compacted: false,
-          },
-        }));
-      }
-      return;
-    }
-
-    if (ev.type === "ask_user_answer_received") {
-      markSessionStateDirty();
-      setPendingQuestion(null);
-      setPendingAnswerDraft("");
-      setPendingCustomOpen(false);
-      if (run.kind === "answer") return;
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "user",
-          content: ev.answer_text ?? "",
-        },
-      ]);
-      return;
-    }
-
-    if (ev.type === "tool_call") {
-      return;
-    }
-
-    if (ev.type === "tool_result") {
-      markSessionStateDirty();
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "tool",
-          content: ev.tool_output ?? "",
-          tool_call_id: ev.tool_call_id,
-          tool_name: ev.tool_name ?? null,
-          tool_args: ev.tool_args ?? null,
-          is_error: ev.is_error ?? null,
-          tool_status: ev.tool_status,
-          tool_exit_code: ev.tool_exit_code,
-          tool_artifact_id: ev.tool_artifact_id,
-          tool_hook_error: ev.tool_hook_error,
-          tool_hook_phase: ev.tool_hook_phase,
-        },
-      ]);
-      return;
-    }
-
-    if (ev.type === "system" && typeof ev.message === "string" && ev.message !== "session_created") {
-      const targetSessionId = ev.session_id ?? sessionId;
-      const usage = normalizeUsage(ev.data?.usage);
-      const contextUsage = normalizeUsage(ev.data?.context_usage);
-      const contextTokens = contextUsage?.total_tokens;
-      const usageTokens = usage?.total_tokens;
-      if (targetSessionId && contextTokens != null) {
-        setContextBySession((prev) => ({
-          ...prev,
-          [targetSessionId]: {
-            totalTokens: contextTokens,
-            compacted: Boolean(ev.data?.context_compacted),
-          },
-        }));
-      } else if (targetSessionId && usageTokens != null) {
-        setContextBySession((prev) => ({
-          ...prev,
-          [targetSessionId]: {
-            totalTokens: usageTokens,
-            compacted: false,
-          },
-        }));
-      }
-      setStatus(ev.message);
-    }
-  }
-
-  function beginChatRun(kind: ChatRun["kind"]): ChatRun {
-    const run = { botId, kind };
-    chatRunRef.current = run;
-    setChatRun(run);
-    setGeneratingRun(null);
-    setActivityMessageIndex(null);
-    clearTodoState();
-    return run;
-  }
-
-  function ownsChatRun(run: ChatRun) {
-    return chatRunRef.current === run && botIdRef.current === run.botId;
-  }
-
-  function finishChatRun(run: ChatRun) {
-    if (!ownsChatRun(run)) return;
-    chatRunRef.current = null;
-    setChatRun(null);
-    setGeneratingRun(null);
-    if (run.kind === "regenerate") setMessageActionId(null);
-  }
-
   async function consumeChatStream(events: AsyncIterable<StreamEvent>, streamSessionId: string, run: ChatRun) {
-    setToolApprovalNotice(null);
     try {
       for await (const event of events) {
-        if (ownsChatRun(run) && sessionIdRef.current === streamSessionId) {
-          applyStreamEvent(event, streamSessionId, run);
-        }
+        const projected = chat.applyStreamEvent(run, streamSessionId, event);
+        if (projected && event.type === "tool_approval_request" && desktop) openInspector("activity");
       }
     } finally {
-      if (ownsChatRun(run)) {
-        setGeneratingRun(null);
-        clearToolApprovals(run.botId, streamSessionId);
-      }
+      chat.endStreaming(run, streamSessionId);
     }
   }
 
-  async function refreshAfterRun(run: ChatRun, sid: string) {
-    if (!ownsChatRun(run)) return;
-    await refreshSessions(run.botId);
-    if (!ownsChatRun(run)) return;
-    await selectSession(sid, { force: true, run });
-    if (ownsChatRun(run)) await refreshBotState(run.botId);
+  async function refreshAfterRun(run: ChatRun, target: ChatSelection) {
+    if (!chat.ownsRun(run)) return;
+    await refreshSessions(run.bot);
+    if (!chat.ownsRun(run)) return;
+    await loadSaved(target, run);
+    if (chat.ownsRun(run)) await refreshBotState(run.bot);
+  }
+
+  async function refreshAfterFailedRun(run: ChatRun) {
+    if (chat.ownsRun(run)) await refreshSessions(run.bot).catch(() => null);
+    if (chat.ownsRun(run)) await refreshBotState(run.bot).catch(() => null);
   }
 
   async function onSubmitToolApproval(approval: PendingToolApproval, approved: boolean) {
-    if (approval.state === "submitting" || approval.botId !== botId || approval.session_id !== sessionId) return;
-    const matches = (item: PendingToolApproval) => (
-      item.botId === approval.botId &&
-      item.session_id === approval.session_id &&
-      item.approval_id === approval.approval_id
-    );
-    setToolApprovals((current) => current.map((item) => matches(item) ? { ...item, state: "submitting" } : item));
+    const decision = chat.beginApproval(approval);
+    if (!decision) return;
     try {
       const result = await submitToolApproval({
-        botId: approval.botId,
+        botId: decision.selection.bot.id,
         sessionId: approval.session_id,
-        approvalId: approval.approval_id,
+        approvalId: decision.id,
         approved,
       });
-      removeToolApproval(approval.botId, approval.session_id, approval.approval_id);
-      if (result === "stale" && botIdRef.current === approval.botId &&
-          sessionIdRef.current === approval.session_id) {
-        setToolApprovalNotice({
-          botId: approval.botId,
-          sessionId: approval.session_id,
-          text: t("chat.approval.stale"),
-        });
-      }
+      chat.finishApproval(decision, result);
     } catch {
-      setToolApprovals((current) => current.map((item) => matches(item) ? { ...item, state: "error" } : item));
+      chat.finishApproval(decision, "error");
     }
   }
 
@@ -1174,68 +595,69 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   }
 
   async function onSend() {
-    if (!prompt.trim() || chatRunRef.current || chatBlocked || awaitingUserAnswer) return;
-    setStatus(null);
-    const run = beginChatRun("send");
     const nextPrompt = prompt.trim();
-
+    if (!nextPrompt || chatBlocked) return;
+    const run = chat.beginSend(selection.bot);
+    if (!run) return;
+    setActivityMessageIndex(null);
     try {
-      const sid = await ensureSession(run);
-      if (!sid || !ownsChatRun(run)) return;
-      markSessionStateDirty();
-      setMessages((prev) => [...prev, { role: "user", content: nextPrompt }]);
+      if (!chat.getSnapshot().selection.sessionId) {
+        const created = await createSession(run.bot.id);
+        if (!chat.bindSendSession(run, created.session_id)) return;
+        resetMessagePresentation();
+        await refreshSessions(run.bot);
+      }
+      const target = chat.getSnapshot().selection;
+      const id = target.sessionId;
+      if (!id || !chat.recordSend(run, nextPrompt)) return;
       setPrompt("");
-      await consumeChatStream(streamChat(run.botId, sid, nextPrompt, reasoningEffort || null), sid, run);
-      await refreshAfterRun(run, sid);
+      await consumeChatStream(streamChat(run.bot.id, id, nextPrompt, reasoningEffort || null), id, run);
+      await refreshAfterRun(run, target);
     } catch (err) {
-      if (!ownsChatRun(run)) return;
-      setStatus(errorMessage(err));
-      await refreshBotState(run.botId).catch(() => null);
+      if (!chat.ownsRun(run)) return;
+      chat.reportStatus(errorMessage(err));
+      await refreshBotState(run.bot).catch(() => null);
     } finally {
-      finishChatRun(run);
+      chat.finishRun(run);
     }
   }
 
   async function onSubmitPendingAnswer(option?: { label: string; value: string }) {
-    if (!sessionId || !pendingQuestion || chatRunRef.current?.kind === "answer") return;
     const answerText = option ? option.label : pendingAnswerDraft.trim();
     if (!answerText) return;
-    setStatus(null);
-    const run = beginChatRun("answer");
-    const optimisticQuestion = pendingQuestion;
-    markSessionStateDirty();
-    setPendingQuestion(null);
+    const run = chat.beginAnswer(selection.bot, answerText);
+    if (!run) return;
+
+    setActivityMessageIndex(null);
     setPendingAnswerDraft("");
     setPendingCustomOpen(false);
-    setMessages((prev) => [...prev, { role: "user", content: answerText }]);
     try {
-      await consumeChatStream(submitPendingQuestionAnswerStream(run.botId, sessionId, {
-        question_id: optimisticQuestion.question_id,
+      await consumeChatStream(submitPendingQuestionAnswerStream(run.bot.id, run.sessionId, {
+        question_id: run.questionId,
         answer_text: answerText,
         selected_option_value: option?.value ?? null,
-      }), sessionId, run);
-      await refreshAfterRun(run, sessionId);
+      }), run.sessionId, run);
+      await refreshAfterRun(run, selection);
     } catch (err) {
-      if (!ownsChatRun(run)) return;
-      setStatus(errorMessage(err));
-      await selectSession(sessionId, { force: true, run }).catch(() => null);
-      if (ownsChatRun(run)) await refreshSessions(run.botId).catch(() => null);
-      if (ownsChatRun(run)) await refreshBotState(run.botId).catch(() => null);
+      if (!chat.ownsRun(run)) return;
+      chat.reportStatus(errorMessage(err));
+      await loadSaved(selection, run).catch(() => null);
+      await refreshAfterFailedRun(run);
     } finally {
-      finishChatRun(run);
+      chat.finishRun(run);
     }
   }
 
   async function onStop() {
-    const run = chatRunRef.current;
-    if (!sessionId || !run) return;
+    const current = chat.getSnapshot();
+    const run = current.activeRun?.token;
+    const id = current.selection.sessionId;
+    if (!id || !run) return;
     try {
-      await cancelSession(run.botId, sessionId);
-      if (!ownsChatRun(run)) return;
-      setGeneratingRun(null);
-      clearToolApprovals(run.botId, sessionId);
+      await cancelSession(run.bot.id, id);
+      chat.endStreaming(run, id);
     } catch (err) {
-      if (ownsChatRun(run)) setStatus(errorMessage(err));
+      if (chat.ownsRun(run)) chat.reportStatus(errorMessage(err));
     }
   }
 
@@ -1243,49 +665,36 @@ export default function ChatView(props: { botId: string; botName?: string }) {
     if (!message.content?.trim()) return;
     try {
       await copyText(message.content);
-      setStatus(t("chat.status.copiedReply"));
+      if (chat.ownsSelection(selection)) chat.reportStatus(t("chat.status.copiedReply"));
     } catch (err) {
-      setStatus(errorMessage(err));
+      if (chat.ownsSelection(selection)) chat.reportStatus(errorMessage(err));
     }
   }
 
   async function onRegenerateMessage(messageId: string) {
-    if (!sessionId || chatRunRef.current) return;
-    const previousMessages = messages;
-    const optimisticMessages = removeAssistantTurn(previousMessages, messageId, true);
-    setMessageActionId(messageId);
-    setStatus(t("chat.status.regeneratingReply"));
-    const run = beginChatRun("regenerate");
+    const run = chat.beginRegenerate(selection.bot, messageId);
+    if (!run) return;
+    resetMessagePresentation();
+    chat.reportStatus(t("chat.status.regeneratingReply"));
     try {
-      markSessionStateDirty();
-      setReasoningOpenById({});
-      setToolOpenById({});
-      setMessages(optimisticMessages);
-      setVisibleHistoryStartIndex(findHistoryWindowStart(optimisticMessages, INITIAL_VISIBLE_HISTORY_TURNS));
-      syncContextSnapshot(sessionId, optimisticMessages);
       await consumeChatStream(
-        streamRegenerateSessionMessage(run.botId, sessionId, messageId, reasoningEffort || null),
-        sessionId,
+        streamRegenerateSessionMessage(run.bot.id, run.sessionId, messageId, reasoningEffort || null),
+        run.sessionId,
         run,
       );
-      await refreshAfterRun(run, sessionId);
-      if (ownsChatRun(run)) setStatus(t("chat.status.regeneratedReply"));
+      await refreshAfterRun(run, selection);
+      if (chat.ownsRun(run)) chat.reportStatus(t("chat.status.regeneratedReply"));
     } catch (err) {
-      if (!ownsChatRun(run)) return;
-      setStatus(errorMessage(err));
+      if (!chat.ownsRun(run)) return;
+      chat.reportStatus(errorMessage(err));
       try {
-        await selectSession(sessionId, { force: true, run });
+        await loadSaved(selection, run);
       } catch {
-        if (!ownsChatRun(run)) return;
-        markSessionStateDirty();
-        setMessages(previousMessages);
-        setVisibleHistoryStartIndex(findHistoryWindowStart(previousMessages, INITIAL_VISIBLE_HISTORY_TURNS));
-        syncContextSnapshot(sessionId, previousMessages);
+        chat.rollbackRegeneration(run);
       }
-      if (ownsChatRun(run)) await refreshSessions(run.botId).catch(() => null);
-      if (ownsChatRun(run)) await refreshBotState(run.botId).catch(() => null);
+      await refreshAfterFailedRun(run);
     } finally {
-      finishChatRun(run);
+      chat.finishRun(run);
     }
   }
 
@@ -1296,63 +705,50 @@ export default function ChatView(props: { botId: string; botName?: string }) {
   async function confirmDeletion() {
     if (!deletionRequest || deleting || chatBusy) return;
     const { target } = deletionRequest;
+    const bot = selection.bot;
     if (target.kind === "turn" && sessionId !== target.sessionId) return;
     setDeletionRequest({ target, state: "submitting" });
-    setStatus(null);
+    chat.reportStatus(null);
     try {
       if (target.kind === "turn") {
-        const result = await deleteSessionMessage(botId, target.sessionId, target.messageId);
-        if (botIdRef.current !== botId) return;
-        markSessionStateDirty();
-        setReasoningOpenById({});
-        setToolOpenById({});
-        setMessages(result.messages);
-        setActivityMessageIndex(null);
-        setVisibleHistoryStartIndex(findHistoryWindowStart(result.messages, INITIAL_VISIBLE_HISTORY_TURNS));
-        syncContextSnapshot(target.sessionId, result.messages);
-        setStatus(t("chat.status.deletedTurn"));
-      } else {
-        await deleteSession(botId, target.sessionId);
-        if (botIdRef.current !== botId) return;
-        if (sessionId === target.sessionId) {
-          markSessionStateDirty();
-          setSessionId(null);
-          setReasoningOpenById({});
-          setToolOpenById({});
-          setActivityMessageIndex(null);
-          setPendingQuestion(null);
-          clearTodoState();
-          setMessages([]);
-          setVisibleHistoryStartIndex(0);
+        const result = await deleteSessionMessage(bot.id, target.sessionId, target.messageId);
+        if (!chat.ownsBot(bot)) return;
+        if (chat.replaceDeletedTurn(selection, result.messages)) {
+          resetMessagePresentation();
+          chat.reportStatus(t("chat.status.deletedTurn"));
         }
-        setContextBySession((prev) => {
-          const next = { ...prev };
-          delete next[target.sessionId];
-          return next;
-        });
+      } else {
+        await deleteSession(bot.id, target.sessionId);
+        if (!chat.ownsBot(bot)) return;
+        chat.removeSession(bot, target.sessionId);
+        if (sessionId === target.sessionId) resetMessagePresentation();
       }
     } catch (err) {
-      if (botIdRef.current === botId) setDeletionRequest({ target, state: "error", message: errorMessage(err) });
+      if (chat.ownsBot(bot)) setDeletionRequest({ target, state: "error", message: errorMessage(err) });
       return;
     }
     setDeletionRequest(null);
-    await refreshSessions(botId).catch((err) => {
-      if (botIdRef.current === botId) setStatus(errorMessage(err));
+    await refreshSessions(bot).catch((err) => {
+      if (chat.ownsBot(bot)) chat.reportStatus(errorMessage(err));
     });
   }
 
   async function onSelectModel(nextModelId: string) {
     if (chatBusy) return;
+    const bot = selection.bot;
     setModelSaving(true);
-    setStatus(null);
+    chat.reportStatus(null);
     try {
-      await updateBotConfig(botId, { chat_model_id: nextModelId || null });
-      await refreshBotState(botId);
-      setStatus(nextModelId ? t("chat.status.chatModelUpdated") : t("chat.status.usingFallbackModel"));
+      await updateBotConfig(bot.id, { chat_model_id: nextModelId || null });
+      if (!chat.ownsBot(bot)) return;
+      await refreshBotState(bot);
+      if (chat.ownsBot(bot)) {
+        chat.reportStatus(nextModelId ? t("chat.status.chatModelUpdated") : t("chat.status.usingFallbackModel"));
+      }
     } catch (err) {
-      setStatus(errorMessage(err));
+      if (chat.ownsBot(bot)) chat.reportStatus(errorMessage(err));
     } finally {
-      setModelSaving(false);
+      if (chat.ownsBot(bot)) setModelSaving(false);
     }
   }
 
@@ -1362,12 +758,6 @@ export default function ChatView(props: { botId: string; botName?: string }) {
 
   function toggleToolInvocation(toolKey: string) {
     setToolOpenById((prev) => ({ ...prev, [toolKey]: !prev[toolKey] }));
-  }
-
-  function onLoadOlderMessages() {
-    setVisibleHistoryStartIndex((current) =>
-      expandHistoryWindowStart(messages, current, HISTORY_TURN_BATCH),
-    );
   }
 
   const sessionQuery = sessionSearch.trim().toLocaleLowerCase(sessionLocale);
@@ -1383,7 +773,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         aria-current={sessionId === item.session_id ? "true" : undefined}
         onClick={() => {
           setMobileSessionsOpen(false);
-          setSessionId(item.session_id);
+          chat.chooseSession(item.session_id);
         }}
         disabled={chatBusy}
         title={item.session_id}
@@ -1426,7 +816,9 @@ export default function ChatView(props: { botId: string; botName?: string }) {
         icon={RefreshCw}
         label={t("chat.sessions.refresh")}
         tooltipContainer={tooltipContainer}
-        onClick={() => void refreshSessions(botId).catch((err) => setStatus(errorMessage(err)))}
+        onClick={() => void refreshSessions(selection.bot).catch((err) => {
+          if (chat.ownsBot(selection.bot)) chat.reportStatus(errorMessage(err));
+        })}
         disabled={chatBusy}
       />
     </div>
@@ -1675,7 +1067,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                   type="button"
                   className="chat-button chat-icon-button"
                   aria-current={sessionId === item.session_id ? "true" : undefined}
-                  onClick={() => setSessionId(item.session_id)}
+                  onClick={() => chat.chooseSession(item.session_id)}
                   disabled={chatBusy}
                   title={item.preview || item.session_id}
                 >
@@ -1751,7 +1143,7 @@ export default function ChatView(props: { botId: string; botName?: string }) {
                 <button
                   type="button"
                   className="chat-button chat-button-quiet"
-                  onClick={onLoadOlderMessages}
+                  onClick={() => chat.showOlderMessages()}
                 >
                   {t("chat.history.loadOlder", { count: hiddenHistoryTurnCount })}
                 </button>
@@ -1971,9 +1363,11 @@ export default function ChatView(props: { botId: string; botName?: string }) {
           ) : null}
 
           {!approvalsInInspector ? renderToolApprovals() : null}
-          {toolApprovalNotice?.botId === botId && toolApprovalNotice.sessionId === sessionId ? (
+          {toolApprovalNotice ? (
             <p role="status" className="chat-column mb-3 break-words text-xs text-zinc-400">
-              {toolApprovalNotice.text}
+              {toolApprovalNotice.kind === "stale"
+                ? t("chat.approval.stale")
+                : t(toolApprovalNotice.approved ? "chat.approval.autoApproved" : "chat.approval.autoDenied", { tool: toolApprovalNotice.toolName })}
             </p>
           ) : null}
 

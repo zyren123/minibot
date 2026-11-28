@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 from ..config.schema import LLMConfig
 from .model_context import prepare_model_request
+from .model_reply import ModelCharge
 from .runtime_budget import ModelAllowance, RuntimeBudget
 
 _Response = TypeVar("_Response")
@@ -34,8 +35,8 @@ class ModelAttempt:
                 **options,
             )
 
-    def settle(self, usage: Any, output: tuple[str, str | None, list[Any]]) -> None:
-        self._budget.finish_model(self._allowance, usage, output)
+    def settle(self, charge: ModelCharge) -> None:
+        self._budget.finish_model(self._allowance, charge.reported_usage, charge.output)
 
 
 @asynccontextmanager

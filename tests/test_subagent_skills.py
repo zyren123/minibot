@@ -1,8 +1,10 @@
 """Tests for subagent skills configuration."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from openai.types.chat import ChatCompletionMessageCustomToolCall, ChatCompletionMessageFunctionToolCall
 
 from src.minibot.config.schema import SubagentConfig, SubagentsConfig
 from src.minibot.config.settings import load_config
@@ -111,6 +113,39 @@ def _build_executor(skills_enabled: bool) -> SubagentExecutor:
         hook_manager=None,  # type: ignore[arg-type]
         workdir=Path("/tmp"),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["tool_calls", "stop"])
+async def test_subagent_projects_tool_calls_only_when_reached(finish_reason):
+    executor = _build_executor(skills_enabled=False)
+    observed = []
+
+    class Read(_FakeTool):
+        async def execute(self, **kwargs):
+            observed.append("read_file")
+            return "read complete"
+
+    class Model:
+        async def create_message_async(self, **kwargs):
+            function = ChatCompletionMessageFunctionToolCall(
+                id="call-read", type="function", function={"name": "read_file", "arguments": "{}"},
+            )
+            unsupported = ChatCompletionMessageCustomToolCall(
+                id="call-custom", type="custom", custom={"name": "read_file", "input": "README.md"},
+            )
+            message = SimpleNamespace(content="Finished.", tool_calls=[function, unsupported])
+            return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
+
+    executor.tool_registry.register(Read("read_file"))
+    executor.client = Model()
+    if finish_reason == "tool_calls":
+        with pytest.raises(AttributeError, match="function"):
+            await executor.execute("Read", "Read the workspace.", "explore")
+        assert observed == ["read_file"]
+    else:
+        assert await executor.execute("Read", "Read the workspace.", "explore") == "Finished."
+        assert observed == []
 
 
 def test_get_tools_includes_skill_when_enabled():

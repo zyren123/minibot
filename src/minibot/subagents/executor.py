@@ -12,6 +12,7 @@ from ..config.schema import LLMConfig, RuntimeBudgetConfig
 from ..core.artifacts import current_artifacts
 from ..core.client import LLMClient
 from ..core.model_attempt import model_attempt
+from ..core.model_reply import decode_completion_reply, reported_completion_usage
 from ..core.runtime_budget import RuntimeBudget, current_budget
 from ..core.tool_args import parse_tool_arguments
 from ..tools.registry import ToolRegistry
@@ -177,30 +178,28 @@ Complete the task and return a clear, concise summary."""
                     if child is not None:
                         child.start_model()
                     response = await attempt.dispatch(self.client.create_message_async)
-                    usage = getattr(response, "usage", None)
+                    usage = reported_completion_usage(response)
                     if child is not None:
                         child.finish_model(usage)
-                    choice = response.choices[0]
-                    assistant_message = choice.message
-                    finish_reason = choice.finish_reason
-                    content = assistant_message.content or ""
-                    tool_calls = assistant_message.tool_calls or []
-                    attempt.settle(usage, (
-                        str(content), str(getattr(assistant_message, "reasoning_content", None) or ""), tool_calls,
-                    ))
+                    reply = decode_completion_reply(response, usage)
+                    attempt.settle(reply.charge)
 
-                if finish_reason != "tool_calls":
+                content = reply.content
+                tool_calls = reply.tool_calls
+                if reply.finish_reason != "tool_calls":
                     break
 
                 if not tool_calls:
                     break
 
                 results: list[dict[str, Any]] = []
+                assistant_calls: list[dict[str, Any]] = []
 
-                for tc in tool_calls:
+                for index in range(len(tool_calls)):
                     budget.start_tool()
                     tool_count += 1
-                    tc_name = tc.function.name
+                    tc = tool_calls[index]
+                    tc_name = tc.name
                     if child is not None:
                         child.start_tool(tc.id, tc_name)
                     if status is not None:
@@ -212,11 +211,11 @@ Complete the task and return a clear, concise summary."""
                     if tc_name not in allowed_tool_names:
                         outcome = ToolOutcome(f"Tool '{tc_name}' is not available to this subagent.", "refused")
                     else:
-                        tc_input, parse_note = parse_tool_arguments(tc.function.arguments)
+                        tc_input, parse_note = parse_tool_arguments(tc.arguments)
                         if tc_input is None:
                             output = (
                                 f"Error: Invalid JSON arguments for tool '{tc_name}': {parse_note}. "
-                                f"raw={tc.function.arguments!r}"
+                                f"raw={tc.arguments!r}"
                             )[:50000]
                             outcome = ToolOutcome(output, "invalid_arguments")
                         else:
@@ -229,22 +228,13 @@ Complete the task and return a clear, concise summary."""
                     if child is not None:
                         child.finish_tool(outcome)
                     results.append({"tool_call_id": tc.id, "output": outcome.text, "metadata": outcome.metadata()})
+                    assistant_calls.append(tc.as_message())
 
                     if status is None:
                         _fallback_status_line()
 
                 assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in tool_calls
-                ]
+                assistant_msg["tool_calls"] = assistant_calls
                 sub_messages.append(assistant_msg)
                 for r in results:
                     sub_messages.append(

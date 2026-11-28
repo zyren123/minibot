@@ -1,10 +1,47 @@
+from __future__ import annotations
+
 import asyncio
+from collections.abc import AsyncGenerator, Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Iterator
+from typing import Any, Iterator
 
+from ..events import StreamEvent
 from ..session.manager import SessionManager
+
+
+@dataclass
+class StreamCancellation:
+    callback: Callable[[], None] | None = None
+
+
+class StreamReader(AsyncGenerator[StreamEvent, None]):
+    def __init__(self, events: Callable[[StreamCancellation], AsyncGenerator[StreamEvent, None]]):
+        self._cancellation = StreamCancellation()
+        self._events = events(self._cancellation)
+
+    def cancel(self) -> None:
+        cancel = self._cancellation.callback
+        if cancel is not None:
+            cancel()
+
+    async def asend(self, value: None) -> StreamEvent:
+        try:
+            return await self._events.asend(value)
+        except Exception:
+            self._cancellation.callback = None
+            raise
+
+    async def athrow(self, *args: Any) -> StreamEvent:
+        return await self._events.athrow(*args)
+
+    async def aclose(self) -> None:
+        try:
+            await self._events.aclose()
+        finally:
+            self._cancellation.callback = None
 
 
 _owners: dict[tuple[Path, str], tuple[str, asyncio.Task]] = {}

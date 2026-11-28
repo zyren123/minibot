@@ -738,6 +738,260 @@ def test_message_regenerate_stream_rewrites_latest_turn_and_streams_events(
     assert persisted.json()["messages"][-1]["message_id"] == "msg-assistant-new"
 
 
+def _stream_request_scope(path: str, spec_version: str = "2.4") -> dict:
+    return {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": spec_version},
+        "http_version": "1.1", "method": "POST", "scheme": "http", "path": path,
+        "headers": [(b"content-type", b"application/json")], "query_string": b"",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["answer", "regenerate"])
+async def test_stream_disconnect_before_headers_releases_session(server_env, monkeypatch, operation):
+    import json
+
+    import httpx
+    from starlette.requests import ClientDisconnect
+
+    from src.minibot.server import app as server
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    manager._base_config.mcp.enabled = False
+    monkeypatch.setattr(server, "AgentManager", lambda **kwargs: manager)
+    app = server.create_app(workdir=server_env["workdir"])
+    sessions = manager.sessions_for("default")
+    session_id = sessions.create()
+    sessions.overwrite(session_id, [
+        {"role": "user", "content": "原始问题", "message_id": "original"},
+        {"role": "assistant", "content": "旧回复", "message_id": "reply", "parent_user_message_id": "original"},
+    ])
+    prefix = f"/api/bots/default/sessions/{session_id}"
+    route, payload = {
+        "answer": ("/answer/stream", {"question_id": "question", "answer_text": "这个"}),
+        "regenerate": ("/messages/reply/regenerate/stream", {}),
+    }[operation]
+    raw_payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    async def receive():
+        return {"type": "http.request", "body": raw_payload, "more_body": False}
+
+    async def send(message):
+        assert message["type"] == "http.response.start"
+        raise OSError("client closed")
+
+    with pytest.raises(ClientDisconnect):
+        await app(_stream_request_scope(prefix + route), receive, send)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as api:
+        response = await asyncio.wait_for(api.post(
+            prefix + "/answer/stream", json={"question_id": "question", "answer_text": "这个"},
+        ), timeout=5)
+    assert response.status_code == 200
+    assert "event: system" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_regenerate_stream_validation_precedes_headers(server_env, monkeypatch, spec_version):
+    from src.minibot.server import app as server
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    monkeypatch.setattr(server, "AgentManager", lambda **kwargs: manager)
+    app = server.create_app(workdir=server_env["workdir"])
+    session_id = manager.sessions_for("default").create()
+
+    for target, expected in [("missing-session", 404), (session_id, 400)]:
+        request_read = False
+        sent = []
+
+        async def receive():
+            nonlocal request_read
+            if request_read:
+                await asyncio.Future()
+            request_read = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        path = f"/api/bots/default/sessions/{target}/messages/unknown/regenerate/stream"
+        await asyncio.wait_for(app(_stream_request_scope(path, spec_version), receive, send), 5)
+        starts = [message for message in sent if message["type"] == "http.response.start"]
+        assert len(starts) == 1
+        assert starts[0]["status"] == expected
+        assert dict(starts[0]["headers"])[b"content-type"] == b"application/json"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_regenerate_stream_preserves_preflight_io_error(server_env, monkeypatch, spec_version):
+    from src.minibot.server import app as server
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    monkeypatch.setattr(server, "AgentManager", lambda **kwargs: manager)
+    app = server.create_app(workdir=server_env["workdir"])
+    sessions = manager.sessions_for("default")
+    session_id = sessions.create()
+    sessions.overwrite(session_id, [
+        {"role": "user", "content": "original", "message_id": "question"},
+        {"role": "assistant", "content": "reply", "message_id": "reply", "parent_user_message_id": "question"},
+    ])
+    failure = OSError("history write failed")
+
+    def fail_to_write(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(sessions, "overwrite", fail_to_write)
+    request_read = False
+    sent = []
+
+    async def receive():
+        nonlocal request_read
+        if request_read:
+            await asyncio.Future()
+        request_read = True
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    path = f"/api/bots/default/sessions/{session_id}/messages/reply/regenerate/stream"
+    with pytest.raises(OSError) as raised:
+        await asyncio.wait_for(app(_stream_request_scope(path, spec_version), receive, send), 5)
+    assert raised.value is failure
+    assert [message["status"] for message in sent if message["type"] == "http.response.start"] == [500]
+    assert not (await manager.session_lock("default", session_id)).locked()
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_does_not_cancel_replacement_producer(server_env, monkeypatch):
+    import json
+
+    from src.minibot.server import app as server
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    manager._base_config.mcp.enabled = False
+    monkeypatch.setattr(server, "AgentManager", lambda **kwargs: manager)
+    app = server.create_app(workdir=server_env["workdir"])
+    sessions = manager.sessions_for("default")
+    session_id = sessions.create()
+    bot = await manager.get_bot("default", session_id)
+    producers = {}
+    finish_replacement = asyncio.Event()
+
+    async def run(prompt, **kwargs):
+        producers[prompt] = asyncio.current_task()
+        await bot.agent._emit({"type": "assistant_start", "message_id": prompt})
+        if prompt == "replacement":
+            await finish_replacement.wait()
+        await bot.agent._emit({"type": "assistant_end", "message_id": prompt, "content": "完成"})
+
+    monkeypatch.setattr(bot, "_run_once", run)
+    raw_payload = json.dumps({"session_id": session_id, "prompt": "original"}).encode("utf-8")
+    request_read = False
+    disconnected = False
+
+    async def receive():
+        nonlocal request_read
+        if not request_read:
+            request_read = True
+            return {"type": "http.request", "body": raw_payload, "more_body": False}
+        if disconnected:
+            return {"type": "http.disconnect"}
+        await asyncio.Future()
+
+    async def send(message):
+        nonlocal disconnected
+        if message["type"] == "http.response.body" and message["more_body"] and not disconnected:
+            await asyncio.wait_for(asyncio.shield(producers["original"]), 5)
+            replacement = bot.stream("replacement")
+            await asyncio.wait_for(anext(replacement), 5)
+            await replacement.aclose()
+            disconnected = True
+
+    try:
+        await asyncio.wait_for(app(_stream_request_scope("/api/stream"), receive, send), 5)
+        assert disconnected
+        current = sessions.load_runtime_state(session_id)
+        assert current is not None and current["assistant_message_id"] == "replacement"
+    finally:
+        finish_replacement.set()
+        if "replacement" in producers:
+            await asyncio.wait_for(producers["replacement"], 5)
+
+    assert sessions.load(session_id)[-1]["content"] == "完成"
+    assert sessions.load(session_id)[-1]["completion_state"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_aborted_stream_attempt_preserves_detached_owner(server_env, monkeypatch):
+    import json
+
+    from src.minibot.server import app as server
+    from src.minibot.server.manager import AgentManager
+
+    manager = AgentManager(workdir=server_env["workdir"])
+    manager._base_config.mcp.enabled = False
+    monkeypatch.setattr(server, "AgentManager", lambda **kwargs: manager)
+    app = server.create_app(workdir=server_env["workdir"])
+    sessions = manager.sessions_for("default")
+    session_id = sessions.create()
+    bot = await manager.get_bot("default", session_id)
+    producer = None
+    complete = asyncio.Event()
+
+    async def run(prompt, **kwargs):
+        nonlocal producer
+        assert prompt == "first"
+        producer = asyncio.current_task()
+        await bot.agent._emit({"type": "assistant_start", "message_id": "active"})
+        await complete.wait()
+        await bot.agent._emit({"type": "assistant_end", "message_id": "active", "content": "完成"})
+
+    monkeypatch.setattr(bot, "_run_once", run)
+    stream = bot.stream
+    stream_attempted = asyncio.Event()
+
+    def observe_attempt(*args, **kwargs):
+        stream_attempted.set()
+        return stream(*args, **kwargs)
+
+    reader = stream("first")
+    await asyncio.wait_for(anext(reader), 5)
+    await reader.aclose()
+    monkeypatch.setattr(bot, "stream", observe_attempt)
+    request_read = False
+    raw_payload = json.dumps({"session_id": session_id, "prompt": "second"}).encode("utf-8")
+
+    async def receive():
+        nonlocal request_read
+        if not request_read:
+            request_read = True
+            return {"type": "http.request", "body": raw_payload, "more_body": False}
+        await stream_attempted.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        return None
+
+    try:
+        await asyncio.wait_for(app(_stream_request_scope("/api/stream", "2.3"), receive, send), 5)
+        assert stream_attempted.is_set()
+        current = sessions.load_runtime_state(session_id)
+        assert current is not None and current["assistant_message_id"] == "active"
+    finally:
+        complete.set()
+        assert producer is not None
+        await asyncio.wait_for(producer, 5)
+
+    assert sessions.load(session_id)[-1]["completion_state"] == "complete"
+
+
 def test_dashboard_provider_models_and_chat_gating(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -101,6 +101,69 @@ async def test_partial_stream_output_is_charged_before_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_partial_stream_tools_are_charged_before_ids_are_finalized(tmp_path):
+    agent = make_agent(tmp_path, max_output_tokens=64)
+    agent.set_stream_enabled(True)
+
+    class PartialStream(RepeatingClient):
+        async def create_message_stream_async(self, **kwargs):
+            self.requests.append(kwargs)
+
+            async def chunks():
+                yield _chunk(tool_calls=[{"index": 0, "function": {"arguments": '{"text":'}}])
+                raise ValueError("stream ended early")
+
+            return chunks()
+
+    agent.client = PartialStream(_response(content="ok"))
+    history = await agent.run_loop([user_message()])
+    assert history[-1]["content"] == "ok"
+    assert [request["max_tokens"] for request in agent.client.requests] == [64, 44]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stream", "completion_tokens", "fails"), [
+    (False, "99", False),
+    (False, 99, True),
+    (True, "99", True),
+    (True, 99, True),
+])
+async def test_provider_usage_representation_keeps_its_budget_contract(tmp_path, stream, completion_tokens, fails):
+    agent = make_agent(tmp_path, max_output_tokens=12)
+    agent.set_stream_enabled(stream)
+    usage = {"prompt_tokens": 2, "completion_tokens": completion_tokens, "total_tokens": 101}
+
+    class Provider:
+        async def create_message_async(self, **kwargs):
+            return {"choices": [{"message": {"content": "答复"}, "finish_reason": "stop"}], "usage": usage}
+
+        async def create_message_stream_async(self, **kwargs):
+            async def reply():
+                yield {"choices": [{"delta": {"content": "答复"}, "finish_reason": "stop"}], "usage": usage}
+            return reply()
+
+    agent.client = Provider()
+    if fails:
+        with pytest.raises(RuntimeBudgetExceeded, match="max_output_tokens"):
+            await agent.run_loop([user_message()])
+    else:
+        result = await agent.run_loop([user_message()])
+        assert result[-1]["content"] == "答复"
+        assert result[-1]["usage"] == {"prompt_tokens": 2, "completion_tokens": 99, "total_tokens": 101}
+
+
+@pytest.mark.asyncio
+async def test_full_reply_budget_stops_before_display_usage_coercion(tmp_path):
+    agent = make_agent(tmp_path, max_output_tokens=12)
+    response = _response(content="over budget")
+    response.usage = {"completion_tokens": 99, "total_tokens": float("inf")}
+    agent.client = RepeatingClient(response)
+
+    with pytest.raises(RuntimeBudgetExceeded, match="max_output_tokens"):
+        await agent.run_loop([user_message()])
+
+
+@pytest.mark.asyncio
 async def test_optional_compaction_preserves_finished_reply_at_model_cap(tmp_path):
     agent = make_agent(tmp_path, max_llm_calls=1)
     agent.config.llm.max_context_tokens = 20000
@@ -169,8 +232,8 @@ async def test_concurrent_model_calls_wait_for_shared_output_capacity(tmp_path, 
                 await owner
         else:
             release.set()
-            assert await owner is first
-        assert await sibling is second
+            assert (await owner).content == "done"
+        assert (await sibling).content == "ok"
     assert [request["max_tokens"] for request in agent.client.requests] == [10, 10 if cancel_first else 3]
 
 

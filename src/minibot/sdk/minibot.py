@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from functools import partial
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 import uuid
-from typing import Any, AsyncIterator, Callable, Iterable, Iterator
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
 
 from ..agent import Agent, UserInterruptedError
 from ..config import Config, load_config
@@ -24,7 +25,7 @@ from ..subagents.durable import DurableSubagents
 from ..tools.base import BaseTool
 from ..tools.permissions import ToolApprovalHandler, ToolApprovalRequest
 
-from ._active_streams import own_stream
+from ._active_streams import StreamCancellation, StreamReader, own_stream
 from ._event_router import RouterEventSink
 from ._pending_questions import PendingQuestions
 from .types import ChatResult
@@ -793,7 +794,7 @@ class Minibot:
         """Continue generation from the current persisted message history."""
         return self._stream_events(None, None, reasoning_effort, stop_on_ask_user_question)
 
-    async def resume_pending_question_stream(
+    def resume_pending_question_stream(
         self,
         *,
         question_id: str,
@@ -808,11 +809,10 @@ class Minibot:
             "question_id": question_id, "answer_text": answer_text,
             "selected_option_value": selected_option_value,
         } if durable_run_id is not None else None
-        async for event in self._stream_events(
+        return self._stream_events(
             None, None, reasoning_effort, True, parent_run_id=parent_run_id,
             resume_run_id=durable_run_id, durable_answer=durable_answer,
-        ):
-            yield event
+        )
 
     async def chat(
         self,
@@ -886,14 +886,26 @@ class Minibot:
         """Streaming chat call yielding structured events."""
         return self._stream_events(prompt, session_id, reasoning_effort, stop_on_ask_user_question)
 
-    async def _stream_events(
+    def _stream_events(
         self, prompt: str | None, session_id: str | None, reasoning_effort: str | None,
         stop_on_ask_user_question: bool,
         *,
         parent_run_id: str | None = None,
         resume_run_id: str | None = None,
         durable_answer: dict[str, Any] | None = None,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> StreamReader:
+        return StreamReader(partial(
+            self._read_stream_events, prompt=prompt, session_id=session_id,
+            reasoning_effort=reasoning_effort, stop_on_ask_user_question=stop_on_ask_user_question,
+            parent_run_id=parent_run_id, resume_run_id=resume_run_id, durable_answer=durable_answer,
+        ))
+
+    async def _read_stream_events(
+        self, cancellation: StreamCancellation, *,
+        prompt: str | None, session_id: str | None, reasoning_effort: str | None,
+        stop_on_ask_user_question: bool, parent_run_id: str | None,
+        resume_run_id: str | None, durable_answer: dict[str, Any] | None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         if session_id == "":
             if self._active_stream is not None:
                 raise RuntimeError("A stream is already running on this bot")
@@ -966,6 +978,14 @@ class Minibot:
 
         task = asyncio.create_task(produce(), name=f"minibot-stream-{state.session_id}")
         state.producer = task
+
+        def cancel_producer() -> None:
+            if self._active_stream is state:
+                self.cancel()
+            elif not task.done():
+                task.cancel()
+
+        cancellation.callback = cancel_producer
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         try:
             while not task.done() or not queue.empty():

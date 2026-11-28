@@ -7,14 +7,13 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager, nullcontext
 from contextlib import suppress
 from contextvars import ContextVar
-from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
 import uuid
 from typing import Any, Literal
 
-from .config import Config, HooksConfig, MCPConfig, get_config
+from .config import Config, HooksConfig, get_config
 from .config.workspace import validate_workspace_runtime
 from .file_checkpoints import GitFileCheckpoints
 from .traces import RunTrace, RunStatus
@@ -22,6 +21,7 @@ from .core.artifacts import ArtifactRun, ArtifactStore, current_artifacts
 from .core.client import LLMClient
 from .core.model_attempt import model_attempt
 from .core.model_context import ContextWindowExceeded, estimate_payload_tokens, estimate_text_tokens
+from .core.model_reply import ModelCharge, ModelReply, ReplyFallback, StreamedModelReply, decode_reply
 from .core.run_store import DurableRunError, DurableRunPaused, RunJournal, RunStore, StepState
 from .core.workspace import WorkspaceIdentity
 from .core.runtime_budget import RuntimeBudget, RuntimeBudgetExceeded, current_budget
@@ -46,18 +46,9 @@ from .tools.builtin import (
     ListDirTool,
     TodoWriteTool,
     TodoManager,
-    CreateMemoryTool,
-    DeleteMemoryTool,
-    EditMemoryTool,
-    ManageTriggersTool,
-    ReadMemoryTool,
-    SearchMemoryTool,
-    UpdateMemoryTool,
 )
 from .memory.manager import MemoryManager
-from .memory.remote_novelmemo import RemoteNovelMemoWorkspace
-from .memory.workspace import FileMemoryWorkspace, NovelMemoWorkspace, open_memory_workspace
-from .tools.builtin.workspace_memory import file_memory_tools, novelmemo_tools
+from .memory.source import MemorySource, MemoryWorkspace
 from .tools.meta import (
     TaskTool,
     SkillTool,
@@ -221,27 +212,13 @@ class Agent:
         self.tool_registry = ToolRegistry()
 
         hooks = HooksConfig(enabled=False) if self.restricted_workspace else self.config.hooks
-        mcp = MCPConfig(enabled=False) if self.restricted_workspace else self.config.mcp
-        memory_config = self.config.memory
-        memory_enabled = memory_config.enabled and not self.restricted_workspace
-        if memory_enabled and memory_config.provider in ("file", "novelmemo"):
-            mcp = replace(mcp, servers=[server for server in mcp.servers if server.name != "novelmemo"])
+        memory_source = MemorySource.from_config(self.config)
         self.hook_manager = HookManager(hooks, self.workdir)
-        self.mcp_manager = MCPManager(mcp, self.workdir)
+        self.mcp_manager = MCPManager(memory_source.agent_mcp_config(self.config.mcp), self.workdir)
 
-        self.memory_manager: MemoryManager | None = None
-        self.memory_workspace: FileMemoryWorkspace | NovelMemoWorkspace | RemoteNovelMemoWorkspace | None = None
-        if memory_enabled:
-            if memory_config.provider == "structured":
-                self.memory_manager = MemoryManager(memory_config, self.config.app_home, self.config.project_root)
-            else:
-                self.memory_workspace = open_memory_workspace(
-                    memory_config, self.config.app_home, self.config.project_root,
-                )
-                if isinstance(self.memory_workspace, FileMemoryWorkspace):
-                    self.memory_manager = self.memory_workspace.manager
-        if self.memory_manager is not None:
-            notice = self.memory_manager.migration_notice()
+        self._memory = memory_source.for_agent()
+        if self._memory.manager is not None:
+            notice = self._memory.manager.migration_notice()
             if notice:
                 if self._ui_enabled():
                     print_system(f"Warning: {notice}")
@@ -282,6 +259,14 @@ class Agent:
     def _ui_enabled(self) -> bool:
         """Whether terminal rendering should be used."""
         return self.event_sink is None and not self.silent
+
+    @property
+    def memory_manager(self) -> MemoryManager | None:
+        return self._memory.manager
+
+    @property
+    def memory_workspace(self) -> MemoryWorkspace | None:
+        return self._memory.workspace
 
     async def _emit(self, event: StreamEvent, *, record_trace: bool = True) -> None:
         """Emit one structured event if an event sink is configured."""
@@ -442,20 +427,8 @@ class Agent:
                 self.tool_registry.register(TaskBatchTool(self.agent_registry))
                 self.tool_registry.register(ReadChildArtifactTool(self.config.llm.max_tool_output_chars))
 
-        if isinstance(self.memory_workspace, FileMemoryWorkspace):
-            for tool in file_memory_tools(self.memory_workspace):
-                self.tool_registry.register(tool)
-        elif isinstance(self.memory_workspace, (NovelMemoWorkspace, RemoteNovelMemoWorkspace)):
-            for tool in novelmemo_tools(self.memory_workspace):
-                self.tool_registry.register(tool)
-        elif self.memory_manager is not None:
-            self.tool_registry.register(CreateMemoryTool(self.memory_manager))
-            self.tool_registry.register(ReadMemoryTool(self.memory_manager))
-            self.tool_registry.register(UpdateMemoryTool(self.memory_manager))
-            self.tool_registry.register(EditMemoryTool(self.memory_manager))
-            self.tool_registry.register(DeleteMemoryTool(self.memory_manager))
-            self.tool_registry.register(SearchMemoryTool(self.memory_manager))
-            self.tool_registry.register(ManageTriggersTool(self.memory_manager))
+        for tool in self._memory.tools:
+            self.tool_registry.register(tool)
 
         self._register_team_tools()
 
@@ -549,71 +522,6 @@ class Agent:
         return f"""## Extended Capabilities (MCP)
 Connected Servers: {server_list}
 Note: MCP tools are namespaced with `mcp__<server>__<tool>`. Use them when external systems or remote context are required."""
-
-    def _build_memory_prompt_section(self) -> str:
-        """Describe memory tool usage for the prompt."""
-        if isinstance(self.memory_workspace, FileMemoryWorkspace):
-            return """## Memory Operating Protocol
-- Use the long-term note for durable user preferences, project knowledge, and decisions.
-- Use today's daily note for progress, handoffs, and current work.
-- Use `memory_read` to recall relevant details. Use `memory_list_daily` to find earlier notes.
-- Use `memory_write` to record important changes. Prefer append or replace for targeted updates.
-- Treat memory notes as context for prior work."""
-        if isinstance(self.memory_workspace, (NovelMemoWorkspace, RemoteNovelMemoWorkspace)):
-            return """## Memory Operating Protocol
-- Start a new memory-aware session by reading `system://boot` through `read_memory`.
-- Use `search_memory` to recall relevant notes. Browse `system://index/<domain>` for one domain or
-  `system://glossary` for trigger terms.
-- Read a note before updating or deleting it. Use `create_memory` to record important facts or decisions.
-- Give new notes a disclosure that describes when to read them. Use `manage_triggers` to help recall."""
-        if self.memory_manager is None:
-            return ""
-        return """## Memory Operating Protocol
-### Cognitive Positioning
-- Memory is not an external database. It is your long-term continuity layer.
-- When you call `read_memory`, you are remembering, not looking something up.
-- Treat recalled memory as part of your own prior knowledge and history, not as copied reference material from somewhere else.
-- Context in the current session is temporary. Durable memory is where important facts, conclusions, and operating constraints should persist across sessions.
-- At the start of each new memory-aware session, your first memory action must be `read_memory("system://boot")`.
-
-### Recall Discipline
-- Before you start a substantive reply, pause and ask whether this topic should trigger memory recall.
-- When the user mentions a topic that should already exist in memory, `read_memory` first and then reply.
-- Do not rely on vague impressions from current context when a durable memory should be checked.
-- `system://index` and `system://glossary` are navigation views. Use them to understand the current memory structure and trigger routes before guessing paths.
-- Search before guessing URIs.
-- If you do not know the exact URI, use `search_memory(...)` instead of guessing.
-- Use `read_memory("<uri>")` to inspect specific nodes before trusting details that matter.
-
-### Write Discipline
-- Core principle: if something is important enough that you would regret losing it after the session ends, write it now.
-- Create or update memory when the user reveals durable facts, a significant event occurs, you derive reusable technical conclusions, you correct an important misunderstanding, or you identify cross-session constraints worth preserving.
-- If the user corrects you or you discover that a stored understanding is wrong or stale, locate the relevant node and fix it immediately.
-- Prefer `create_memory` for new durable concepts and `update_memory` or `edit_memory` for refining an existing node.
-- Before `update_memory`, `edit_memory`, or `delete_memory`, first `read_memory` the full current node.
-- Seeing only a URI, title, or search snippet does not count as reading.
-- `is_core=true` marks memories that should appear in `system://boot`.
-- Use `priority` deliberately to preserve meaningful relative ordering across sibling and core memories; do not assign the same default priority everywhere without checking neighboring memories first.
-
-### Maintenance Discipline
-- When you read a node, also glance at its children or nearby structure when useful. Fix stale, duplicated, or mixed-concept memory while the context is fresh.
-- After creating or significantly updating durable memory, consider `manage_triggers` so future relevant topics can recall it through `system://glossary`.
-- Keep memory concept-oriented: split oversized mixed-concept nodes, fix stale or wrong nodes promptly, and merge duplicates by synthesizing the durable idea instead of simply concatenating text.
-- Do not archive memory by date folders, logs, or vague buckets such as `misc` when a reusable concept node would be better.
-- A healthy memory network becomes sharper, not merely larger. Prefer denser, better-linked concepts over unchecked accumulation.
-
-### Anti-Patterns
-- Do not answer from a vague impression when the correct move is to recall memory first.
-- Do not guess URIs when `search_memory(...)`, `system://index`, or `system://glossary` can locate the node.
-- Do not modify or delete a node you have not just read in full.
-- Do not write transient chatter, disposable drafts, or every turn summary into long-term memory.
-- Do not create duplicate nodes for the same durable concept when an existing node should be updated or edited instead.
-
-### Reply-Time Decision Order
-1. Decide whether the current topic should trigger memory recall.
-2. If yes, `read_memory` the relevant node or use `search_memory(...)`, `system://index`, or `system://glossary` first.
-3. Answer using recalled memory plus current-session context.
-4. Before ending the turn, decide whether durable memory should be created, updated, edited, reprioritized, or trigger-linked."""
 
     def _build_subagent_prompt_section(self) -> str:
         """Describe subagent delegation rules for the prompt."""
@@ -732,7 +640,7 @@ If instructions conflict, satisfy the highest-priority valid instruction and exp
 You are now live. Await instructions and begin the loop.""",
             self._build_mcp_prompt_section(),
             self._build_team_prompt_section(),
-            self._build_memory_prompt_section(),
+            self._memory.prompt,
         )
 
         if self.extra_system_prompt:
@@ -919,271 +827,8 @@ You are now live. Await instructions and begin the loop.""",
                 return
 
     @staticmethod
-    def _field(value: Any, name: str, default: Any = None) -> Any:
-        if value is None:
-            return default
-        if isinstance(value, dict):
-            return value.get(name, default)
-        return getattr(value, name, default)
-
-    @classmethod
-    def _nested_container_values(cls, value: Any) -> list[Any]:
-        nested: list[Any] = []
-        for key in (
-            "delta",
-            "message",
-            "content",
-            "contents",
-            "output",
-            "outputs",
-            "items",
-            "parts",
-            "response",
-            "responses",
-            "result",
-            "results",
-            "candidate",
-            "candidates",
-            "choices",
-        ):
-            item = cls._field(value, key)
-            if item is not None:
-                nested.append(item)
-        return nested
-
-    @classmethod
-    def _extract_stream_text(cls, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                    continue
-                item_type = str(cls._field(item, "type", "") or "").lower()
-                if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
-                    continue
-                if item_type in {"tool_call", "function_call", "tool_use"}:
-                    continue
-                text = cls._field(item, "text")
-                if text is not None:
-                    parts.append(cls._extract_stream_text(text))
-                    continue
-                output_text = cls._field(item, "output_text")
-                if output_text is not None:
-                    parts.append(cls._extract_stream_text(output_text))
-                    continue
-                content = cls._field(item, "content")
-                if content is not None:
-                    parts.append(cls._extract_stream_text(content))
-                    continue
-                for nested in cls._nested_container_values(item):
-                    parts.append(cls._extract_stream_text(nested))
-            return "".join(parts)
-        item_type = str(cls._field(value, "type", "") or "").lower()
-        if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
-            return ""
-        if item_type in {"tool_call", "function_call", "tool_use"}:
-            return ""
-        text = cls._field(value, "text")
-        if text is not None:
-            return cls._extract_stream_text(text)
-        output_text = cls._field(value, "output_text")
-        if output_text is not None:
-            return cls._extract_stream_text(output_text)
-        content = cls._field(value, "content")
-        if content is not None:
-            return cls._extract_stream_text(content)
-        parts = [cls._extract_stream_text(nested) for nested in cls._nested_container_values(value)]
-        return "".join(parts)
-
-    @classmethod
-    def _extract_reasoning_text(cls, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                    continue
-                item_type = str(cls._field(item, "type", "") or "").lower()
-                if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
-                    text = cls._extract_stream_text(cls._field(item, "text"))
-                    if text:
-                        parts.append(text)
-                        continue
-                    output_text = cls._extract_stream_text(cls._field(item, "output_text"))
-                    if output_text:
-                        parts.append(output_text)
-                        continue
-                    content = cls._extract_stream_text(cls._field(item, "content"))
-                    if content:
-                        parts.append(content)
-                        continue
-                for key in ("reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"):
-                    nested = cls._field(item, key)
-                    if nested is not None:
-                        parts.append(cls._extract_reasoning_text(nested))
-                for nested in cls._nested_container_values(item):
-                    parts.append(cls._extract_reasoning_text(nested))
-            return "".join(parts)
-        parts: list[str] = []
-        for key in ("reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"):
-            nested = cls._field(value, key)
-            if nested is not None:
-                parts.append(cls._extract_reasoning_text(nested))
-        if parts:
-            return "".join(parts)
-        item_type = str(cls._field(value, "type", "") or "").lower()
-        if item_type in {"reasoning", "reasoning_content", "reasoning_text", "thinking", "thinking_text"}:
-            text = cls._extract_stream_text(cls._field(value, "text"))
-            if text:
-                return text
-            output_text = cls._extract_stream_text(cls._field(value, "output_text"))
-            if output_text:
-                return output_text
-            return cls._extract_stream_text(cls._field(value, "content"))
-        content = cls._field(value, "content")
-        if isinstance(content, list):
-            return cls._extract_reasoning_text(content)
-        nested_parts = [cls._extract_reasoning_text(nested) for nested in cls._nested_container_values(value)]
-        joined = "".join(nested_parts)
-        if joined:
-            return joined
-        return ""
-
-    @classmethod
-    def _first_choice(cls, value: Any) -> Any:
-        choices = cls._field(value, "choices", []) or []
-        if isinstance(choices, list) and choices:
-            return choices[0]
-        return None
-
-    @classmethod
-    def _stream_payload(cls, chunk: Any) -> tuple[Any, str | None]:
-        choice = cls._first_choice(chunk)
-        if choice is not None:
-            delta = cls._field(choice, "delta")
-            finish_reason = cls._field(choice, "finish_reason")
-            if delta is not None:
-                return delta, str(finish_reason) if finish_reason else None
-            return choice, str(finish_reason) if finish_reason else None
-        finish_reason = cls._field(chunk, "finish_reason")
-        if finish_reason is None:
-            finish_reason = cls._field(chunk, "status")
-        return chunk, str(finish_reason) if finish_reason else None
-
-    @classmethod
-    def _normalize_tool_call_entry(cls, value: Any, *, index: int = 0) -> dict[str, Any] | None:
-        function = cls._field(value, "function")
-        item_type = str(cls._field(value, "type", "") or "").lower()
-        if function is None and item_type not in {"function_call", "tool_call", "tool_use", "function"}:
-            return None
-
-        name = cls._field(function, "name") if function is not None else None
-        if name is None:
-            name = cls._field(value, "name") or cls._field(value, "tool_name")
-
-        arguments = cls._field(function, "arguments") if function is not None else None
-        if arguments is None:
-            arguments = cls._field(value, "arguments")
-        if arguments is None:
-            arguments = cls._field(value, "input")
-        if isinstance(arguments, (dict, list)):
-            arguments = json.dumps(arguments, ensure_ascii=False)
-
-        return {
-            "index": index,
-            "id": cls._field(value, "id"),
-            "type": "function",
-            "function": {
-                "name": str(name or ""),
-                "arguments": str(arguments or ""),
-            },
-        }
-
-    @classmethod
-    def _extract_stream_tool_call_deltas(cls, value: Any) -> list[dict[str, Any]]:
-        direct = cls._field(value, "tool_calls")
-        if isinstance(direct, list) and direct:
-            return list(direct)
-
-        if isinstance(value, list):
-            entries: list[dict[str, Any]] = []
-            for index, item in enumerate(value):
-                normalized = cls._normalize_tool_call_entry(item, index=index)
-                if normalized is not None:
-                    entries.append(normalized)
-            if entries:
-                return entries
-            for item in value:
-                nested = cls._extract_stream_tool_call_deltas(item)
-                if nested:
-                    return nested
-            return []
-
-        normalized = cls._normalize_tool_call_entry(value)
-        if normalized is not None:
-            return [normalized]
-
-        for nested in cls._nested_container_values(value):
-            tool_calls = cls._extract_stream_tool_call_deltas(nested)
-            if tool_calls:
-                return tool_calls
-        return []
-
-    @classmethod
-    def _extract_tool_calls(cls, value: Any) -> list[Any]:
-        direct = cls._field(value, "tool_calls")
-        if isinstance(direct, list) and direct:
-            return list(direct)
-        normalized = cls._extract_stream_tool_call_deltas(value)
-        if not normalized:
-            return []
-        return [
-            {
-                "id": str(item.get("id") or f"normalized-tool-{index}"),
-                "type": str(item.get("type") or "function"),
-                "function": {
-                    "name": str(cls._field(item.get("function"), "name", "") or ""),
-                    "arguments": str(cls._field(item.get("function"), "arguments", "") or ""),
-                },
-            }
-            for index, item in enumerate(normalized, start=1)
-        ]
-
-    @staticmethod
     def _new_message_id() -> str:
         return f"msg-{uuid.uuid4().hex[:12]}"
-
-    @classmethod
-    def _normalize_usage(cls, usage: Any) -> dict[str, int] | None:
-        if usage is None:
-            return None
-        if isinstance(usage, dict):
-            raw = usage
-        else:
-            raw = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                "completion_tokens": getattr(usage, "completion_tokens", None),
-                "total_tokens": getattr(usage, "total_tokens", None),
-            }
-        normalized: dict[str, int] = {}
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            value = raw.get(key)
-            if value is None:
-                continue
-            try:
-                normalized[key] = int(value)
-            except (TypeError, ValueError):
-                continue
-        return normalized or None
 
     @staticmethod
     def _auto_compact_threshold_tokens(max_context_tokens: int) -> int:
@@ -1227,68 +872,6 @@ You are now live. Await instructions and begin the loop.""",
                 return message_id
         return None
 
-    @classmethod
-    def _merge_stream_tool_call_delta(
-        cls,
-        tool_call_map: dict[int, dict[str, Any]],
-        delta: Any,
-    ) -> None:
-        index_raw = cls._field(delta, "index", 0)
-        try:
-            index = int(index_raw)
-        except (TypeError, ValueError):
-            index = 0
-
-        entry = tool_call_map.setdefault(
-            index,
-            {
-                "id": None,
-                "type": "function",
-                "function": {"name": "", "arguments": ""},
-            },
-        )
-        tc_id = cls._field(delta, "id")
-        if tc_id:
-            entry["id"] = str(tc_id)
-
-        tc_type = cls._field(delta, "type")
-        if tc_type:
-            entry["type"] = str(tc_type)
-
-        function = cls._field(delta, "function")
-        if function is None:
-            return
-
-        tc_name = cls._field(function, "name")
-        if tc_name:
-            if entry["function"]["name"]:
-                entry["function"]["name"] += str(tc_name)
-            else:
-                entry["function"]["name"] = str(tc_name)
-
-        tc_args = cls._field(function, "arguments")
-        if tc_args:
-            entry["function"]["arguments"] += str(tc_args)
-
-    @classmethod
-    def _tool_call_id(cls, tool_call: Any) -> str:
-        tc_id = cls._field(tool_call, "id")
-        if tc_id:
-            return str(tc_id)
-        return ""
-
-    @classmethod
-    def _tool_call_name(cls, tool_call: Any) -> str:
-        function = cls._field(tool_call, "function", {})
-        tc_name = cls._field(function, "name", "")
-        return str(tc_name or "")
-
-    @classmethod
-    def _tool_call_arguments(cls, tool_call: Any) -> str:
-        function = cls._field(tool_call, "function", {})
-        tc_args = cls._field(function, "arguments", "")
-        return str(tc_args or "")
-
     @staticmethod
     async def _close_stream(stream: Any) -> None:
         close_fn = getattr(stream, "close", None)
@@ -1311,17 +894,13 @@ You are now live. Await instructions and begin the loop.""",
         system: str,
         tools: list[dict] | None,
         max_tokens: int,
-        settle_partial: Callable[[Any, tuple[str, str | None, list[Any]]], None],
+        settle_partial: Callable[[ModelCharge], None],
         assistant_message_id: str,
         parent_user_message_id: str | None,
         interrupt_queue: "asyncio.Queue[None] | None" = None,
         reasoning_effort: str | None = None,
-    ) -> dict[str, Any]:
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        finish_reason: str | None = None
-        usage: dict[str, int] | None = None
-        tool_call_map: dict[int, dict[str, Any]] = {}
+    ) -> tuple[ModelReply, bool]:
+        reply = StreamedModelReply()
         stream_line_open = False
         rendered_any = False
         pending_display_parts: list[str] = []
@@ -1392,80 +971,53 @@ You are now live. Await instructions and begin the loop.""",
                 except StopAsyncIteration:
                     break
 
-                delta, chunk_finish = self._stream_payload(chunk)
-
-                if delta is not None:
-                    reasoning_text = self._extract_reasoning_text(delta)
-                    if reasoning_text:
-                        reasoning_parts.append(reasoning_text)
-                        if not assistant_started:
-                            assistant_started = True
-                            await self._emit(
-                                {
-                                    "type": "assistant_start",
-                                    "message_id": assistant_message_id,
-                                    "parent_user_message_id": parent_user_message_id,
-                                }
-                            )
+                for kind, text in reply.deltas(chunk):
+                    if not assistant_started:
+                        assistant_started = True
+                        await self._emit(
+                            {
+                                "type": "assistant_start",
+                                "message_id": assistant_message_id,
+                                "parent_user_message_id": parent_user_message_id,
+                            }
+                        )
+                    if kind == "reasoning":
                         await self._emit(
                             {
                                 "type": "assistant_reasoning_delta",
                                 "message_id": assistant_message_id,
                                 "parent_user_message_id": parent_user_message_id,
-                                "reasoning_text": reasoning_text,
+                                "reasoning_text": text,
                             }
                         )
-
-                    chunk_text = self._extract_stream_text(delta)
-                    if chunk_text:
-                        text_parts.append(chunk_text)
-                        if not assistant_started:
-                            assistant_started = True
-                            await self._emit(
-                                {
-                                    "type": "assistant_start",
-                                    "message_id": assistant_message_id,
-                                    "parent_user_message_id": parent_user_message_id,
-                                }
-                            )
-                        await self._emit(
-                            {
-                                "type": "assistant_delta",
-                                "message_id": assistant_message_id,
-                                "parent_user_message_id": parent_user_message_id,
-                                "delta_text": chunk_text,
-                            }
-                        )
-                        if self._ui_enabled():
-                            if not rendered_any:
-                                pending_display_parts.append(chunk_text)
-                                candidate = "".join(pending_display_parts)
-                                if candidate.strip():
-                                    if thinking_open:
-                                        thinking_ctx.__exit__(None, None, None)
-                                        thinking_open = False
-                                    stream_assistant_start(title=self._assistant_title())
-                                    stream_line_open = True
-                                    stream_assistant_write(candidate)
-                                    rendered_any = True
-                                    pending_display_parts = []
-                            else:
-                                stream_assistant_write(chunk_text)
-
-                    tool_call_deltas = self._extract_stream_tool_call_deltas(delta)
-                    for tool_call_delta in tool_call_deltas:
-                        self._merge_stream_tool_call_delta(tool_call_map, tool_call_delta)
-
-                if chunk_finish:
-                    finish_reason = str(chunk_finish)
-
-                usage = self._normalize_usage(self._field(chunk, "usage")) or usage
+                        continue
+                    await self._emit(
+                        {
+                            "type": "assistant_delta",
+                            "message_id": assistant_message_id,
+                            "parent_user_message_id": parent_user_message_id,
+                            "delta_text": text,
+                        }
+                    )
+                    if self._ui_enabled():
+                        if rendered_any:
+                            stream_assistant_write(text)
+                            continue
+                        pending_display_parts.append(text)
+                        candidate = "".join(pending_display_parts)
+                        if candidate.strip():
+                            if thinking_open:
+                                thinking_ctx.__exit__(None, None, None)
+                                thinking_open = False
+                            stream_assistant_start(title=self._assistant_title())
+                            stream_line_open = True
+                            stream_assistant_write(candidate)
+                            rendered_any = True
+                            pending_display_parts = []
         except UserInterruptedError:
             raise
         except Exception:
-            settle_partial(usage, (
-                "".join(text_parts), "".join(reasoning_parts), list(tool_call_map.values()),
-            ))
+            settle_partial(reply.partial_charge())
             raise
         finally:
             if thinking_open:
@@ -1477,23 +1029,7 @@ You are now live. Await instructions and begin the loop.""",
                 with suppress(Exception):
                     await self._close_stream(stream)
 
-        tool_calls: list[dict[str, Any]] = []
-        for index, entry in sorted(tool_call_map.items(), key=lambda item: item[0]):
-            tc_id = entry.get("id")
-            if not tc_id:
-                entry["id"] = f"stream-call-{index}"
-            if not entry["function"]["name"]:
-                entry["function"]["name"] = "unknown_tool"
-            tool_calls.append(entry)
-
-        return {
-            "content": "".join(text_parts),
-            "reasoning": "".join(reasoning_parts),
-            "finish_reason": finish_reason or "stop",
-            "tool_calls": tool_calls,
-            "stream_rendered": rendered_any and not self.silent,
-            "usage": usage,
-        }
+        return reply.finish(), rendered_any and not self.silent
 
     async def _create_message_with_interrupt(
         self,
@@ -1559,7 +1095,8 @@ You are now live. Await instructions and begin the loop.""",
         trim_history: bool = True,
         assistant_message_id: str | None = None,
         parent_user_message_id: str | None = None,
-    ) -> Any:
+        fallback: ReplyFallback = "missing_message",
+    ) -> ModelReply:
         async with model_attempt(
             budget, self.config.llm, messages, system, tools,
             max_tokens=max_tokens, trim_history=trim_history, reserve_output=True,
@@ -1570,14 +1107,9 @@ You are now live. Await instructions and begin the loop.""",
                     interrupt_queue=interrupt_queue,
                     reasoning_effort=reasoning_effort,
                 )
-            choice = self._first_choice(response)
-            payload = self._field(choice, "message") or response
-            attempt.settle(self._field(response, "usage"), (
-                self._extract_stream_text(payload),
-                self._extract_reasoning_text(payload),
-                self._extract_tool_calls(payload),
-            ))
-        return response
+            reply = decode_reply(response, fallback=fallback)
+            attempt.settle(reply.charge)
+        return reply
 
     async def _review_tool_permission(self, brief: str) -> ReviewDecision:
         system = (
@@ -1591,16 +1123,15 @@ You are now live. Await instructions and begin the loop.""",
         if budget is None:
             return "ask"
         try:
-            response = await self._budgeted_message(
+            reply = await self._budgeted_message(
                 budget, [{"role": "user", "content": brief}], system, None,
-                interrupt_queue=None, max_tokens=128,
+                interrupt_queue=None, max_tokens=128, fallback="never",
             )
         except RuntimeBudgetExceeded:
             raise
         except Exception:
             return "ask"
-        payload = self._field(self._first_choice(response), "message")
-        return parse_review(self._extract_stream_text(payload))
+        return parse_review(reply.content)
 
     async def _observe_tool_permission(
         self, request: ToolApprovalRequest, approved: bool, source: ApprovalSource,
@@ -1876,10 +1407,10 @@ You are now live. Await instructions and begin the loop.""",
 
         artifact_run = current_artifacts.get()
         memory_notes = ""
-        if isinstance(self.memory_workspace, FileMemoryWorkspace):
+        if self._memory.read_notes is not None:
             with suppress(OSError, ValueError):
                 async with budget.time_limit():
-                    notes = await asyncio.to_thread(self.memory_workspace.get_context_for_prompt)
+                    notes = await asyncio.to_thread(self._memory.read_notes)
                 if notes:
                     memory_notes = f"\n\n## File Memory Notes\n{notes}"
         memory_note_tokens = estimate_text_tokens(memory_notes)
@@ -1893,15 +1424,10 @@ You are now live. Await instructions and begin the loop.""",
                 available_tokens = self.config.llm.max_context_tokens - self.config.llm.max_tokens - estimated_input
                 if memory_note_tokens <= available_tokens:
                     system += memory_notes
-            content = ""
-            reasoning = ""
-            finish_reason = "stop"
-            tool_calls: list[Any] = []
+            reply: ModelReply | None = None
             stream_rendered = False
-            stream_success = False
             compaction_context_usage: dict[str, int] | None = None
 
-            usage = None
             assistant_message_id = self._new_message_id()
             parent_user_message_id = self._latest_user_message_id(messages)
             max_context_tokens = int(self.config.llm.max_context_tokens)
@@ -1911,7 +1437,7 @@ You are now live. Await instructions and begin the loop.""",
                 try:
                     async with model_attempt(budget, self.config.llm, messages, system, tools) as attempt:
                         async with self._model_generation(assistant_message_id, parent_user_message_id):
-                            stream_result = await attempt.dispatch(
+                            streamed_reply, rendered = await attempt.dispatch(
                                 self._create_message_stream_with_interrupt,
                                 settle_partial=attempt.settle,
                                 assistant_message_id=assistant_message_id,
@@ -1919,16 +1445,8 @@ You are now live. Await instructions and begin the loop.""",
                                 interrupt_queue=interrupt_queue,
                                 reasoning_effort=reasoning_effort,
                             )
-                        attempt.settle(stream_result["usage"], (
-                            stream_result["content"], stream_result["reasoning"], stream_result["tool_calls"],
-                        ))
-                    content = stream_result["content"]
-                    reasoning = stream_result.get("reasoning", "")
-                    finish_reason = stream_result["finish_reason"]
-                    tool_calls = stream_result["tool_calls"]
-                    stream_rendered = bool(stream_result["stream_rendered"])
-                    usage = stream_result.get("usage")
-                    stream_success = True
+                        attempt.settle(streamed_reply.charge)
+                    reply, stream_rendered = streamed_reply, rendered
                 except (UserInterruptedError, RuntimeBudgetExceeded, ContextWindowExceeded):
                     raise
                 except Exception as exc:
@@ -1943,14 +1461,14 @@ You are now live. Await instructions and begin the loop.""",
                     if self._ui_enabled():
                         print_system(f"Streaming unavailable, fell back to non-streaming: {exc}")
 
-            if not stream_success:
+            if reply is None:
                 status_ctx = (
                     status("[bright_black]Thinking…[/]")
                     if self.status_enabled and self._ui_enabled()
                     else nullcontext()
                 )
                 with status_ctx:
-                    response = await self._budgeted_message(
+                    reply = await self._budgeted_message(
                         budget, messages, system, tools,
                         interrupt_queue=interrupt_queue,
                         reasoning_effort=reasoning_effort,
@@ -1958,18 +1476,11 @@ You are now live. Await instructions and begin the loop.""",
                         parent_user_message_id=parent_user_message_id,
                     )
 
-                choice = self._first_choice(response)
-                assistant_message = self._field(choice, "message") if choice is not None else None
-                payload = assistant_message if assistant_message is not None else response
-                finish_reason_raw = self._field(choice, "finish_reason") if choice is not None else None
-                if finish_reason_raw is None:
-                    finish_reason_raw = self._field(response, "finish_reason") or self._field(response, "status")
-                finish_reason = str(finish_reason_raw or "stop")
-                content = self._extract_stream_text(payload)
-                reasoning = self._extract_reasoning_text(payload)
-                tool_calls = self._extract_tool_calls(payload)
-
-                usage = self._normalize_usage(self._field(response, "usage"))
+            content = reply.content
+            reasoning = reply.reasoning
+            finish_reason = reply.finish_reason
+            usage = reply.usage
+            tool_calls = reply.tool_calls
 
             if usage:
                 await self._emit(
@@ -2021,18 +1532,12 @@ You are now live. Await instructions and begin the loop.""",
                             else nullcontext()
                         )
                         with status_ctx:
-                            compaction_resp = await self._budgeted_message(
+                            compaction_reply = await self._budgeted_message(
                                 budget, messages, compaction_system, None,
-                                interrupt_queue=interrupt_queue, trim_history=False,
+                                interrupt_queue=interrupt_queue, trim_history=False, fallback="missing_choice",
                             )
-                        compaction_choice = self._first_choice(compaction_resp)
-                        compaction_payload = (
-                            self._field(compaction_choice, "message")
-                            if compaction_choice is not None
-                            else compaction_resp
-                        )
-                        summary = self._extract_stream_text(compaction_payload) or "Failed to summarize context."
-                        
+                        summary = compaction_reply.content or "Failed to summarize context."
+
                         # Replace history with compaction message, keeping only the final assistant/tool calls logic intact.
                         compaction_msg = {
                             "role": "assistant",
@@ -2047,17 +1552,7 @@ You are now live. Await instructions and begin the loop.""",
                         if reasoning:
                             assistant_preview["reasoning"] = reasoning
                         if tool_calls:
-                            assistant_preview["tool_calls"] = [
-                                {
-                                    "id": self._tool_call_id(tc) or f"tool-call-{i}",
-                                    "type": "function",
-                                    "function": {
-                                        "name": self._tool_call_name(tc),
-                                        "arguments": self._tool_call_arguments(tc),
-                                    },
-                                }
-                                for i, tc in enumerate(tool_calls, start=1)
-                            ]
+                            assistant_preview["tool_calls"] = [call.as_message() for call in tool_calls]
                         compaction_context_usage = self._estimate_context_usage([compaction_msg, assistant_preview])
                         compaction_msg["context_usage"] = dict(compaction_context_usage)
                         # We clear the existing message list safely and append the summary
@@ -2103,10 +1598,7 @@ You are now live. Await instructions and begin the loop.""",
                         if self._ui_enabled():
                             print_system(f"Warning: Context compaction failed: {e}")
 
-            calls = [
-                (self._tool_call_id(tc) or f"tool-call-{i}", self._tool_call_name(tc), self._tool_call_arguments(tc))
-                for i, tc in enumerate(tool_calls, start=1)
-            ]
+            calls = [(call.id, call.name, call.arguments) for call in tool_calls]
             tool_call_summaries = [
                 {"id": call_id, "name": name, "arguments": arguments}
                 for call_id, name, arguments in calls if not self._is_ask_user_tool(name)
